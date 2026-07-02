@@ -15,6 +15,13 @@ class PathNotAllowedError(PermissionError):
     pass
 
 
+class PermissionRequiredError(PathNotAllowedError):
+    def __init__(self, path: str, operation: str):
+        self.path = path
+        self.operation = operation
+        super().__init__(f"Access to '{path}' needs {operation} permission")
+
+
 class CommandNotAllowedError(PermissionError):
     pass
 
@@ -44,21 +51,34 @@ class SecurityValidator:
                 return pattern
         return None
 
-    def resolve_and_validate(self, raw_path: str) -> Path:
+    def resolve_and_validate(self, raw_path: str, operation: str = "read") -> Path:
         given = Path(raw_path)
         if not given.is_absolute():
             raise PathNotAllowedError(f"Path must be absolute: {raw_path}")
         resolved = given.resolve()
 
-        # Deny always wins over allow, so check it first regardless of allowlist membership.
+        # Deny always wins, even over session/permanent grants.
         denied = self._matched_deny_pattern(resolved)
         if denied:
             raise PathNotAllowedError(f"Path denied by pattern '{denied}': {resolved}")
 
+        # Check static allowlist: MUST be inside paths_allow or data_dir
         allowed = self._resolve_allowed()
-        if not any(self._is_subpath(resolved, allow) for allow in allowed):
+        in_allowed_paths = any(self._is_subpath(resolved, allow) for allow in allowed)
+        in_data_dir = self._is_subpath(resolved, Path(self.config.data_dir).resolve())
+
+        if not (in_allowed_paths or in_data_dir):
             raise PathNotAllowedError(f"Path not in allowed directories: {resolved}")
-        return resolved
+
+        # If inside data_dir, always allow without tickets (internal state)
+        if in_data_dir:
+            return resolved
+
+        # Otherwise, inside paths_allow. MUST check if explicit grant exists (via perm_manager)
+        if self.perm_manager and self.perm_manager.check_granted(str(resolved), operation):
+            return resolved
+
+        raise PermissionRequiredError(str(resolved), operation)
 
     def validate_command(self, command: str) -> str:
         allowed, reason = self.config.security.commands.is_command_allowed(command)
@@ -82,12 +102,15 @@ class SecurityValidator:
     def validate_tool_path(self, raw_path: str, operation: str = "read") -> Optional[str]:
         """Validate a path for a tool call.
 
-        Returns None when access is allowed (path is in paths_allow).
-        Returns an error string when access is denied (no ticket flow).
+        Returns None when access is allowed.
+        Returns a ticket JSON string if access needs approval.
+        Returns an error string when access is strictly denied.
         """
         try:
-            self.resolve_and_validate(raw_path)
+            self.resolve_and_validate(raw_path, operation)
             return None
+        except PermissionRequiredError as e:
+            return self.request_permission(e.path, e.operation)
         except PathNotAllowedError as e:
             return f"Access denied: {e}"
 

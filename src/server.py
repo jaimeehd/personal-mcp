@@ -4,6 +4,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import asyncio
+import os
 import time
 import json
 from collections import deque
@@ -15,6 +16,7 @@ from src.config import AppConfig
 from src.security import SecurityValidator
 from src.audit import AuditLog
 from src.permissions import PermissionManager
+from src.log import configure as configure_logging, get_logger
 from src.layers.layer1_filesystem import register_filesystem_tools
 from src.layers.layer2_shell import ShellManager, register_shell_tools
 from src.layers.layer3_ssh import SSHManager, register_ssh_tools
@@ -31,6 +33,10 @@ class RateLimitError(Exception):
 def create_app() -> FastMCP:
     config = AppConfig.load()
     config.data_dir = str(Path.home() / ".personal-mcp" / "data")
+
+    configure_logging(config.data_dir, config.log.level, config.log.max_bytes, config.log.backup_count)
+    logger = get_logger()
+    logger.info("Server starting  data_dir=%s pid=%d", config.data_dir, os.getpid())
 
     security = SecurityValidator(config)
     perm_manager = PermissionManager(config)
@@ -54,16 +60,30 @@ def create_app() -> FastMCP:
             _rate_limiter.popleft()
         limit = config.security.rate_limit_commands_per_minute
         if len(_rate_limiter) >= limit:
+            logger.warning("RATE_LIMIT %s exceeded", name)
             raise RateLimitError(f"Rate limit exceeded: {limit} commands per minute")
         _rate_limiter.append(now)
 
+        # Sanitización de argumentos antes de loguear
+        from src.log import scrub_sensitive_data
+        sanitized_args = scrub_sensitive_data(arguments)
+        log_args = {k: v for k, v in sanitized_args.items() if k != "content"}
+        
+        logger.info("CALL %s %s", name, json.dumps(log_args))
         start = time.time()
         try:
             result = await original_call_tool(name, arguments, *args, **kwargs)
-            audit_log.record(name, arguments, True, (time.time() - start) * 1000)
+            elapsed = (time.time() - start) * 1000
+            if elapsed > 30_000:
+                logger.warning("SLOW %s %.0fms", name, elapsed)
+            else:
+                logger.info("OK   %s %.0fms", name, elapsed)
+            audit_log.record(name, arguments, True, elapsed)
             return result
         except Exception as e:
-            audit_log.record(name, arguments, False, (time.time() - start) * 1000, str(e))
+            elapsed = (time.time() - start) * 1000
+            logger.error("FAIL %s %.0fms %s", name, elapsed, str(e))
+            audit_log.record(name, arguments, False, elapsed, str(e))
             raise
 
     app.call_tool = wrapped_call_tool

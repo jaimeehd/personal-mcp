@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.permissions import PermissionManager, GrantLevel, PermissionTicket
 from src.config import AppConfig, SecurityConfig
+from src.security import SecurityValidator
 
 
 @pytest.fixture
@@ -21,6 +22,15 @@ def perm(temp_home):
         config_path=str(temp_home / ".personal-mcp" / "config.json"),
     )
     return PermissionManager(config)
+
+
+@pytest.fixture
+def wired_perm(test_config):
+    """Return a (perm_manager, security) tuple wired together."""
+    pm = PermissionManager(test_config)
+    sec = SecurityValidator(test_config)
+    sec.perm_manager = pm
+    return pm, sec
 
 
 def test_ticket_create(perm):
@@ -142,3 +152,69 @@ def test_grant_level_enum_values():
     assert GrantLevel.SINGLE.value == "single"
     assert GrantLevel.SESSION.value == "session"
     assert GrantLevel.PERMANENT.value == "permanent"
+
+
+def test_session_grant_validates(wired_perm):
+    """Session grant makes validate_tool_path allow the path."""
+    pm, security = wired_perm
+    pm.grant_direct("C:\\Temp\\granted.txt", "read", GrantLevel.SESSION)
+    err = security.validate_tool_path("C:\\Temp\\granted.txt", "read")
+    assert err is None, f"Expected None (allowed), got: {err}"
+
+
+def test_single_grant_consumed(wired_perm):
+    """Single grant is consumed on first use; second access is denied."""
+    pm, security = wired_perm
+    pm.grant_direct("C:\\Temp\\single.txt", "read", GrantLevel.SINGLE)
+    # First use — allowed
+    assert security.validate_tool_path("C:\\Temp\\single.txt", "read") is None
+    # Second use — consumed
+    err = security.validate_tool_path("C:\\Temp\\single.txt", "read")
+    assert err is not None
+    assert "Access denied" in err
+
+
+def test_single_grant_wildcard_consumed(wired_perm):
+    """Single grant with wildcard operation (real path from fs_request_allow)."""
+    pm, security = wired_perm
+    pm.grant_direct("C:\\Temp\\wild.txt", "*", GrantLevel.SINGLE)
+    # First use — allowed (matches via wildcard "*")
+    assert security.validate_tool_path("C:\\Temp\\wild.txt", "read") is None
+    # Second use — consumed
+    err = security.validate_tool_path("C:\\Temp\\wild.txt", "read")
+    assert err is not None
+    assert "Access denied" in err
+
+
+def test_deny_still_wins_over_grant(wired_perm):
+    """Deny pattern overrides any grant level."""
+    pm, security = wired_perm
+    # Grant session access to a path inside a deny pattern
+    pm.grant_direct("C:\\Repos\\project\\node_modules\\lib\\index.js", "read", GrantLevel.SESSION)
+    err = security.validate_tool_path("C:\\Repos\\project\\node_modules\\lib\\index.js", "read")
+    assert err is not None
+    assert "Access denied" in err
+
+
+def test_permanent_grant_unaffected(perm, temp_home):
+    """Permanent grant still adds to paths_allow (regression check)."""
+    rsrc = str(temp_home / "permanent_test.txt")
+    perm.grant_direct(rsrc, "read", GrantLevel.PERMANENT)
+    assert rsrc in perm.config.security.paths_allow
+
+
+def test_validate_tool_path_with_perm_manager(wired_perm):
+    """validate_tool_path respects session grants via perm_manager."""
+    pm, security = wired_perm
+    pm.grant_direct("C:\\Temp\\pm_test.txt", "write", GrantLevel.SESSION)
+    assert security.validate_tool_path("C:\\Temp\\pm_test.txt", "write") is None
+    # Wrong operation should not be granted
+    err = security.validate_tool_path("C:\\Temp\\pm_test.txt", "read")
+    assert err is not None
+
+
+def test_check_granted_safety_net(perm):
+    """check_granted does not crash on malformed _single_grants data."""
+    resolved = perm._resolve("C:\\Temp\\corrupt.txt")
+    perm._single_grants[resolved] = None
+    assert perm.check_granted("C:\\Temp\\corrupt.txt", "read") is False

@@ -9,6 +9,9 @@ from mcp.server.fastmcp import FastMCP
 
 from src.security import SecurityValidator
 from src.shell_resolver import ShellInfo, resolve_shell
+from src.log import get_logger
+
+logger = get_logger("layer2_shell")
 
 MAX_CAPTURE_BYTES: int = 1_048_576
 
@@ -22,6 +25,7 @@ def _truncate(output: str, max_bytes: int = MAX_CAPTURE_BYTES) -> tuple[str, boo
 
 
 async def _kill_process_tree(pid: int) -> None:
+    logger.warning("kill_process_tree pid=%d", pid)
     try:
         proc = await asyncio.create_subprocess_exec(
             "taskkill", "/pid", str(pid), "/T", "/F",
@@ -88,6 +92,7 @@ class ShellSession:
             return "Session not started"
         self.command_count += 1
         self.last_activity = time.time()
+        logger.debug("session_send id=%s command=%.100s", self.session_id, command)
         lines: List[str] = []
         self._process.stdin.write(f"{command}\n".encode("utf-8"))
         await self._process.stdin.drain()
@@ -214,6 +219,7 @@ async def sh_exec_impl(command: str, security: SecurityValidator, timeout: int =
                        working_dir: Optional[str] = None,
                        shell_info: Optional[ShellInfo] = None) -> str:
     security.validate_command(command)
+    logger.info("sh_exec command=%.200s shell=%s timeout=%d", command, shell_info.name if shell_info else "default", timeout)
     si = shell_info or ShellInfo(name="powershell", executable="powershell.exe",
                                   command_args=["-NoProfile", "-Command"],
                                   session_args=[], script_args=[],
@@ -300,6 +306,7 @@ async def sh_script_impl(script: str, security: SecurityValidator, timeout: int 
                          working_dir: Optional[str] = None,
                          shell_info: Optional[ShellInfo] = None) -> str:
     security.validate_command(script[:100])
+    logger.info("sh_script script=%.100s shell=%s timeout=%d", script, shell_info.name if shell_info else "default", timeout)
     si = shell_info or ShellInfo(name="powershell", executable="powershell.exe",
                                   command_args=[], session_args=[],
                                   script_args=["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"],

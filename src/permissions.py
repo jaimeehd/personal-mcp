@@ -50,6 +50,7 @@ class PermissionManager:
         self.config = config
         self._tickets: Dict[str, PermissionTicket] = {}
         self._session_grants: Dict[str, Set[str]] = {}
+        self._single_grants: Dict[str, Dict[str, int]] = {}
 
     def request(self, resource: str, operation: str,
                 level: GrantLevel = GrantLevel.SINGLE) -> PermissionTicket:
@@ -81,6 +82,10 @@ class PermissionManager:
             resolved = self._resolve(ticket.resource)
             ops = self._session_grants.setdefault(resolved, set())
             ops.add(ticket.operation)
+        elif grant_level == GrantLevel.SINGLE:
+            resolved = self._resolve(ticket.resource)
+            ops = self._single_grants.setdefault(resolved, {})
+            ops[ticket.operation] = 1
         elif grant_level == GrantLevel.PERMANENT:
             self._add_permanent_grant(self._resolve(ticket.resource))
 
@@ -105,31 +110,54 @@ class PermissionManager:
         if level == GrantLevel.SESSION:
             ops = self._session_grants.setdefault(resolved, set())
             ops.add(operation)
+        elif level == GrantLevel.SINGLE:
+            ops = self._single_grants.setdefault(resolved, {})
+            ops[operation] = 1
         elif level == GrantLevel.PERMANENT:
             self._add_permanent_grant(resolved)
         return ticket
 
-    def check_granted(self, resource: str, operation: str) -> bool:
+    def check_granted(self, resource: str, operation: str, consume: bool = True) -> bool:
         resolved = self._resolve(resource)
         # A deny pattern always wins, even over an existing session/permanent grant
         # or a resource that happens to live under data_dir/paths_allow.
         for pattern in self.config.security.paths_deny:
             if fnmatch.fnmatch(resolved, pattern) or fnmatch.fnmatch(resolved, pattern.replace("\\", "\\\\")):
                 return False
-        if resolved in self._session_grants:
-            if operation in self._session_grants[resolved] or "*" in self._session_grants[resolved]:
-                return True
+        # Recursive check for session grants
+        current = Path(resolved)
+        while True:
+            res_str = str(current)
+            if res_str in self._session_grants:
+                ops = self._session_grants[res_str]
+                if operation in ops or "*" in ops:
+                    return True
+            if current == current.parent:
+                break
+            current = current.parent
+        # Single grant: consumed on first use
+        if resolved in self._single_grants:
+            try:
+                ops = self._single_grants[resolved]
+                if operation in ops or "*" in ops:
+                    if not consume:
+                        return True
+                    actual_op = operation if operation in ops else "*"
+                    remaining = ops[actual_op] - 1
+                    if remaining <= 0:
+                        del ops[actual_op]
+                        if not ops:
+                            del self._single_grants[resolved]
+                    else:
+                        ops[actual_op] = remaining
+                    return True
+            except Exception:
+                return False
         try:
             Path(resolved).relative_to(Path(self.config.data_dir).resolve())
             return True
         except ValueError:
             pass
-        for allowed in self.config.security.paths_allow:
-            try:
-                Path(resolved).relative_to(Path(allowed).resolve())
-                return True
-            except (ValueError, OSError):
-                continue
         return False
 
     def pending(self) -> List[dict]:
@@ -142,8 +170,14 @@ class PermissionManager:
 
     def revoke(self, resource: str) -> bool:
         resolved = self._resolve(resource)
+        found = False
         if resolved in self._session_grants:
             del self._session_grants[resolved]
+            found = True
+        if resolved in self._single_grants:
+            del self._single_grants[resolved]
+            found = True
+        if found:
             for ticket in self._tickets.values():
                 if ticket.resource == resource and ticket.status == "approved":
                     ticket.status = "revoked"
@@ -155,7 +189,9 @@ class PermissionManager:
         if not ticket:
             return False, f"Ticket not found: {ticket_id}"
         ticket.status = "revoked"
-        self._session_grants.pop(self._resolve(ticket.resource), None)
+        resolved = self._resolve(ticket.resource)
+        self._session_grants.pop(resolved, None)
+        self._single_grants.pop(resolved, None)
         return True, f"Revoked: {ticket.resource}"
 
     def _add_permanent_grant(self, resource: str) -> None:

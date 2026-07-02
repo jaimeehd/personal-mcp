@@ -14,14 +14,20 @@ from typing import List, Optional
 from mcp.server.fastmcp import FastMCP
 
 from src.security import SecurityValidator
+from src.log import get_logger, timed
+
+logger = get_logger("layer1_filesystem")
 
 async def fs_read_impl(path: str, security: SecurityValidator, encoding: str = "utf-8",
                        max_size_mb: int = 0) -> str:
     rpath = security.resolve_and_validate(path)
     exists = await asyncio.to_thread(rpath.is_file)
     if not exists:
+        logger.info("fs_read not_found path=%s", path)
         return f"Error: not a file or does not exist: {rpath}"
     size = await asyncio.to_thread(lambda: rpath.stat().st_size)
+    if size > 10 * 1024 * 1024:
+        logger.warning("fs_read large_file path=%s size=%d", path, size)
     if max_size_mb and size > max_size_mb * 1024 * 1024:
         return f"Error: file too large ({size / 1024 / 1024:.1f}MB). Max: {max_size_mb}MB"
     try:
@@ -43,8 +49,11 @@ async def fs_write_impl(path: str, content: str, security: SecurityValidator, en
     size_bytes = len(content.encode(encoding))
     if max_size_mb and size_bytes > max_size_mb * 1024 * 1024:
         return f"Error: content too large ({size_bytes / 1024 / 1024:.1f}MB). Max: {max_size_mb}MB"
-    await asyncio.to_thread(rpath.parent.mkdir, parents=True, exist_ok=True)
-    await asyncio.to_thread(rpath.write_text, content, encoding=encoding)
+    logger.info("fs_write path=%s size=%d", str(rpath), size_bytes)
+    with timed("mkdir", path=str(rpath.parent)):
+        await asyncio.to_thread(rpath.parent.mkdir, parents=True, exist_ok=True)
+    with timed("write_text", path=str(rpath), size=size_bytes):
+        await asyncio.to_thread(rpath.write_text, content, encoding=encoding)
     return f"Written {len(content)} chars ({size_bytes:,} bytes) to {rpath}"
 
 
@@ -246,6 +255,7 @@ async def fs_batch_impl(path: str, operation: str, target: str, security: Securi
     else:
         files = [f for f in rpath.iterdir() if f.is_file()]
     security.validate_file_count(len(files))
+    logger.info("fs_batch path=%s operation=%s files=%d dry_run=%s", path, operation, len(files), dry_run)
     target_path = Path(target)
     if operation in ("copy", "move"):
         security.resolve_and_validate(str(target_path))

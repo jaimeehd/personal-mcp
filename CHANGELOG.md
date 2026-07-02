@@ -1,6 +1,27 @@
 # Changelog
 
+## [1.4.0] — 2026-07-01
+
+### Added
+- **Structured Logging System** (`src/log.py`): New logging infrastructure with `RotatingFileHandler`, log levels (INFO, DEBUG, WARN, ERROR), and precise operation timing using `timed()` context manager.
+- **Sensitive Data Sanitization**: Recursive scrubbing of sensitive keys (`password`, `token`, `secret`, etc.) in all server logs to prevent information leakage.
+- **Interactive Path Configurator** (`configure_paths.py`): CLI utility to manage `paths_allow` without manual JSON editing.
+- **Configuration Template**: `config.demo.json` added as a secure reference for new users.
+
+### Changed
+- **Hard-Lock Security Model**: 
+  - **Absolute Path Lockdown**: Paths outside `paths_allow` or `data_dir` are now strictly denied immediately. No dynamic tickets can bypass this lock.
+  - **Strict Command Whitelist**: Replaced the blocklist model with a mandatory whitelist (`allow_prefix`). Only explicitly approved command prefixes (e.g., `git`, `npm`, `python`) can be executed.
+- **Human-in-the-Loop (HITL) Enforcement**: All read, write, and execute operations now require explicit user approval via tickets, regardless of whether the path is in the allowlist.
+- **Recursive Session Grants**: `PermissionManager` now supports recursive session grants; approving a directory allows access to all its sub-paths for the duration of the session.
+- **Productivity Pack**: Expanded default command whitelist to include essential dev tools: `uv`, `make`, `docker`, `mkdir`, `rmdir`, `cat`, `type`.
+
+### Fixed
+- **Single Grant Consumption Bug**: Fixed a race condition where `SINGLE` grants were consumed during the validation phase before the tool could execute.
+- **Path normalization consistency**: Improved path resolution in `PermissionManager` to prevent casing mismatches on Windows.
+
 ## [1.3.0] — 2026-07-01
+... (rest of the file)
 
 ### Added
 - **Shell resolver module** (`src/shell_resolver.py`): `ShellInfo` dataclass, `SHELL_REGISTRY` with 4 shells (powershell, pwsh, cmd, bash), `resolve_shell()` with auto-detection. Git Bash discovery via `git --exec-path` or `OPENCODE_GIT_BASH_PATH` env var.

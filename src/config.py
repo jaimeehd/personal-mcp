@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 
 class CommandPolicy(BaseModel):
-    allow_prefix: List[str] = Field(default_factory=list)
+    allow_prefix: List[str] = Field(default_factory=lambda: ["git", "npm", "python", "ls", "pytest", "echo"])
     deny: List[str] = Field(default_factory=lambda: [
         "shutdown", "reboot", "restart-computer", "stop-computer",
         "format", "format-volume", "reg delete", "net user",
@@ -23,10 +23,12 @@ class CommandPolicy(BaseModel):
         for denied in self.deny:
             if re.search(r'\b' + re.escape(denied) + r'\b', cmd_lower):
                 return False, f"Command denied: '{denied}' is in the deny list"
-        if self.allow_prefix:
-            first_word = cmd_lower.split()[0] if cmd_lower.split() else ""
-            if not any(first_word == allowed.lower() for allowed in self.allow_prefix):
-                return False, f"Command prefix '{first_word}' not in allow list"
+        if not self.allow_prefix:
+            return False, "Command blocked: No allowed command prefixes configured"
+        first_word = cmd_lower.split()[0] if cmd_lower.split() else ""
+        first_word_clean = Path(first_word).stem.lower()
+        if not any(first_word_clean == allowed.lower() for allowed in self.allow_prefix):
+            return False, f"Command '{first_word}' is not in the allowed command whitelist"
         for flag in self.require_flag_approval:
             if re.search(r'(?<!\w)' + re.escape(flag.lower()) + r'(?!\w)', cmd_lower):
                 return False, f"Flag '{flag}' requires explicit approval"
@@ -61,6 +63,12 @@ class SSHConfig(BaseModel):
     enabled: bool = False
 
 
+class LogConfig(BaseModel):
+    level: str = "INFO"
+    max_bytes: int = 10 * 1024 * 1024
+    backup_count: int = 3
+
+
 class JournalConfig(BaseModel):
     enabled: bool = True
     path: str = Field(default_factory=lambda: str(Path.home() / ".personal-mcp" / "data" / "journal"))
@@ -70,6 +78,7 @@ class AppConfig(BaseModel):
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     shell: ShellConfig = Field(default_factory=ShellConfig)
     ssh: SSHConfig = Field(default_factory=SSHConfig)
+    log: LogConfig = Field(default_factory=LogConfig)
     journal: JournalConfig = Field(default_factory=JournalConfig)
     audit_max_entries: int = 10000
     data_dir: str = Field(default_factory=lambda: str(Path.home() / ".personal-mcp" / "data"))

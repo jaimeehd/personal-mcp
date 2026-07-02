@@ -1,6 +1,6 @@
 # personal-mcp
 
-Custom MCP server for Windows workstation orchestration. Blocklist-based security, fully async I/O, persistent PowerShell sessions.
+Custom MCP server for Windows workstation orchestration. High-security "Human-in-the-Loop" (HITL) model, fully async I/O, persistent PowerShell sessions.
 
 ## Architecture
 
@@ -87,20 +87,16 @@ Layer 2: Shell — 9 tools (exec, persistent sessions, script execution, history
 
 ## Security
 
-- **Blocklist command model**: Any command not in `security.commands.deny` is allowed. No allowlist prefix restriction by default. Destructive commands (`shutdown`, `format`, `rm -rf`) and dangerous flags (`-force`, `/f`) are blocked.
-- **Path allowlist**: Only paths in `security.paths_allow` can be read/written. Paths outside return a clear error string — no permission prompts on the hot path.
+- **Human-in-the-Loop (HITL)**: No file operation (read, write, edit) or shell execution is performed without explicit user approval. The server generates a permission ticket, and the user must approve it via `fs_approve` before the action is executed.
+- **Strict Path Hard-Lock**: Only paths defined in `security.paths_allow` (and internal `data_dir`) are accessible. Any attempt to access paths outside this list is immediately denied with a hard error—no dynamic requests are permitted for external paths.
+- **Command Whitelist**: Shell execution is restricted to a strict whitelist of approved command prefixes (e.g., `git`, `npm`, `python`, `ls`). Commands not in the whitelist are blocked.
+- **Recursive Session Grants**: Approving a directory for a session (`level='session'`) automatically grants access to all its sub-directories and files, reducing approval friction for complex projects.
 - **Path denylist**: Paths matching `security.paths_deny` patterns (e.g. `**\node_modules\**`, `**\.git\**`) are blocked even if they're under an allowed directory.
-- **`validate_tool_path()`**: All layer 1/2 tools validate paths through this method. If the path is not in `paths_allow`, an error string is returned immediately. No tickets, no prompts.
-- **Permission tickets (Layer 6)**: Available for explicit user-driven approval flows. When you want to grant access to a path outside the allowlist, the AI can call `fs_request_allow` to create a ticket, and you approve via `fs_approve`. Three grant levels:
-  - `single` — one-time use
-  - `session` — lasts until server restart
-  - `permanent` — added to `paths_allow` in config
-- **`working_dir` restriction**: `sh_exec` and `sh_script` accept an optional `working_dir` parameter; validated against the path allowlist.
-- **Absolute path scanning**: Shell commands are scanned for absolute paths (e.g. `C:\...`, `C:/...`); paths outside the allowlist return an error. Advisory warnings are also produced for external paths (non-blocking).
+- **`validate_tool_path()`**: All layer 1/2 tools validate paths through this method. If a path is in `paths_allow` but lacks a grant, a `permission_required` JSON payload is returned for user approval.
 - **Output truncation**: All shell output is capped at 1 MiB to prevent memory issues. Truncated output is flagged with a notice.
 - **Process tree cleanup**: Timed-out commands use `taskkill /T /F` to recursively terminate all child processes.
 - **Rate limits**: Commands/min and files/operation limits.
-- **Audit trail**: Every operation logged (circular buffer, 10k entries).
+- **Audit trail**: Every operation logged (circular buffer, 10k entries) with sensitive data automatically scrubbed.
 
 ## Shell Configuration
 
@@ -151,11 +147,17 @@ This will:
 
 ## Configuration
 
-Edit `~/.personal-mcp/config.json` to customize:
+Edit `~/.personal-mcp/config.json` to customize. A read-only mirror of this
+file is kept at the repo root (`config.json`) for convenience — run
+`sync-config.ps1` to refresh it from the official copy. See
+[`CONFIG-GUIA.md`](CONFIG-GUIA.md) for a plain-language, non-technical
+explanation of every field (in Spanish).
+
+- **Interactive Setup**: Use `python configure_paths.py` to manage your allowed directories without editing the JSON manually.
+- **Example Config**: See `config.demo.json` for a secure, productivity-optimized template.
 - `security.paths_allow`: Accessible directories (default: `~/Repos`, `~/Desktop`, `~/OneDrive`, `~/.personal-mcp`)
 - `security.paths_deny`: Blocked path patterns (default: `**\node_modules\**`, `**\.git\**`, `**\bin\**`, `**\obj\**`, `~/AppData`)
-- `security.commands.deny`: Blocked command prefixes (default: `shutdown`, `format`, `rm -rf`, etc.)
-- `security.commands.allow_prefix`: If non-empty, only these command prefixes are allowed (overrides blocklist)
+- `security.commands.allow_prefix`: Mandatory whitelist of permitted command prefixes (e.g. `git`, `npm`, `python`).
 - `security.rate_limit_commands_per_minute`: Max commands per minute (default: 60)
 - `shell.session_timeout_seconds`: Session idle timeout (default: 600)
 - `ssh.enabled`: Set `true` to enable SSH layer (requires ~/.ssh/config)
@@ -163,7 +165,7 @@ Edit `~/.personal-mcp/config.json` to customize:
 ## Development
 
 ```bash
-.\.venv\Scripts\python -m pytest tests/ -v      # 105 tests (all pass)
-.\.venv\Scripts\python -m src.server             # stdio mode
+.\.venv\Scripts\python -m pytest tests/ -v      # 121 tests (all pass)
+.\.venv\ modifying .venv\Scripts\python -m src.server             # stdio mode
 .\install.ps1                    # register with Claude Desktop (auto-creates venv)
 ```

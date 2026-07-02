@@ -140,15 +140,16 @@ function Register-ClaudeInstance {
     if (Test-Path $ConfigPath) {
         try {
             $claudeConfig = Get-Content $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
-            if (-not $claudeConfig.mcpServers) {
-                $claudeConfig | Add-Member -NotePropertyName "mcpServers" -NotePropertyValue @{}
-            }
         } catch {
             Write-Host "    WARN: Could not parse, creating new one..." -ForegroundColor Yellow
-            $claudeConfig = @{ mcpServers = @{} }
+            $claudeConfig = [PSCustomObject]@{}
         }
     } else {
-        $claudeConfig = @{ mcpServers = @{} }
+        $claudeConfig = [PSCustomObject]@{}
+    }
+    # Ensure mcpServers exists at top level (new Claude Desktop format)
+    if (-not $claudeConfig.mcpServers) {
+        $claudeConfig | Add-Member -NotePropertyName "mcpServers" -NotePropertyValue ([PSCustomObject]@{}) -Force
     }
     $claudeConfig.mcpServers | Add-Member -NotePropertyName "personal-mcp" -NotePropertyValue $serverEntry -Force
     [System.IO.File]::WriteAllText($ConfigPath, ($claudeConfig | ConvertTo-Json -Depth 10), [System.Text.UTF8Encoding]::new($false))

@@ -184,3 +184,13 @@ def register_health_tools(mcp: FastMCP, config: AppConfig,
         except Exception as e:
             results["audit_record"] = f"error: {e}"
         return json.dumps(results, indent=2, ensure_ascii=False)
+
+    @mcp.tool()
+    async def mcp_log(lines: int = 50, level: str = "INFO") -> str:
+        log_path = Path(config.data_dir) / "server.log"
+        if not log_path.exists():
+            return "No log file found"
+        content = log_path.read_text(encoding="utf-8", errors="replace")
+        level_prefix = level[0]
+        filtered = [l for l in content.splitlines() if f"[{level_prefix}" in l]
+        return "\n".join(filtered[-lines:])

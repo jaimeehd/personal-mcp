@@ -16,10 +16,11 @@ def register_permission_tools(mcp: FastMCP, security: SecurityValidator,
         try:
             gl = GrantLevel(level)
         except ValueError:
-            return f"Invalid level '{level}'. Use: single, session, permanent"
+            return f"Invalid level '{level}'. Use: single, session"
+        if gl == GrantLevel.PERMANENT:
+            return ("Permanent grants are disabled from tool calls. "
+                    "Edit ~/.personal-mcp/config.json directly to add paths.")
         ok, msg = perm_manager.approve(ticket_id, gl)
-        if ok and gl == GrantLevel.PERMANENT:
-            security.clear_cache()
         return msg
 
     @mcp.tool()
@@ -32,11 +33,13 @@ def register_permission_tools(mcp: FastMCP, security: SecurityValidator,
         try:
             gl = GrantLevel(level)
         except ValueError:
-            return f"Invalid level '{level}'. Use: single, session, permanent"
-        ticket = perm_manager.grant_direct(path, operation="*", level=gl)
+            return f"Invalid level '{level}'. Use: single, session"
         if gl == GrantLevel.PERMANENT:
-            security.clear_cache()
-        return f"Granted {gl.value} access to '{path}' (ticket: {ticket.id})"
+            return ("Permanent grants are disabled from tool calls. "
+                    "Edit ~/.personal-mcp/config.json directly to add paths.")
+        ticket = perm_manager.request(path, operation="*", level=gl)
+        return (f"Ticket {ticket.id} created for '{path}' (pending). "
+                f"Use fs_approve(ticket_id='{ticket.id}', level='{gl.value}') to confirm.")
 
     @mcp.tool()
     async def security_pending() -> str:

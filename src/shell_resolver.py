@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -13,6 +14,85 @@ class ShellInfo:
     session_args: List[str] = field(default_factory=list)
     script_args: List[str] = field(default_factory=list)
     workdir_prefix: str = ""
+
+
+_SHELL_OPERATORS_RE = re.compile(r'[|;&<>`\n]|\$\(')
+
+
+def tokenize_command(command: str) -> List[str]:
+    """Split a command string into argv tokens, respecting single and double quotes."""
+    tokens: List[str] = []
+    current: List[str] = []
+    quote_char: Optional[str] = None
+    for c in command:
+        if quote_char:
+            if c == quote_char:
+                quote_char = None
+            else:
+                current.append(c)
+        elif c in ('"', "'"):
+            quote_char = c
+        elif c in (' ', '\t', '\n'):
+            if current:
+                tokens.append(''.join(current))
+                current = []
+        else:
+            current.append(c)
+    if current:
+        tokens.append(''.join(current))
+    return tokens
+
+
+def has_shell_operators(command: str) -> bool:
+    """Check if command contains shell operators outside quoted strings."""
+    stripped = re.sub(r'"[^"]*"', '', command)
+    stripped = re.sub(r"'[^']*'", '', stripped)
+    return bool(_SHELL_OPERATORS_RE.search(stripped))
+
+
+def split_command_segments(command: str) -> List[str]:
+    """Split a command string into segments on shell operators (| ; & < > ` $(), plus
+    newlines, ignoring operators found inside single/double-quoted sections.
+
+    Used to validate EVERY segment of a chained command (e.g. "git status; rm -rf /",
+    or "echo hi\\nWrite-Host injected") against the command whitelist independently —
+    the whole raw string is passed to a real shell whenever has_shell_operators() is
+    True, so each segment becomes an independently-executed command and must be
+    checked on its own. Newlines are included because PowerShell/cmd/bash all treat
+    them as statement separators just like ';', even though earlier versions of this
+    function did not split on them (see AGENTS.md security fix log).
+    """
+    segments: List[str] = []
+    current: List[str] = []
+    quote_char: Optional[str] = None
+    i = 0
+    while i < len(command):
+        c = command[i]
+        if quote_char:
+            current.append(c)
+            if c == quote_char:
+                quote_char = None
+            i += 1
+            continue
+        if c in ('"', "'"):
+            quote_char = c
+            current.append(c)
+            i += 1
+            continue
+        if c == '$' and command[i:i + 2] == '$(':
+            segments.append(''.join(current))
+            current = []
+            i += 2
+            continue
+        if c in '|;&<>`\n':
+            segments.append(''.join(current))
+            current = []
+            i += 1
+            continue
+        current.append(c)
+        i += 1
+    segments.append(''.join(current))
+    return [s.strip() for s in segments if s.strip()]
 
 
 SHELL_REGISTRY: Dict[str, ShellInfo] = {

@@ -2,8 +2,10 @@ import fnmatch
 import json
 import os
 import re
+import time
+from collections import deque
 from pathlib import Path
-from typing import List, Optional, TYPE_CHECKING
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 from src.config import AppConfig
 
@@ -26,11 +28,31 @@ class CommandNotAllowedError(PermissionError):
     pass
 
 
+class RateLimitError(Exception):
+    pass
+
+
 class SecurityValidator:
     def __init__(self, config: AppConfig):
         self.config = config
         self._resolved_allowed: Optional[List[Path]] = None
         self.perm_manager: Optional["PermissionManager"] = None
+        self._rate_limiters: Dict[str, deque] = {}
+
+    def _check_rate_limit(self, operation: str) -> None:
+        limit = self.config.security.rate_limit_commands_per_minute
+        if limit <= 0:
+            return
+        if operation not in self._rate_limiters:
+            self._rate_limiters[operation] = deque()
+        limiter = self._rate_limiters[operation]
+        now = time.time()
+        cutoff = now - 60
+        while limiter and limiter[0] < cutoff:
+            limiter.popleft()
+        if len(limiter) >= limit:
+            raise RateLimitError(f"Rate limit exceeded: {limit} {operation} operations per minute")
+        limiter.append(now)
 
     def clear_cache(self) -> None:
         self._resolved_allowed = None
@@ -56,6 +78,20 @@ class SecurityValidator:
         if not given.is_absolute():
             raise PathNotAllowedError(f"Path must be absolute: {raw_path}")
         resolved = given.resolve()
+        allowed = self._resolve_allowed()
+        data_dir_resolved = Path(self.config.data_dir).resolve()
+
+        # Resolve symlinks/junctions to their real target
+        real_str = os.path.realpath(str(resolved))
+        real_path = Path(real_str)
+        if str(real_path) != str(resolved):
+            in_allowed = any(self._is_subpath(real_path, allow) for allow in allowed)
+            in_data = self._is_subpath(real_path, data_dir_resolved)
+            if not (in_allowed or in_data):
+                raise PathNotAllowedError(
+                    f"Symlink target not in allowed directories: {real_path}"
+                )
+            resolved = real_path
 
         # Deny always wins, even over session/permanent grants.
         denied = self._matched_deny_pattern(resolved)
@@ -63,9 +99,8 @@ class SecurityValidator:
             raise PathNotAllowedError(f"Path denied by pattern '{denied}': {resolved}")
 
         # Check static allowlist: MUST be inside paths_allow or data_dir
-        allowed = self._resolve_allowed()
         in_allowed_paths = any(self._is_subpath(resolved, allow) for allow in allowed)
-        in_data_dir = self._is_subpath(resolved, Path(self.config.data_dir).resolve())
+        in_data_dir = self._is_subpath(resolved, data_dir_resolved)
 
         if not (in_allowed_paths or in_data_dir):
             raise PathNotAllowedError(f"Path not in allowed directories: {resolved}")
@@ -74,7 +109,11 @@ class SecurityValidator:
         if in_data_dir:
             return resolved
 
-        # Otherwise, inside paths_allow. MUST check if explicit grant exists (via perm_manager)
+        # Otherwise, inside paths_allow.
+        # Read operations allowed directly (no tickets on hot path for reads).
+        # Write operations require explicit grant via perm_manager.
+        if operation == "read":
+            return resolved
         if self.perm_manager and self.perm_manager.check_granted(str(resolved), operation):
             return resolved
 
@@ -106,6 +145,10 @@ class SecurityValidator:
         Returns a ticket JSON string if access needs approval.
         Returns an error string when access is strictly denied.
         """
+        try:
+            self._check_rate_limit(operation)
+        except RateLimitError as e:
+            return str(e)
         try:
             self.resolve_and_validate(raw_path, operation)
             return None

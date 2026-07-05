@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.security import SecurityValidator, PathNotAllowedError, CommandNotAllowedError
 from src.config import AppConfig, SecurityConfig, CommandPolicy
+from src.permissions import GrantLevel, PermissionManager
 
 
 @pytest.fixture
@@ -23,7 +24,14 @@ def strict_config(temp_home):
 
 @pytest.fixture
 def strict_security(strict_config):
-    return SecurityValidator(strict_config)
+    validator = SecurityValidator(strict_config)
+    validator.perm_manager = PermissionManager(strict_config)
+    # Grant session-wide access to temp_home for security tests
+    # Note: strict_config.security.paths_allow[0] is usually temp_home / "Repos"
+    # We grant access to the root of paths_allow for simplicity in tests
+    for path in strict_config.security.paths_allow:
+        validator.perm_manager.grant_direct(path, "*", GrantLevel.SESSION)
+    return validator
 
 
 def test_path_allowed(strict_security, temp_home):
@@ -52,7 +60,7 @@ def test_path_relative_rejected(strict_security, temp_home):
 def test_command_allowed(strict_security):
     strict_security.validate_command("git status")
     strict_security.validate_command("npm install")
-    strict_security.validate_command("dir C:\\Repos")
+    strict_security.validate_command("python main.py")
 
 
 def test_command_denied(strict_security):
@@ -61,8 +69,8 @@ def test_command_denied(strict_security):
 
 
 def test_command_prefix_allow_when_unrestricted(strict_security):
-    strict_security.validate_command("curl http://example.com")
-    strict_security.validate_command("Write-Host hello")
+    strict_security.validate_command("git status")
+    strict_security.validate_command("echo hello")
 
 
 def test_command_prefix_enforced_when_set(temp_home):
@@ -82,11 +90,15 @@ def test_command_prefix_enforced_when_set(temp_home):
 
 
 def test_command_prefix_not_in_allowlist(strict_security):
-    strict_security.validate_command("curl http://example.com")
-    strict_security.validate_command("wget http://example.com")
+    with pytest.raises(CommandNotAllowedError):
+        strict_security.validate_command("curl http://example.com")
+    with pytest.raises(CommandNotAllowedError):
+        strict_security.validate_command("wget http://example.com")
 
-    strict_security.validate_command("Write-Host hello")
-    strict_security.validate_command("foreach")
+    with pytest.raises(CommandNotAllowedError):
+        strict_security.validate_command("Write-Host hello")
+    with pytest.raises(CommandNotAllowedError):
+        strict_security.validate_command("foreach")
 
 
 def test_require_flag_approval():
@@ -119,6 +131,8 @@ def test_multiple_allowed_paths(temp_home):
         ),
     )
     security = SecurityValidator(config)
+    security.perm_manager = PermissionManager(config)
+    security.perm_manager.grant_direct(str(temp_home), "*", GrantLevel.SESSION)
     security.resolve_and_validate(str(temp_home / "Repos" / "a.txt"))
     security.resolve_and_validate(str(temp_home / "Desktop" / "b.txt"))
     with pytest.raises(PathNotAllowedError):
@@ -149,3 +163,75 @@ def test_request_permission_with_manager(strict_security, temp_home):
     result = strict_security.request_permission(str(temp_home / "secret.txt"))
     assert "permission_required" in result
     assert "ticket" in result
+
+
+# --- #2/#3: Symlink escape tests ---
+
+def _can_create_symlinks() -> bool:
+    """Check if the test environment can create symlinks."""
+    import os
+    import tempfile
+    try:
+        tmp = tempfile.mkdtemp()
+        target = Path(tmp) / "real_target"
+        target.mkdir()
+        link = Path(tmp) / "mylink"
+        os.symlink(str(target), str(link), target_is_directory=True)
+        ok = link.exists()
+        link.unlink()
+        target.rmdir()
+        os.rmdir(tmp)
+        return ok
+    except (OSError, NotImplementedError):
+        return False
+
+
+def test_symlink_read_escape_blocked(strict_security, temp_home):
+    if not _can_create_symlinks():
+        pytest.skip("Cannot create symlinks on this system (need admin/developer mode)")
+    import os
+    legit_dir = temp_home / "Repos" / "legit"
+    legit_dir.mkdir(parents=True, exist_ok=True)
+    outside_dir = temp_home / "Outside" / "secrets"
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    link_path = legit_dir / "evil_link"
+    os.symlink(str(outside_dir), str(link_path), target_is_directory=True)
+
+    secret_file = outside_dir / "password.txt"
+    secret_file.write_text("admin:secret123")
+    target = link_path / "password.txt"
+
+    with pytest.raises(PathNotAllowedError, match="not in allowed directories"):
+        strict_security.resolve_and_validate(str(target))
+
+
+def test_symlink_write_escape_blocked(strict_security, temp_home):
+    if not _can_create_symlinks():
+        pytest.skip("Cannot create symlinks on this system (need admin/developer mode)")
+    import os
+    legit_dir = temp_home / "Repos" / "legit2"
+    legit_dir.mkdir(parents=True, exist_ok=True)
+    outside_dir = temp_home / "Outside2"
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    link_path = legit_dir / "evil_link2"
+    os.symlink(str(outside_dir), str(link_path), target_is_directory=True)
+
+    target = link_path / "malicious_write.txt"
+    with pytest.raises(PathNotAllowedError, match="not in allowed directories"):
+        strict_security.resolve_and_validate(str(target), operation="write")
+
+
+def test_symlink_inside_allowed_allowed(strict_security, temp_home):
+    if not _can_create_symlinks():
+        pytest.skip("Cannot create symlinks on this system (need admin/developer mode)")
+    import os
+    dir_a = temp_home / "Repos" / "A"
+    dir_a.mkdir(parents=True, exist_ok=True)
+    dir_b = temp_home / "Repos" / "B"
+    dir_b.mkdir(parents=True, exist_ok=True)
+    link_path = dir_a / "to_B"
+    os.symlink(str(dir_b), str(link_path), target_is_directory=True)
+
+    target = link_path / "some_file.txt"
+    result = strict_security.resolve_and_validate(str(target))
+    assert result == (dir_b / "some_file.txt").resolve()

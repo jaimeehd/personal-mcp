@@ -1,5 +1,7 @@
 import asyncio
 import json
+import os
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -7,9 +9,10 @@ from typing import Dict, List, Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from src.security import SecurityValidator
-from src.shell_resolver import ShellInfo, resolve_shell
-from src.log import get_logger
+from src.security import SecurityValidator, CommandNotAllowedError
+from src.shell_resolver import ShellInfo, resolve_shell, tokenize_command, has_shell_operators
+from src.secretscanner import scan_text, format_findings
+from src.log import get_logger, sanitize_log_value
 
 logger = get_logger("layer2_shell")
 
@@ -22,6 +25,16 @@ def _truncate(output: str, max_bytes: int = MAX_CAPTURE_BYTES) -> tuple[str, boo
         return output, False
     truncated = encoded[:max_bytes].decode("utf-8", errors="replace")
     return truncated, True
+
+
+def _append_secret_scan(result: str, output_text: str, security: SecurityValidator, source: str) -> str:
+    if not security.config.security.secret_scanning_enabled or not output_text.strip():
+        return result
+    findings = scan_text(output_text)
+    if findings:
+        logger.warning("SECRET_SCAN findings=%d source=%s", len(findings), source)
+        result += format_findings(findings)
+    return result
 
 
 async def _kill_process_tree(pid: int) -> None:
@@ -43,6 +56,22 @@ def _scan_command_warnings(command: str, security: SecurityValidator) -> List[st
         if not security.is_path_allowed(p):
             warnings.append(f"Command argument references external path: {p}")
     return warnings
+
+
+def _escape_workdir(working_dir: str, shell_name: str) -> str:
+    """Escape a double-quote inside working_dir for the shell that will interpolate it.
+
+    workdir_prefix embeds working_dir inside a double-quoted string per shell
+    (Set-Location -LiteralPath "{wd}"; / cd /d "{wd}" && / cd "{wd}" &&). Each shell
+    has a different escape sequence for an embedded double-quote; using PowerShell's
+    backtick-quote for all three let a `"` in working_dir break out of the quoted
+    string on cmd.exe and bash (INJ-02 fix).
+    """
+    if shell_name == "cmd":
+        return working_dir.replace('"', '""')
+    if shell_name == "bash":
+        return working_dir.replace('"', '\\"')
+    return working_dir.replace('"', '`"')
 
 
 class ShellSession:
@@ -219,19 +248,53 @@ async def sh_exec_impl(command: str, security: SecurityValidator, timeout: int =
                        working_dir: Optional[str] = None,
                        shell_info: Optional[ShellInfo] = None) -> str:
     security.validate_command(command)
-    logger.info("sh_exec command=%.200s shell=%s timeout=%d", command, shell_info.name if shell_info else "default", timeout)
+    logger.info("sh_exec command=%.200s shell=%s timeout=%d", sanitize_log_value(command), shell_info.name if shell_info else "default", timeout)
+    proc_kwargs = dict(
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    if working_dir:
+        proc_kwargs["cwd"] = working_dir
+
+    # Try native argv execution when no shell operators are present
+    if not has_shell_operators(command):
+        tokens = tokenize_command(command)
+        if tokens:
+            native = shutil.which(tokens[0])
+            if native and os.path.isfile(native):
+                process = await asyncio.create_subprocess_exec(
+                    native, *tokens[1:], **proc_kwargs,
+                )
+                try:
+                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+                    out = stdout.decode("utf-8", errors="replace")
+                    err = stderr.decode("utf-8", errors="replace")
+                    out, out_trunc = _truncate(out)
+                    err, err_trunc = _truncate(err)
+                    result = f"Exit code: {process.returncode}"
+                    if out.strip():
+                        result += f"\n[stdout]\n{out.rstrip()}"
+                    if err.strip():
+                        result += f"\n[stderr]\n{err.rstrip()}"
+                    if out_trunc or err_trunc:
+                        result += f"\n[output truncated at {MAX_CAPTURE_BYTES:,} bytes — use a more specific command to narrow results]"
+                    result = _append_secret_scan(result, out + "\n" + err, security, "sh_exec")
+                    return result
+                except asyncio.TimeoutError:
+                    await _kill_process_tree(process.pid)
+                    return f"Command timed out after {timeout}s"
+
+    # Fallback: shell execution
     si = shell_info or ShellInfo(name="powershell", executable="powershell.exe",
                                   command_args=["-NoProfile", "-Command"],
                                   session_args=[], script_args=[],
                                   workdir_prefix='Set-Location -LiteralPath "{wd}"; ')
     cmd = command
     if working_dir:
-        safe_wd = working_dir.replace('"', '`"')
+        safe_wd = _escape_workdir(working_dir, si.name)
         cmd = si.workdir_prefix.replace("{wd}", safe_wd) + command
     process = await asyncio.create_subprocess_exec(
-        si.executable, *si.command_args, cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        si.executable, *si.command_args, cmd, **proc_kwargs,
     )
     try:
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
@@ -246,6 +309,7 @@ async def sh_exec_impl(command: str, security: SecurityValidator, timeout: int =
             result += f"\n[stderr]\n{err.rstrip()}"
         if out_trunc or err_trunc:
             result += f"\n[output truncated at {MAX_CAPTURE_BYTES:,} bytes — use a more specific command to narrow results]"
+        result = _append_secret_scan(result, out + "\n" + err, security, "sh_exec")
         return result
     except asyncio.TimeoutError:
         await _kill_process_tree(process.pid)
@@ -305,15 +369,20 @@ async def sh_session_close_impl(session_id: str, manager: ShellManager) -> str:
 async def sh_script_impl(script: str, security: SecurityValidator, timeout: int = 60,
                          working_dir: Optional[str] = None,
                          shell_info: Optional[ShellInfo] = None) -> str:
-    security.validate_command(script[:100])
-    logger.info("sh_script script=%.100s shell=%s timeout=%d", script, shell_info.name if shell_info else "default", timeout)
+    readonly_ok, readonly_reason = security.config.security.commands.is_script_readonly(script)
+    if not readonly_ok:
+        raise CommandNotAllowedError(
+            f"sh_script only allows read-only commands, validated line by line: "
+            f"{readonly_reason}. Use sh_exec for commands that modify state."
+        )
+    logger.info("sh_script script=%.100s shell=%s timeout=%d", sanitize_log_value(script), shell_info.name if shell_info else "default", timeout)
     si = shell_info or ShellInfo(name="powershell", executable="powershell.exe",
                                   command_args=[], session_args=[],
                                   script_args=["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"],
                                   workdir_prefix='Set-Location -LiteralPath "{wd}"; ')
     full_script = script
     if working_dir:
-        safe_wd = working_dir.replace('"', '`"')
+        safe_wd = _escape_workdir(working_dir, si.name)
         full_script = si.workdir_prefix.replace("{wd}", safe_wd) + script
     ext = ".ps1" if "powershell" in si.name or "pwsh" == si.name else ".bat" if si.name == "cmd" else ".sh"
     temp_file = Path(security.config.data_dir) / f"script_{uuid.uuid4().hex[:8]}{ext}"
@@ -337,6 +406,7 @@ async def sh_script_impl(script: str, security: SecurityValidator, timeout: int 
             result += f"\n[stderr]\n{err.rstrip()}"
         if out_trunc or err_trunc:
             result += f"\n[output truncated at {MAX_CAPTURE_BYTES:,} bytes — use a more specific command to narrow results]"
+        result = _append_secret_scan(result, out + "\n" + err, security, "sh_script")
         return result
     except asyncio.TimeoutError:
         await _kill_process_tree(process.pid)

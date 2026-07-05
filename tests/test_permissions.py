@@ -154,36 +154,39 @@ def test_grant_level_enum_values():
     assert GrantLevel.PERMANENT.value == "permanent"
 
 
-def test_session_grant_validates(wired_perm):
+def test_session_grant_validates(wired_perm, temp_home):
     """Session grant makes validate_tool_path allow the path."""
     pm, security = wired_perm
-    pm.grant_direct("C:\\Temp\\granted.txt", "read", GrantLevel.SESSION)
-    err = security.validate_tool_path("C:\\Temp\\granted.txt", "read")
+    rsrc = str(temp_home / "Repos" / "granted.txt")
+    pm.grant_direct(rsrc, "read", GrantLevel.SESSION)
+    err = security.validate_tool_path(rsrc, "read")
     assert err is None, f"Expected None (allowed), got: {err}"
 
 
-def test_single_grant_consumed(wired_perm):
-    """Single grant is consumed on first use; second access is denied."""
+def test_single_grant_consumed(wired_perm, temp_home):
+    """Single grant consumed on write; second write is denied (read auto-allowed)."""
     pm, security = wired_perm
-    pm.grant_direct("C:\\Temp\\single.txt", "read", GrantLevel.SINGLE)
-    # First use — allowed
-    assert security.validate_tool_path("C:\\Temp\\single.txt", "read") is None
-    # Second use — consumed
-    err = security.validate_tool_path("C:\\Temp\\single.txt", "read")
+    rsrc = str(temp_home / "Repos" / "single.txt")
+    pm.grant_direct(rsrc, "write", GrantLevel.SINGLE)
+    # First write — allowed
+    assert security.validate_tool_path(rsrc, "write") is None
+    # Second write — consumed
+    err = security.validate_tool_path(rsrc, "write")
     assert err is not None
-    assert "Access denied" in err
+    assert "permission_required" in err
 
 
-def test_single_grant_wildcard_consumed(wired_perm):
-    """Single grant with wildcard operation (real path from fs_request_allow)."""
+def test_single_grant_wildcard_consumed(wired_perm, temp_home):
+    """Single wildcard grant consumed by write; second write denied."""
     pm, security = wired_perm
-    pm.grant_direct("C:\\Temp\\wild.txt", "*", GrantLevel.SINGLE)
-    # First use — allowed (matches via wildcard "*")
-    assert security.validate_tool_path("C:\\Temp\\wild.txt", "read") is None
-    # Second use — consumed
-    err = security.validate_tool_path("C:\\Temp\\wild.txt", "read")
+    rsrc = str(temp_home / "Repos" / "wild.txt")
+    pm.grant_direct(rsrc, "*", GrantLevel.SINGLE)
+    # First write — allowed (matches via wildcard "*")
+    assert security.validate_tool_path(rsrc, "write") is None
+    # Second write — consumed
+    err = security.validate_tool_path(rsrc, "write")
     assert err is not None
-    assert "Access denied" in err
+    assert "permission_required" in err
 
 
 def test_deny_still_wins_over_grant(wired_perm):
@@ -203,14 +206,18 @@ def test_permanent_grant_unaffected(perm, temp_home):
     assert rsrc in perm.config.security.paths_allow
 
 
-def test_validate_tool_path_with_perm_manager(wired_perm):
+def test_validate_tool_path_with_perm_manager(wired_perm, temp_home):
     """validate_tool_path respects session grants via perm_manager."""
     pm, security = wired_perm
-    pm.grant_direct("C:\\Temp\\pm_test.txt", "write", GrantLevel.SESSION)
-    assert security.validate_tool_path("C:\\Temp\\pm_test.txt", "write") is None
-    # Wrong operation should not be granted
-    err = security.validate_tool_path("C:\\Temp\\pm_test.txt", "read")
+    rsrc = str(temp_home / "Repos" / "pm_test.txt")
+    pm.grant_direct(rsrc, "write", GrantLevel.SESSION)
+    assert security.validate_tool_path(rsrc, "write") is None
+    # Read auto-allowed in paths_allow, write still needs explicit grant
+    # Path outside paths_allow without grant should still be denied
+    outside = str(temp_home / "Downloads" / "outside.txt")
+    err = security.validate_tool_path(outside, "read")
     assert err is not None
+    assert "Access denied" in err
 
 
 def test_check_granted_safety_net(perm):

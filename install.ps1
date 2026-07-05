@@ -6,7 +6,7 @@
     Supports multiple Claude instances via -UserDataDirs parameter.
 .PARAMETER UserDataDirs
     Extra Claude user-data-dir paths to install into (e.g. 
-    "C:\Users\user\Claude-Cuenta2", "C:\Users\user\Claude-Cuenta3").
+    "C:\Users\user\Claude-Cuenta2", "C:\Users\user\Claude-Cuenta3", "C:\Users\user\Claude-Cuenta4").
 #>
 param(
     [string[]]$UserDataDirs = @()
@@ -184,7 +184,7 @@ Write-Host "Data:         $McpDir\data"
 Write-Host "Claude Config: $ClaudeConfigPath"
 Write-Host ""
 Write-Host "Available tools:" -ForegroundColor White
-Write-Host "  Layer 1 - Filesystem:  fs_read, fs_write, fs_edit, fs_list, fs_tree, fs_search, fs_find, fs_info, fs_diff, fs_batch, fs_snapshot"
+Write-Host "  Layer 1 - Filesystem:  fs_read, fs_write, fs_edit, fs_delete, fs_list, fs_tree, fs_search, fs_find, fs_info, fs_diff, fs_batch, fs_snapshot"
 Write-Host "  Layer 2 - Shell:       sh_exec, sh_session_start, sh_session_list, sh_session_send, sh_session_read, sh_session_interrupt, sh_session_close, sh_script, sh_history"
 Write-Host "  Layer 3 - SSH:         ssh_list_hosts, ssh_connect, ssh_exec, ssh_disconnect (if enabled)"
 Write-Host "  Layer 4 - Personal:    journal_add, journal_list, journal_search, journal_stats, journal_export, note_quick, project_scan, project_find"

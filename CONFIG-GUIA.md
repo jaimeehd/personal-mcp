@@ -33,13 +33,17 @@ se le pida.
 
 | Ruta | Qué es |
 |---|---|
-| C:\Users\User\Repos | Tu carpeta personal de proyectos |
-| C:\Users\User\Desktop | Tu escritorio |
-| C:\Users\User\OneDrive | Tu carpeta de OneDrive |
-| C:\Users\User\.personal-mcp | Carpeta interna del propio asistente (su config y sus datos) |
-| C:\Repos\HikBioAccess | Tu proyecto de control de acceso biométrico |
-| C:\Repos\.personal-mcp | El código fuente de este mismo asistente |
-| C:\Repos\doc-pipeline\knowledge-base | Tu base de conocimiento de documentación |
+| C:\Repos | Tu carpeta de repositorios/proyectos. **Todo** lo que esté dentro — cualquier subcarpeta, sin importar cuántos niveles — queda accesible automáticamente. No hace falta listar cada proyecto por separado. |
+
+⚠️ **Nota de corrección (2026-07-04):** una versión anterior de esta guía
+listaba 7 rutas separadas (`C:\Users\User\Repos`, `Desktop`, `OneDrive`,
+`C:\Users\User\.personal-mcp`, y 3 subcarpetas de `C:\Repos`). Esa lista ya
+**no coincide** con la configuración real: hoy el asistente **no** puede
+acceder a tu Escritorio, OneDrive, ni a `C:\Users\User\Repos` — solo a lo que
+esté dentro de `C:\Repos`. Si necesitas que el asistente trabaje en alguna de
+esas carpetas, hay que agregarlas explícitamente a `paths_allow` en el config
+oficial (`C:\Users\User\.personal-mcp\config.json`), no en esta copia de
+lectura.
 
 ### paths_deny — Carpetas prohibidas (incluso dentro de una permitida)
 
@@ -56,9 +60,15 @@ uno de estos patrones, queda bloqueada igual. Es una segunda capa de seguridad.
 
 ### commands — Qué comandos puede ejecutar en la terminal
 
-- allow_prefix (lista blanca): si está vacía (como ahora), todos los comandos
-  están permitidos por defecto, excepto los que aparecen en deny. Si tuviera
-  nombres de comandos adentro, sería lo opuesto: solo esos estarían permitidos.
+- allow_prefix (lista blanca): define qué comandos SÍ puede ejecutar el
+  asistente. Si tiene nombres adentro (por ejemplo `git`, `npm`, `python`),
+  SOLO esos están permitidos — cualquier otro comando queda bloqueado
+  automáticamente, incluso si no aparece en `deny`.
+  ⚠️ Si esta lista queda vacía, el efecto NO es "todo permitido" — es
+  exactamente lo contrario: el asistente no puede ejecutar ningún comando en
+  absoluto, porque una lista vacía se interpreta como "ningún comando está
+  autorizado". Por eso, en la práctica, esta lista casi nunca debería dejarse
+  vacía si quieres poder usar la terminal.
 - deny (lista negra): comandos que nunca se permiten. Incluye apagar el equipo,
   reiniciar, formatear discos, borrar todo de forma forzada, y modificar
   cuentas de usuario de Windows.
@@ -67,11 +77,20 @@ uno de estos patrones, queda bloqueada igual. Es una segunda capa de seguridad.
 
 ### rate_limit_commands_per_minute — Límite de comandos por minuto
 
-Actualmente: 60. Protección contra bucles descontrolados.
+Actualmente: 60. Si activas 0, se desactiva el límite. El límite se aplica por
+separado para operaciones de lectura y escritura (no se mezclan los contadores).
 
 ### rate_limit_files_per_operation — Límite de archivos por operación
 
 Actualmente: 100. Ninguna operación puede tocar más de 100 archivos a la vez.
+
+### secret_scanning_enabled — Detección automática de secretos
+
+Actualmente: true (activado). Cuando el asistente lee un archivo, escanea el
+contenido buscando tokens, claves privadas, contraseñas en texto plano,
+credenciales de bases de datos y otros secretos. Si encuentra algo, lo avisa
+pero NO bloquea la lectura. Si no quieres esta función, puedes ponerla en
+false.
 
 ---
 

@@ -5,7 +5,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.shell_resolver import ShellInfo, resolve_shell, _find_executable
+from src.shell_resolver import ShellInfo, resolve_shell, _find_executable, tokenize_command, has_shell_operators
 
 
 def test_resolve_powershell_default():
@@ -54,6 +54,74 @@ def test_find_executable_powershell():
 def test_find_executable_unknown():
     path = _find_executable("nonexistent_tool_xyz")
     assert path is None
+
+
+# --- tokenize_command tests ---
+
+def test_tokenize_simple():
+    assert tokenize_command("git log --oneline") == ["git", "log", "--oneline"]
+
+
+def test_tokenize_with_quotes():
+    assert tokenize_command('echo "hello world"') == ["echo", "hello world"]
+
+
+def test_tokenize_single_quotes():
+    assert tokenize_command("echo 'hello world'") == ["echo", "hello world"]
+
+
+def test_tokenize_mixed_quotes():
+    assert tokenize_command('git -m "my message"') == ["git", "-m", "my message"]
+
+
+def test_tokenize_path_with_spaces():
+    assert tokenize_command('notepad "C:\\Program Files\\readme.txt"') == ["notepad", "C:\\Program Files\\readme.txt"]
+
+
+def test_tokenize_empty():
+    assert tokenize_command("") == []
+
+
+def test_tokenize_whitespace():
+    assert tokenize_command("   ") == []
+
+
+def test_tokenize_multiple_spaces():
+    assert tokenize_command("git   log    --oneline") == ["git", "log", "--oneline"]
+
+
+# --- has_shell_operators tests ---
+
+def test_no_operators():
+    assert has_shell_operators("git log --oneline") is False
+
+
+def test_pipe_operator():
+    assert has_shell_operators("git log | grep foo") is True
+
+
+def test_semicolon_operator():
+    assert has_shell_operators("cd dir; ls") is True
+
+
+def test_redirect_operator():
+    assert has_shell_operators("echo hello > file.txt") is True
+
+
+def test_and_operator():
+    assert has_shell_operators("cd dir && ls") is True
+
+
+def test_subshell_operator():
+    assert has_shell_operators("echo $(pwd)") is True
+
+
+def test_operators_inside_quotes_ignored():
+    assert has_shell_operators('echo "hello | world"') is False
+
+
+def test_operators_single_quotes_ignored():
+    assert has_shell_operators("echo 'hello > world'") is False
 
 
 

@@ -1,37 +1,56 @@
 import asyncio
+import base64
 import difflib
 import fnmatch
 import hashlib
 import json
+import mimetypes
 import os
 import re
 import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from src.security import SecurityValidator
+from src.secretscanner import scan_text, format_findings
 from src.log import get_logger, timed
 
 logger = get_logger("layer1_filesystem")
 
 async def fs_read_impl(path: str, security: SecurityValidator, encoding: str = "utf-8",
-                       max_size_mb: int = 0) -> str:
+                       max_size_mb: int = 0,
+                       head: Optional[int] = None, tail: Optional[int] = None) -> str:
     rpath = security.resolve_and_validate(path)
     exists = await asyncio.to_thread(rpath.is_file)
     if not exists:
         logger.info("fs_read not_found path=%s", path)
         return f"Error: not a file or does not exist: {rpath}"
+    if head is not None and tail is not None:
+        return "Error: cannot specify both head and tail"
     size = await asyncio.to_thread(lambda: rpath.stat().st_size)
     if size > 10 * 1024 * 1024:
         logger.warning("fs_read large_file path=%s size=%d", path, size)
     if max_size_mb and size > max_size_mb * 1024 * 1024:
         return f"Error: file too large ({size / 1024 / 1024:.1f}MB). Max: {max_size_mb}MB"
     try:
-        return await asyncio.to_thread(rpath.read_text, encoding=encoding)
+        content = await asyncio.to_thread(rpath.read_text, encoding=encoding)
+        if head is not None:
+            lines = content.splitlines()
+            content = "\n".join(lines[:head])
+        elif tail is not None:
+            lines = content.splitlines()
+            content = "\n".join(lines[-tail:])
+        if security.config.security.secret_scanning_enabled:
+            findings = scan_text(content)
+            if findings:
+                content += format_findings(findings)
+                logger.warning("SECRET_SCAN findings=%d path=%s", len(findings), path)
+        return content
     except UnicodeDecodeError:
         h = hashlib.sha256()
         with open(rpath, "rb") as f:
@@ -128,10 +147,16 @@ async def fs_list_impl(path: str, security: SecurityValidator, pattern: Optional
     return "\n".join(lines) if lines else "(empty directory)"
 
 
-async def fs_tree_impl(path: str, security: SecurityValidator, max_depth: int = 3) -> str:
+async def fs_tree_impl(path: str, security: SecurityValidator, max_depth: int = 3,
+                       exclude_patterns: Optional[List[str]] = None) -> str:
     rpath = security.resolve_and_validate(path)
     if not rpath.is_dir():
         return f"Error: not a directory: {rpath}"
+
+    def _should_exclude(name: str) -> bool:
+        if not exclude_patterns:
+            return False
+        return any(fnmatch.fnmatch(name, pat) for pat in exclude_patterns)
 
     def _tree(dir_path: Path, prefix: str = "", depth: int = 0) -> List[str]:
         if depth > max_depth:
@@ -139,6 +164,8 @@ async def fs_tree_impl(path: str, security: SecurityValidator, max_depth: int = 
         lines = []
         entries = sorted(dir_path.iterdir())
         for i, entry in enumerate(entries):
+            if _should_exclude(entry.name):
+                continue
             is_last = i == len(entries) - 1
             connector = "└── " if is_last else "├── "
             lines.append(f"{prefix}{connector}{entry.name}/" if entry.is_dir() else f"{prefix}{connector}{entry.name}")
@@ -152,18 +179,26 @@ async def fs_tree_impl(path: str, security: SecurityValidator, max_depth: int = 
     return "\n".join(result)
 
 
-async def fs_search_impl(path: str, pattern: str, security: SecurityValidator,
-                         glob_pattern: Optional[str] = None,
-                         max_results: Optional[int] = 50) -> str:
-    rpath = security.resolve_and_validate(path)
-    if not rpath.is_dir():
-        return f"Error: not a directory: {rpath}"
-    regex = re.compile(pattern, re.IGNORECASE)
+# ReDoS mitigation: a single catastrophic regex.search() call cannot be interrupted
+# mid-execution in pure Python (no external timeout-capable engine, e.g. the `regex`
+# package, is a dependency of this project). Running the blocking search in a thread
+# and bounding the wait with asyncio.wait_for() cannot stop the runaway thread itself,
+# but it guarantees the MCP call returns to the caller instead of hanging the server
+# indefinitely — the actual failure mode this fixes.
+_SEARCH_TIMEOUT_SECONDS = 10.0
+
+
+def _fs_search_sync(rpath: Path, regex: "re.Pattern", glob_pattern: Optional[str],
+                     max_results: int, exclude_patterns: Optional[List[str]]) -> str:
     matches = []
     try:
         for filepath in rpath.rglob(glob_pattern or "*"):
             if filepath.is_dir():
                 continue
+            if exclude_patterns:
+                rel = str(filepath.relative_to(rpath))
+                if any(fnmatch.fnmatch(rel, pat) for pat in exclude_patterns):
+                    continue
             if len(matches) >= max_results:
                 break
             try:
@@ -177,6 +212,28 @@ async def fs_search_impl(path: str, pattern: str, security: SecurityValidator,
     except PermissionError as e:
         return f"Permission denied: {e}"
     return "\n".join(matches) if matches else "No matches found"
+
+
+async def fs_search_impl(path: str, pattern: str, security: SecurityValidator,
+                         glob_pattern: Optional[str] = None,
+                         max_results: Optional[int] = 50,
+                         exclude_patterns: Optional[List[str]] = None) -> str:
+    rpath = security.resolve_and_validate(path)
+    if not rpath.is_dir():
+        return f"Error: not a directory: {rpath}"
+    try:
+        regex = re.compile(pattern, re.IGNORECASE)
+    except re.error as e:
+        return f"Error: invalid regex pattern: {e}"
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_fs_search_sync, rpath, regex, glob_pattern, max_results, exclude_patterns),
+            timeout=_SEARCH_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        return (f"Error: search timed out after {_SEARCH_TIMEOUT_SECONDS}s. "
+                f"The pattern may be too expensive (catastrophic backtracking) or the "
+                f"file set too large — try a simpler pattern or a narrower glob_pattern.")
 
 
 async def fs_find_impl(path: str, security: SecurityValidator, name: Optional[str] = None,
@@ -216,6 +273,7 @@ async def fs_info_impl(path: str, security: SecurityValidator) -> str:
         "path": str(rpath),
         "type": "directory" if rpath.is_dir() else "file",
         "size": stat.st_size,
+        "permissions": oct(stat.st_mode & 0o777),
         "created": datetime.fromtimestamp(stat.st_ctime).isoformat(),
         "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
         "accessed": datetime.fromtimestamp(stat.st_atime).isoformat(),
@@ -303,29 +361,199 @@ async def fs_snapshot_impl(path: str, security: SecurityValidator) -> str:
     return f"Snapshot saved: {snapshot_path} ({len(snapshot)} entries)"
 
 
+async def fs_create_directory_impl(path: str, security: SecurityValidator) -> str:
+    rpath = security.resolve_and_validate(path)
+    await asyncio.to_thread(rpath.mkdir, parents=True, exist_ok=True)
+    logger.info("fs_create_directory path=%s", str(rpath))
+    return f"Directory created: {rpath}"
+
+
+async def fs_move_impl(source: str, destination: str, security: SecurityValidator) -> str:
+    src = security.resolve_and_validate(source)
+    dst = security.resolve_and_validate(destination)
+    if not src.exists():
+        return f"Error: source does not exist: {src}"
+    if dst.exists():
+        return f"Error: destination already exists: {dst}"
+    if src.is_dir():
+        await asyncio.to_thread(shutil.copytree, src, dst)
+        await asyncio.to_thread(shutil.rmtree, src)
+    else:
+        await asyncio.to_thread(shutil.move, str(src), str(dst))
+    logger.info("fs_move path=%s -> %s", str(src), str(dst))
+    return f"Moved {src} -> {dst}"
+
+
+async def fs_delete_impl(path: str, security: SecurityValidator) -> str:
+    # No pasar "delete" aquí: el wrapper fs_delete() ya validó el permiso vía
+    # validate_tool_path(path, "delete"). Esta segunda resolución es solo para
+    # obtener el Path resuelto, igual que fs_write_impl/fs_move_impl/fs_batch_impl.
+    # Pasar la operación real vuelve a invocar check_granted() y consume por
+    # segunda vez un grant SINGLE que solo tiene una unidad disponible.
+    rpath = security.resolve_and_validate(path)
+    if not rpath.exists():
+        return f"Error: path does not exist: {rpath}"
+    if rpath.is_dir():
+        return f"Error: fs_delete only supports individual files, not directories: {rpath}"
+    size = rpath.stat().st_size
+    await asyncio.to_thread(rpath.unlink)
+    logger.info("fs_delete path=%s size=%d", str(rpath), size)
+    return f"Deleted {rpath} ({size:,} bytes)"
+
+
+async def fs_read_multi_impl(paths: List[str], security: SecurityValidator,
+                              encoding: str = "utf-8", max_size_mb: int = 0) -> str:
+    results = []
+    for p in paths:
+        try:
+            content = await fs_read_impl(p, security, encoding, max_size_mb)
+            results.append(f"--- {p} ---\n{content}")
+        except Exception as e:
+            results.append(f"--- {p} ---\nError: {e}")
+    return "\n\n".join(results)
+
+
+async def fs_list_allowed_impl(security: SecurityValidator) -> str:
+    lines = ["Allowed directories:"]
+    for p in security.config.security.paths_allow:
+        lines.append(f"  {p} (read+write with permission)")
+    lines.append(f"  {security.config.data_dir} (internal data)")
+    return "\n".join(lines)
+
+
+async def fs_list_with_sizes_impl(path: str, security: SecurityValidator,
+                                   sort_by: str = "name") -> str:
+    rpath = security.resolve_and_validate(path)
+    if not rpath.is_dir():
+        return f"Error: not a directory: {rpath}"
+    entries = []
+    with os.scandir(rpath) as it:
+        for entry in it:
+            is_dir = entry.is_dir()
+            info = entry.stat()
+            entries.append({
+                "name": entry.name,
+                "type": "dir" if is_dir else "file",
+                "size": info.st_size,
+            })
+    if sort_by == "size":
+        entries.sort(key=lambda e: e["size"])
+    else:
+        entries.sort(key=lambda e: e["name"].lower())
+    lines = []
+    total_files = 0
+    total_dirs = 0
+    total_size = 0
+    for e in entries:
+        tag = "[DIR]" if e["type"] == "dir" else "[FILE]"
+        size_str = f"{e['size']:,}B" if e['size'] < 1024 else f"{e['size']/1024:.1f}KB"
+        lines.append(f"{tag} {e['name']:40s} {size_str:>10s}")
+        if e["type"] == "dir":
+            total_dirs += 1
+        else:
+            total_files += 1
+        total_size += e["size"]
+    summary = f"\n{'─' * 60}\n{total_files} files, {total_dirs} dirs, {total_size:,} bytes"
+    return "\n".join(lines) + summary if lines else "(empty directory)"
+
+
+async def fs_read_media_impl(path: str, security: SecurityValidator) -> str:
+    rpath = security.resolve_and_validate(path)
+    if not rpath.is_file():
+        return f"Error: not a file: {rpath}"
+    mime_type, _ = mimetypes.guess_type(str(rpath))
+    if not mime_type or not (mime_type.startswith("image/") or mime_type.startswith("audio/")):
+        return (f"Error: not a supported media file (only image/* and audio/*): "
+                f"{mime_type or 'unknown'}")
+    data = await asyncio.to_thread(rpath.read_bytes)
+    b64 = base64.b64encode(data).decode("ascii")
+    return f"data:{mime_type};base64,{b64}"
+
+
+async def fs_edit_advanced_impl(path: str, edits: List[Dict[str, str]],
+                                 security: SecurityValidator, dry_run: bool = False) -> str:
+    content = await fs_read_impl(path, security)
+    new_content = content
+    match_info = []
+    for i, edit in enumerate(edits):
+        old_text = edit.get("oldText", "")
+        new_text = edit.get("newText", "")
+        if not old_text:
+            return f"Error: edit[{i}] missing 'oldText'"
+        idx = new_content.find(old_text)
+        if idx == -1:
+            norm_old = "\n".join(line.rstrip() for line in old_text.splitlines())
+            norm_content = "\n".join(line.rstrip() for line in new_content.splitlines())
+            idx = norm_content.find(norm_old)
+            if idx == -1:
+                return f"Error: edit[{i}] 'oldText' not found in {path}"
+            pre = norm_content[:idx]
+            orig_lines = pre.count("\n") + 1
+            search_from = 0
+            for _ in range(orig_lines - 1):
+                nxt = new_content.find("\n", search_from)
+                if nxt == -1:
+                    break
+                search_from = nxt + 1
+            idx = search_from
+            old_lines = old_text.splitlines(keepends=True)
+            old_len = 0
+            rest = new_content[idx:]
+            for j, _ in enumerate(old_lines):
+                nxt = rest.find("\n", old_len)
+                if nxt == -1:
+                    if j < len(old_lines) - 1:
+                        old_len = len(rest)
+                    else:
+                        old_len = len(rest)
+                    break
+                old_len = nxt + 1
+            new_content = new_content[:idx] + new_text + new_content[idx + old_len:]
+        else:
+            new_content = new_content[:idx] + new_text + new_content[idx + len(old_text):]
+        match_info.append(f"  Edit {i}: matched at position {idx}")
+    if dry_run:
+        diff = difflib.unified_diff(
+            content.splitlines(keepends=True),
+            new_content.splitlines(keepends=True),
+            fromfile="before", tofile="after"
+        )
+        return (f"Dry run - would apply {len(edits)} edit(s):\n"
+                + "\n".join(match_info) + "\n\nDiff:\n" + "".join(diff))
+    await fs_write_impl(path, new_content, security)
+    diff = "".join(difflib.unified_diff(
+        content.splitlines(keepends=True),
+        new_content.splitlines(keepends=True),
+        fromfile="before", tofile="after"
+    ))
+    return (f"Applied {len(edits)} edit(s).\n"
+            + "\n".join(match_info) + f"\n\nDiff:\n{diff}")
+
+
 def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None:
-    @mcp.tool()
-    async def fs_read(path: str, encoding: str = "utf-8", max_size_mb: int = 0) -> str:
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    async def fs_read(path: str, encoding: str = "utf-8", max_size_mb: int = 0,
+                      head: Optional[int] = None, tail: Optional[int] = None) -> str:
         err = security.validate_tool_path(path, "read")
         if err:
             return err
-        return await fs_read_impl(path, security, encoding, max_size_mb)
+        return await fs_read_impl(path, security, encoding, max_size_mb, head, tail)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True, destructiveHint=True))
     async def fs_write(path: str, content: str, encoding: str = "utf-8", max_size_mb: int = 0) -> str:
         err = security.validate_tool_path(path, "write")
         if err:
             return err
         return await fs_write_impl(path, content, security, encoding, max_size_mb)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False, destructiveHint=True))
     async def fs_edit(path: str, old_string: str, new_string: str) -> str:
         err = security.validate_tool_path(path, "write")
         if err:
             return err
         return await fs_edit_impl(path, old_string, new_string, security)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def fs_list(path: str, pattern: Optional[str] = None, max_results: Optional[int] = 100,
                       recursive: bool = False) -> str:
         err = security.validate_tool_path(path, "read")
@@ -333,22 +561,24 @@ def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None
             return err
         return await fs_list_impl(path, security, pattern, max_results, recursive)
 
-    @mcp.tool()
-    async def fs_tree(path: str, max_depth: int = 3) -> str:
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    async def fs_tree(path: str, max_depth: int = 3,
+                      exclude_patterns: Optional[List[str]] = None) -> str:
         err = security.validate_tool_path(path, "read")
         if err:
             return err
-        return await fs_tree_impl(path, security, max_depth)
+        return await fs_tree_impl(path, security, max_depth, exclude_patterns)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def fs_search(path: str, pattern: str, glob_pattern: Optional[str] = None,
-                        max_results: Optional[int] = 50) -> str:
+                        max_results: Optional[int] = 50,
+                        exclude_patterns: Optional[List[str]] = None) -> str:
         err = security.validate_tool_path(path, "read")
         if err:
             return err
-        return await fs_search_impl(path, pattern, security, glob_pattern, max_results)
+        return await fs_search_impl(path, pattern, security, glob_pattern, max_results, exclude_patterns)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def fs_find(path: str, name: Optional[str] = None, min_size: Optional[int] = None,
                       max_size: Optional[int] = None, days_old: Optional[int] = None,
                       max_results: Optional[int] = 50) -> str:
@@ -357,14 +587,14 @@ def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None
             return err
         return await fs_find_impl(path, security, name, min_size, max_size, days_old, max_results)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def fs_info(path: str) -> str:
         err = security.validate_tool_path(path, "read")
         if err:
             return err
         return await fs_info_impl(path, security)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def fs_diff(path_a: str, path_b: Optional[str] = None) -> str:
         err = security.validate_tool_path(path_a, "read")
         if err:
@@ -375,7 +605,7 @@ def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None
                 return err
         return await fs_diff_impl(path_a, path_b, security)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False, destructiveHint=True))
     async def fs_batch(path: str, operation: str, target: str,
                        pattern: Optional[str] = None, dry_run: bool = True) -> str:
         err = security.validate_tool_path(path, "read")
@@ -386,9 +616,70 @@ def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None
             return err
         return await fs_batch_impl(path, operation, target, security, pattern, dry_run)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True, destructiveHint=False))
     async def fs_snapshot(path: str) -> str:
         err = security.validate_tool_path(path, "write")
         if err:
             return err
         return await fs_snapshot_impl(path, security)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True, destructiveHint=False))
+    async def fs_create_directory(path: str) -> str:
+        err = security.validate_tool_path(path, "write")
+        if err:
+            return err
+        return await fs_create_directory_impl(path, security)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False, destructiveHint=True))
+    async def fs_move(source: str, destination: str) -> str:
+        err = security.validate_tool_path(source, "read")
+        if err:
+            return err
+        err = security.validate_tool_path(destination, "write")
+        if err:
+            return err
+        return await fs_move_impl(source, destination, security)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False, destructiveHint=True))
+    async def fs_delete(path: str) -> str:
+        err = security.validate_tool_path(path, "delete")
+        if err:
+            return err
+        return await fs_delete_impl(path, security)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    async def fs_read_multi(paths: List[str], encoding: str = "utf-8",
+                             max_size_mb: int = 0) -> str:
+        if not paths:
+            return "Error: empty paths list"
+        return await fs_read_multi_impl(paths, security, encoding, max_size_mb)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    async def fs_list_allowed() -> str:
+        return await fs_list_allowed_impl(security)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    async def fs_list_with_sizes(path: str, sort_by: str = "name") -> str:
+        if sort_by not in ("name", "size"):
+            return "Error: sort_by must be 'name' or 'size'"
+        err = security.validate_tool_path(path, "read")
+        if err:
+            return err
+        return await fs_list_with_sizes_impl(path, security, sort_by)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    async def fs_read_media(path: str) -> str:
+        err = security.validate_tool_path(path, "read")
+        if err:
+            return err
+        return await fs_read_media_impl(path, security)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False, destructiveHint=True))
+    async def fs_edit_advanced(path: str, edits: List[Dict[str, str]],
+                                dry_run: bool = False) -> str:
+        err = security.validate_tool_path(path, "write")
+        if err:
+            return err
+        if not edits:
+            return "Error: edits list is empty"
+        return await fs_edit_advanced_impl(path, edits, security, dry_run)

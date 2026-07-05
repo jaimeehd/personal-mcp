@@ -102,7 +102,16 @@ async def ssh_exec_impl(session_id: str, command: str, manager: SSHManager, time
     session = manager._sessions.get(session_id)
     if not session:
         return "Session not found"
-    return await session.execute(command, timeout=timeout)
+    allowed, reason = manager.config.security.commands.is_command_allowed(command)
+    if not allowed:
+        return f"Command blocked: {reason}"
+    result = await session.execute(command, timeout=timeout)
+    return (
+        "[WARNING] This command passed local allowlist validation, but the remote "
+        "host does not enforce it — SSH forwards commands verbatim once validated "
+        "locally. Treat remote hosts as trusted execution targets, not sandboxed.\n"
+        + result
+    )
 
 
 async def ssh_disconnect_impl(session_id: str, manager: SSHManager) -> str:

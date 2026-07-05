@@ -10,6 +10,16 @@ from mcp.server.fastmcp import FastMCP
 
 from src.config import AppConfig
 from src.security import SecurityValidator
+from src.secretscanner import scan_text, format_findings
+
+
+def _scan_and_append(content: str, config: AppConfig, result: str) -> str:
+    if not config.security.secret_scanning_enabled or not content.strip():
+        return result
+    findings = scan_text(content)
+    if findings:
+        result += format_findings(findings)
+    return result
 
 
 class Journal:
@@ -92,11 +102,12 @@ class Journal:
         return entries
 
 
-def journal_add_impl(content: str, journal: Journal, tags: Optional[str] = None,
+def journal_add_impl(content: str, journal: Journal, config: AppConfig, tags: Optional[str] = None,
                      category: str = "general") -> str:
     tag_list = [t.strip() for t in (tags or "").split(",") if t.strip()]
     entry = journal.add(content, tag_list or None, category)
-    return f"Entry {entry['id']} saved at {entry['timestamp']}"
+    result = f"Entry {entry['id']} saved at {entry['timestamp']}"
+    return _scan_and_append(content, config, result)
 
 
 def journal_list_impl(journal: Journal, limit: int = 20, offset: int = 0,
@@ -137,11 +148,29 @@ def note_quick_impl(content: str, config: AppConfig) -> str:
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
     with open(inbox, "a", encoding="utf-8") as f:
         f.write(f"- [{timestamp}] {content}\n")
-    return f"Quick note saved to {inbox}"
+    result = f"Quick note saved to {inbox}"
+    return _scan_and_append(content, config, result)
+
+
+def _default_project_root(security: SecurityValidator) -> str:
+    """Default search root for project_scan/project_find when no path is given.
+
+    Uses the first entry in paths_allow (the real source of truth for what this
+    server can access) instead of a hardcoded Path.home()/"Repos" literal, which
+    silently drifted from the live config once paths_allow was narrowed to a
+    single custom directory (e.g. C:\Repos). Falls back to Path.home()/"Repos"
+    only if paths_allow is empty — a misconfigured-server case where no default
+    could be correct anyway; resolve_and_validate() will reject it with the same
+    clear error it already produces today.
+    """
+    allowed = security.config.security.paths_allow
+    if allowed:
+        return allowed[0]
+    return str(Path.home() / "Repos")
 
 
 async def project_scan_impl(security: SecurityValidator, path: Optional[str] = None) -> str:
-    base = Path(security.resolve_and_validate(path or str(Path.home() / "Repos")))
+    base = Path(security.resolve_and_validate(path or _default_project_root(security)))
     if not base.is_dir():
         return f"Directory not found: {base}"
     results = []
@@ -175,7 +204,7 @@ async def project_scan_impl(security: SecurityValidator, path: Optional[str] = N
 
 async def project_find_impl(filename: str, security: SecurityValidator,
                             path: Optional[str] = None) -> str:
-    base = Path(security.resolve_and_validate(path or str(Path.home() / "Repos")))
+    base = Path(security.resolve_and_validate(path or _default_project_root(security)))
     if not base.is_dir():
         return f"Directory not found: {base}"
     results = []
@@ -198,7 +227,7 @@ def register_personal_tools(mcp: FastMCP, config: AppConfig,
     @mcp.tool()
     async def journal_add(content: str, tags: Optional[str] = None,
                           category: str = "general") -> str:
-        return journal_add_impl(content, journal, tags, category)
+        return journal_add_impl(content, journal, config, tags, category)
 
     @mcp.tool()
     async def journal_list(limit: int = 20, offset: int = 0,

@@ -94,7 +94,7 @@ async def test_sh_session_expired(sec):
 
 @pytest.mark.asyncio
 async def test_sh_script(sec, manager):
-    result = await sh_script_impl("Write-Output 'script test'", sec)
+    result = await sh_script_impl("echo 'script test'", sec)
     assert "Exit code:" in result
 
 
@@ -150,6 +150,43 @@ async def test_sh_exec_cmd_basic(sec, manager):
     cmd_shell = resolve_shell("cmd")
     result = await sh_exec_impl("echo hello_from_cmd", sec, timeout=10, shell_info=cmd_shell)
     assert "hello_from_cmd" in result
+
+
+# --- #1: argv-style execution tests ---
+
+@pytest.mark.asyncio
+async def test_sh_exec_argv_native(sec, manager):
+    """Native executable runs directly (no shell)."""
+    result = await sh_exec_impl("python --version", sec, timeout=10)
+    assert "Python" in result
+
+
+@pytest.mark.asyncio
+async def test_sh_exec_argv_fallback_shell(sec, manager):
+    """Shell builtin (no native exe) falls back to shell execution."""
+    result = await sh_exec_impl("echo builtin_test", sec, timeout=10)
+    assert "builtin_test" in result
+
+
+@pytest.mark.asyncio
+async def test_sh_exec_argv_with_working_dir(sec, manager):
+    """argv execution with cwd parameter (cwd via create_subprocess_exec)."""
+    import tempfile
+    import os
+    tmpdir = tempfile.mkdtemp()
+    result = await sh_exec_impl(
+        'python -c "import os; print(os.getcwd())"',
+        sec, timeout=10, working_dir=tmpdir
+    )
+    assert os.path.basename(tmpdir) in result
+    os.rmdir(tmpdir)
+
+
+@pytest.mark.asyncio
+async def test_sh_exec_shell_operators_fallback(sec, manager):
+    """Commands with shell operators fall back to shell execution."""
+    result = await sh_exec_impl("echo pipe_test | findstr pipe_test", sec, timeout=10)
+    assert "Exit code:" in result
 
 
 # --- Mejora 3: Warnings estructurados ---

@@ -1,12 +1,12 @@
 # personal-mcp
 
-Custom MCP server for Windows workstation orchestration. High-security "Human-in-the-Loop" (HITL) model, fully async I/O, persistent PowerShell sessions.
+Custom MCP server for Windows workstation orchestration. Allowlist-based security with HITL approval for writes, secret scanning, per-operation rate limiting, fully async I/O, persistent PowerShell sessions.
 
 ## Architecture
 
 ```
 6 layers, hexagonal design:
-  Layer 1: Filesystem      — 11 tools (read, write, edit, list, tree, search, find, info, diff, batch, snapshot)
+  Layer 1: Filesystem      — 12 tools (read, write, edit, delete, list, tree, search, find, info, diff, batch, snapshot)
 Layer 2: Shell — 9 tools (exec, persistent sessions, script execution, history, configurable shell)
   Layer 3: SSH             — 4 tools (list hosts, connect, exec, disconnect) [disabled by default]
   Layer 4: Personal        — 8 tools (journal CRUD, quick notes, project scan, project find)
@@ -22,6 +22,7 @@ Layer 2: Shell — 9 tools (exec, persistent sessions, script execution, history
 | `fs_read` | Read file content (auto-detect binary) |
 | `fs_write` | Write file content |
 | `fs_edit` | Replace text in file with diff preview |
+| `fs_delete` | Delete a single file (no directories/recursion). `delete` tickets are always single-use — session/permanent grants are not possible, by design |
 | `fs_list` | List directory with filters |
 | `fs_tree` | Directory tree with depth limit |
 | `fs_search` | Grep-like regex search across files |
@@ -78,24 +79,25 @@ Layer 2: Shell — 9 tools (exec, persistent sessions, script execution, history
 ### Layer 6 — Permissions
 | Tool | Description |
 |------|-------------|
-| `fs_approve` | Approve a pending permission ticket (single/session/permanent) |
+| `fs_approve` | Approve a pending permission ticket (single/session) |
 | `fs_deny` | Explicitly deny a ticket |
-| `fs_request_allow` | Pre-authorize a path without requiring a ticket |
+| `fs_request_allow` | Create a pending permission ticket; use `fs_approve` to confirm |
 | `security_pending` | List all pending permission requests |
 | `security_revoke` | Revoke an active session/permanent grant |
 | `security_stats` | Permission system statistics |
 
 ## Security
 
-- **Human-in-the-Loop (HITL)**: No file operation (read, write, edit) or shell execution is performed without explicit user approval. The server generates a permission ticket, and the user must approve it via `fs_approve` before the action is executed.
+- **Human-in-the-Loop (HITL)**: Write operations and shell executions require explicit user approval via tickets. Use `fs_request_allow` to create a pending ticket, then `fs_approve` to confirm — no longer bypasses the ticket system. Read operations within `paths_allow` pass directly (no ticket needed).
 - **Strict Path Hard-Lock**: Only paths defined in `security.paths_allow` (and internal `data_dir`) are accessible. Any attempt to access paths outside this list is immediately denied with a hard error—no dynamic requests are permitted for external paths.
 - **Command Whitelist**: Shell execution is restricted to a strict whitelist of approved command prefixes (e.g., `git`, `npm`, `python`, `ls`). Commands not in the whitelist are blocked.
 - **Recursive Session Grants**: Approving a directory for a session (`level='session'`) automatically grants access to all its sub-directories and files, reducing approval friction for complex projects.
 - **Path denylist**: Paths matching `security.paths_deny` patterns (e.g. `**\node_modules\**`, `**\.git\**`) are blocked even if they're under an allowed directory.
-- **`validate_tool_path()`**: All layer 1/2 tools validate paths through this method. If a path is in `paths_allow` but lacks a grant, a `permission_required` JSON payload is returned for user approval.
+- **`validate_tool_path()`**: All layer 1 tools validate paths through this method. For write operations in `paths_allow` without a grant, a `permission_required` JSON ticket is returned. Reads in `paths_allow` pass directly (no ticket).
+- **Rate limiting per-operation**: Sliding window rate limiter (`security.rate_limit_commands_per_minute`) applied independently per operation type (read/write) in `validate_tool_path()`. Disabled when set to 0.
+- **Secret scanning**: File contents scanned for credentials (GitHub tokens, AWS keys, private keys, DB connection strings, etc.) on every `fs_read` — warns only, never blocks. Configurable via `security.secret_scanning_enabled`.
 - **Output truncation**: All shell output is capped at 1 MiB to prevent memory issues. Truncated output is flagged with a notice.
 - **Process tree cleanup**: Timed-out commands use `taskkill /T /F` to recursively terminate all child processes.
-- **Rate limits**: Commands/min and files/operation limits.
 - **Audit trail**: Every operation logged (circular buffer, 10k entries) with sensitive data automatically scrubbed.
 
 ## Shell Configuration
@@ -158,14 +160,15 @@ explanation of every field (in Spanish).
 - `security.paths_allow`: Accessible directories (default: `~/Repos`, `~/Desktop`, `~/OneDrive`, `~/.personal-mcp`)
 - `security.paths_deny`: Blocked path patterns (default: `**\node_modules\**`, `**\.git\**`, `**\bin\**`, `**\obj\**`, `~/AppData`)
 - `security.commands.allow_prefix`: Mandatory whitelist of permitted command prefixes (e.g. `git`, `npm`, `python`).
-- `security.rate_limit_commands_per_minute`: Max commands per minute (default: 60)
+- `security.rate_limit_commands_per_minute`: Max commands per minute (default: 60, 0 = disabled)
+- `security.secret_scanning_enabled`: Scan file contents for secrets on fs_read (default: true)
 - `shell.session_timeout_seconds`: Session idle timeout (default: 600)
 - `ssh.enabled`: Set `true` to enable SSH layer (requires ~/.ssh/config)
 
 ## Development
 
 ```bash
-.\.venv\Scripts\python -m pytest tests/ -v      # 121 tests (all pass)
-.\.venv\ modifying .venv\Scripts\python -m src.server             # stdio mode
+.\.venv\Scripts\python -m pytest tests/ -v      # 257 tests (all pass)
+.\.venv\Scripts\python -m src.server             # stdio mode
 .\install.ps1                    # register with Claude Desktop (auto-creates venv)
 ```

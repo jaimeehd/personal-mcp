@@ -16,7 +16,13 @@ from src.audit import AuditLog
 
 def _get_version(cmd: str, flag: str) -> str:
     try:
-        r = subprocess.run([cmd, flag], capture_output=True, text=True, timeout=5)
+        if shutil.which(cmd) is None:
+            return "not found"
+        r = subprocess.run([cmd, flag],
+                           stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE,
+                           text=True, timeout=5)
         return (r.stdout or r.stderr).strip()[:100]
     except Exception:
         return "not found"
@@ -103,8 +109,8 @@ def register_health_tools(mcp: FastMCP, config: AppConfig,
             r = subprocess.run(
                 ["powershell", "-NoProfile", "-Command",
                  f"Get-Process | Sort-Object CPU -Descending | Select-Object -First {top} "
-                 "Name, Id, @{N='CPU(s)';E={{$_.CPU.ToString('F1')}}}, "
-                 "@{N='MemMB';E={{($_.WorkingSet/1MB).ToString('F0')}}} | Format-Table -AutoSize"],
+                 "Name, Id, @{N='CPU(s)';E={$_.CPU.ToString('F1')}}, "
+                 "@{N='MemMB';E={($_.WorkingSet/1MB).ToString('F0')}} | Format-Table -AutoSize"],
                 capture_output=True, text=True, timeout=10
             )
             return r.stdout or r.stderr

@@ -77,6 +77,9 @@ class PermissionManager:
 
         ticket.status = "approved"
         grant_level = level or ticket.level
+        forced_single = ticket.operation == "delete" and grant_level != GrantLevel.SINGLE
+        if forced_single:
+            grant_level = GrantLevel.SINGLE
 
         if grant_level == GrantLevel.SESSION:
             resolved = self._resolve(ticket.resource)
@@ -89,7 +92,10 @@ class PermissionManager:
         elif grant_level == GrantLevel.PERMANENT:
             self._add_permanent_grant(self._resolve(ticket.resource))
 
-        return True, f"Granted {grant_level.value} access to {ticket.resource}"
+        msg = f"Granted {grant_level.value} access to {ticket.resource}"
+        if forced_single:
+            msg += " (delete is always single-use; session/permanent not allowed)"
+        return True, msg
 
     def deny(self, ticket_id: str) -> tuple[bool, str]:
         ticket = self._tickets.get(ticket_id)
@@ -130,7 +136,7 @@ class PermissionManager:
             res_str = str(current)
             if res_str in self._session_grants:
                 ops = self._session_grants[res_str]
-                if operation in ops or "*" in ops:
+                if operation in ops or (operation != "delete" and "*" in ops):
                     return True
             if current == current.parent:
                 break
@@ -139,7 +145,7 @@ class PermissionManager:
         if resolved in self._single_grants:
             try:
                 ops = self._single_grants[resolved]
-                if operation in ops or "*" in ops:
+                if operation in ops or (operation != "delete" and "*" in ops):
                     if not consume:
                         return True
                     actual_op = operation if operation in ops else "*"

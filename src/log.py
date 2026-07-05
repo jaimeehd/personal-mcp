@@ -20,6 +20,16 @@ def scrub_sensitive_data(data: Any) -> Any:
         return [scrub_sensitive_data(item) for item in data]
     return data
 
+def sanitize_log_value(value: str) -> str:
+    """Escape control characters before interpolating a raw string into a log line.
+
+    Call sites that log a tool argument directly via %s (not via json.dumps, which
+    already escapes \\n/\\r as part of JSON string encoding) must sanitize it first —
+    otherwise a crafted argument containing a literal newline can forge fake log
+    entries (e.g. a fake "[INFO] User authenticated as admin" line) in server.log.
+    """
+    return value.replace("\r\n", "\\n").replace("\n", "\\n").replace("\r", "\\r")
+
 def configure(data_dir: str, level: str = "INFO",
               max_bytes: int = 10 * 1024 * 1024,
               backup_count: int = 3) -> None:

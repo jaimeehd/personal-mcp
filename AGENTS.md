@@ -11,7 +11,7 @@
 ## Quick start
 ```powershell
 cd C:\Repos\.personal-mcp
-.\.venv\Scripts\python -m pytest tests/ -v       # 274 tests (272 pass, 2 known failing — see CHANGELOG 1.4.14)
+.\.venv\Scripts\python -m pytest tests/ -v       # 274 tests (all pass)
 .\.venv\Scripts\python -m src.server              # stdio mode for Claude Desktop
 .\install.ps1                                     # register with Claude Desktop (auto-creates venv)
 .\sync-config.ps1                                 # refresh the read-only config.json mirror from ~/.personal-mcp/config.json

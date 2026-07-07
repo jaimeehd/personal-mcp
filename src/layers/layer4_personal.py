@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 import subprocess
@@ -169,44 +170,56 @@ def _default_project_root(security: SecurityValidator) -> str:
     return str(Path.home() / "Repos")
 
 
+def _git_project_info(entry: Path) -> dict:
+    """Gather branch/status for one project dir via subprocess.run() (blocking).
+
+    Must be called through asyncio.to_thread() — subprocess.run() is synchronous,
+    and project_scan_impl/project_find_impl are async functions that FastMCP runs
+    on the single shared event loop. Calling this directly would block every other
+    concurrent tool call for as long as git takes to respond, once per project
+    under the scanned directory (reproduced live: hung the whole MCP connection
+    for 4+ minutes scanning ~10 real repos under C:\\Repos after paths_allow was
+    narrowed to point at it — see CHANGELOG 1.4.11).
+    """
+    info = {"project": entry.name}
+    git_dir = entry / ".git"
+    if not git_dir.exists():
+        info["branch"] = "(no git)"
+        return info
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(entry), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=10
+        )
+        info["branch"] = r.stdout.strip()
+        r2 = subprocess.run(
+            ["git", "-C", str(entry), "status", "--porcelain"],
+            capture_output=True, text=True, timeout=10
+        )
+        changes = len([l for l in r2.stdout.splitlines() if l.strip()])
+        info["uncommitted_changes"] = changes
+    except (subprocess.TimeoutExpired, OSError):
+        info["branch"] = "error"
+    return info
+
+
 async def project_scan_impl(security: SecurityValidator, path: Optional[str] = None) -> str:
     base = Path(security.resolve_and_validate(path or _default_project_root(security)))
     if not base.is_dir():
         return f"Directory not found: {base}"
-    results = []
-    for entry in sorted(base.iterdir()):
-        if not entry.is_dir() or entry.name.startswith("."):
-            continue
-        git_dir = entry / ".git"
-        info = {"project": entry.name}
-        if git_dir.exists():
-            try:
-                r = subprocess.run(
-                    ["git", "-C", str(entry), "rev-parse", "--abbrev-ref", "HEAD"],
-                    capture_output=True, text=True, timeout=10
-                )
-                info["branch"] = r.stdout.strip()
-                r2 = subprocess.run(
-                    ["git", "-C", str(entry), "status", "--porcelain"],
-                    capture_output=True, text=True, timeout=10
-                )
-                changes = len([l for l in r2.stdout.splitlines() if l.strip()])
-                info["uncommitted_changes"] = changes
-            except (subprocess.TimeoutExpired, OSError):
-                info["branch"] = "error"
-        else:
-            info["branch"] = "(no git)"
-        results.append(info)
+    entries = [e for e in sorted(base.iterdir()) if e.is_dir() and not e.name.startswith(".")]
+    results = [await asyncio.to_thread(_git_project_info, e) for e in entries]
     lines = [f"{r['project']:30s} branch: {r.get('branch', '?'):20s} changes: {r.get('uncommitted_changes', 0)}"
              for r in results]
     return "\n".join(lines)
 
 
-async def project_find_impl(filename: str, security: SecurityValidator,
-                            path: Optional[str] = None) -> str:
-    base = Path(security.resolve_and_validate(path or _default_project_root(security)))
-    if not base.is_dir():
-        return f"Directory not found: {base}"
+def _find_files_sync(base: Path, filename: str) -> List[str]:
+    """Walk base.rglob() for filename (blocking I/O) — must run via asyncio.to_thread(),
+    same reasoning as _git_project_info: rglob() over C:\\Repos walks every file in
+    every project (including node_modules) before the exclusion filter below applies,
+    which can block the event loop for as long as that traversal takes.
+    """
     results = []
     for entry in base.rglob(filename):
         if any(p in entry.parts for p in (".git", "node_modules", "bin", "obj")):
@@ -214,6 +227,15 @@ async def project_find_impl(filename: str, security: SecurityValidator,
         results.append(str(entry))
         if len(results) >= 50:
             break
+    return results
+
+
+async def project_find_impl(filename: str, security: SecurityValidator,
+                            path: Optional[str] = None) -> str:
+    base = Path(security.resolve_and_validate(path or _default_project_root(security)))
+    if not base.is_dir():
+        return f"Directory not found: {base}"
+    results = await asyncio.to_thread(_find_files_sync, base, filename)
     return "\n".join(results) if results else f"No files named '{filename}' found"
 
 

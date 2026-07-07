@@ -1,4 +1,7 @@
+import hashlib
+import hmac
 import json
+import secrets
 import time
 import uuid
 import fnmatch
@@ -7,6 +10,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set
 
 from src.config import AppConfig
+from src.confirm_popup import show_confirmation_code
 
 
 class GrantLevel(str, Enum):
@@ -27,6 +31,9 @@ class PermissionTicket:
         self.expires_at = time.time() + ttl_seconds
         self.status = "pending"
         self.resolved_path: Optional[str] = None
+        # Generado por PermissionManager al crear el ticket; nunca se expone
+        # en to_dict() ni en ningun tool MCP. Ver src/confirm_popup.py.
+        self.confirm_code: Optional[str] = None
 
     @property
     def is_expired(self) -> bool:
@@ -51,6 +58,14 @@ class PermissionManager:
         self._tickets: Dict[str, PermissionTicket] = {}
         self._session_grants: Dict[str, Set[str]] = {}
         self._single_grants: Dict[str, Dict[str, int]] = {}
+        # Clave HMAC en memoria, generada al arrancar el proceso. Nunca se
+        # persiste a disco ni se expone via ningun tool: es lo que impide
+        # que un agente adivine o derive el confirm_code de un ticket.
+        self._confirm_secret: bytes = secrets.token_bytes(32)
+
+    def _generate_confirm_code(self, ticket_id: str) -> str:
+        digest = hmac.new(self._confirm_secret, ticket_id.encode(), hashlib.sha256).hexdigest()
+        return str(int(digest[:8], 16) % 1_000_000).zfill(6)
 
     def request(self, resource: str, operation: str,
                 level: GrantLevel = GrantLevel.SINGLE) -> PermissionTicket:
@@ -59,13 +74,17 @@ class PermissionManager:
                     and existing.operation == operation
                     and existing.status == "pending"
                     and not existing.is_expired):
+                show_confirmation_code(existing.resource, existing.operation, existing.confirm_code)
                 return existing
         ticket = PermissionTicket(resource, operation, level)
+        ticket.confirm_code = self._generate_confirm_code(ticket.id)
         self._tickets[ticket.id] = ticket
+        show_confirmation_code(ticket.resource, ticket.operation, ticket.confirm_code)
         return ticket
 
     def approve(self, ticket_id: str,
-                level: Optional[GrantLevel] = None) -> tuple[bool, str]:
+                level: Optional[GrantLevel] = None,
+                confirm_code: Optional[str] = None) -> tuple[bool, str]:
         ticket = self._tickets.get(ticket_id)
         if not ticket:
             return False, f"Ticket not found: {ticket_id}"
@@ -74,6 +93,8 @@ class PermissionManager:
             return False, f"Ticket expired: {ticket_id}"
         if ticket.status != "pending":
             return False, f"Ticket already {ticket.status}: {ticket_id}"
+        if not confirm_code or not hmac.compare_digest(confirm_code, ticket.confirm_code):
+            return False, "Invalid or missing confirmation code."
 
         ticket.status = "approved"
         grant_level = level or ticket.level
@@ -136,7 +157,7 @@ class PermissionManager:
             res_str = str(current)
             if res_str in self._session_grants:
                 ops = self._session_grants[res_str]
-                if operation in ops or (operation != "delete" and "*" in ops):
+                if operation in ops or (operation not in ("delete", "execute") and "*" in ops):
                     return True
             if current == current.parent:
                 break
@@ -145,7 +166,7 @@ class PermissionManager:
         if resolved in self._single_grants:
             try:
                 ops = self._single_grants[resolved]
-                if operation in ops or (operation != "delete" and "*" in ops):
+                if operation in ops or (operation not in ("delete", "execute") and "*" in ops):
                     if not consume:
                         return True
                     actual_op = operation if operation in ops else "*"

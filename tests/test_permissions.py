@@ -43,14 +43,14 @@ def test_ticket_create(perm):
 
 def test_approve_single(perm):
     ticket = perm.request("C:\\Windows\\system.ini", "read")
-    ok, msg = perm.approve(ticket.id)
+    ok, msg = perm.approve(ticket.id, confirm_code=ticket.confirm_code)
     assert ok is True
     assert ticket.status == "approved"
 
 
 def test_approve_session(perm):
     ticket = perm.request("C:\\Windows\\system.ini", "read", GrantLevel.SESSION)
-    ok, msg = perm.approve(ticket.id)
+    ok, msg = perm.approve(ticket.id, confirm_code=ticket.confirm_code)
     assert ok is True
     assert perm.check_granted("C:\\Windows\\system.ini", "read") is True
 
@@ -58,7 +58,7 @@ def test_approve_session(perm):
 def test_approve_permanent(perm, temp_home):
     rsrc = str(temp_home / "outside.txt")
     ticket = perm.request(rsrc, "read", GrantLevel.PERMANENT)
-    ok, msg = perm.approve(ticket.id)
+    ok, msg = perm.approve(ticket.id, confirm_code=ticket.confirm_code)
     assert ok is True
     assert rsrc in perm.config.security.paths_allow
 
@@ -89,7 +89,7 @@ def test_pending_list(perm):
 def test_pending_after_approve(perm):
     t1 = perm.request("C:\\Windows\\system.ini", "read")
     t2 = perm.request("C:\\Windows\\win.ini", "read")
-    perm.approve(t1.id)
+    perm.approve(t1.id, confirm_code=t1.confirm_code)
     pending = perm.pending()
     assert len(pending) == 1
     assert pending[0]["id"] == t2.id
@@ -97,7 +97,7 @@ def test_pending_after_approve(perm):
 
 def test_revoke(perm):
     ticket = perm.request("C:\\Windows\\system.ini", "read", GrantLevel.SESSION)
-    perm.approve(ticket.id)
+    perm.approve(ticket.id, confirm_code=ticket.confirm_code)
     assert perm.check_granted("C:\\Windows\\system.ini", "read") is True
     perm.revoke("C:\\Windows\\system.ini")
     assert perm.check_granted("C:\\Windows\\system.ini", "read") is False
@@ -113,7 +113,7 @@ def test_stats(perm):
     perm.request("C:\\Windows\\a.ini", "read")
     perm.request("C:\\Windows\\b.ini", "read")
     t3 = perm.request("C:\\Windows\\c.ini", "read")
-    perm.approve(t3.id)
+    perm.approve(t3.id, confirm_code=t3.confirm_code)
     stats = perm.stats()
     assert stats["total_tickets"] == 3
     assert stats["pending"] == 2

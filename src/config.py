@@ -27,6 +27,10 @@ class CommandPolicy(BaseModel):
     require_flag_approval: List[str] = Field(default_factory=lambda: [
         "-force", "-f", "/f", "/q", "-recurse -force"
     ])
+    # General-purpose interpreters require an explicit HITL execute-approval ticket
+    # (session grant) before sh_exec/sh_session_send will run them, even though they
+    # remain in allow_prefix. See security.validate_shell_execution() in security.py.
+    approval_required_prefix: List[str] = Field(default_factory=lambda: ["python", "node", "bash"])
 
     def is_command_allowed(self, command: str) -> tuple[bool, str]:
         cmd_lower = command.strip().lower()

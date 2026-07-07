@@ -477,9 +477,9 @@ class TestPermissionRequired:
         text = _extract_text(result)
         assert "Access denied" in text
 
-    def test_fs_read_inside_allowed_no_grant_succeeds(self, mcp_server):
-        """Read inside paths_allow works without grant (Option C)."""
-        target = str(Path.home() / "Repos" / ".smoke_no_access.txt")
+    def test_fs_read_inside_data_dir_no_grant_succeeds(self, mcp_server):
+        """Read inside data_dir works without grant."""
+        target = str(Path.home() / ".personal-mcp" / "data" / ".smoke_no_access.txt")
         Path(target).parent.mkdir(parents=True, exist_ok=True)
         Path(target).write_text("no grant test")
         try:

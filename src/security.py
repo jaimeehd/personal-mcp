@@ -2,6 +2,7 @@ import fnmatch
 import json
 import os
 import re
+import shutil
 import time
 from collections import deque
 from pathlib import Path
@@ -124,6 +125,32 @@ class SecurityValidator:
         if not allowed:
             raise CommandNotAllowedError(reason)
         return command
+
+    def validate_shell_execution(self, command: str) -> Optional[str]:
+        """Gate general-purpose interpreters (config.security.commands.approval_required_prefix)
+        behind an explicit execute ticket, on top of the existing allow_prefix whitelist.
+
+        Returns None when execution is allowed. Returns a ticket JSON string (same
+        contract as validate_tool_path) when an interpreter segment needs approval.
+        Empty approval_required_prefix (the default) makes this a no-op.
+        """
+        prefixes = self.config.security.commands.approval_required_prefix
+        if not prefixes:
+            return None
+        from src.shell_resolver import split_command_segments
+        prefixes_lower = {p.lower() for p in prefixes}
+        for segment in (split_command_segments(command) or [command]):
+            words = segment.strip().split()
+            if not words:
+                continue
+            first_word_clean = Path(words[0]).stem.lower()
+            if first_word_clean not in prefixes_lower:
+                continue
+            exe_path = shutil.which(words[0]) or words[0]
+            if self.perm_manager and self.perm_manager.check_granted(exe_path, "execute"):
+                continue
+            return self.request_permission(exe_path, "execute")
+        return None
 
     def validate_file_count(self, count: int) -> int:
         limit = self.config.security.rate_limit_files_per_operation

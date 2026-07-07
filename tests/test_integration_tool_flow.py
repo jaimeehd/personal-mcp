@@ -170,7 +170,7 @@ def _make_fs_batch(security):
 
 
 def _make_fs_approve(security, pm):
-    async def fs_approve(ticket_id: str, level: str = "single") -> str:
+    async def fs_approve(ticket_id: str, confirm_code: str, level: str = "single") -> str:
         try:
             gl = GrantLevel(level)
         except ValueError:
@@ -178,7 +178,7 @@ def _make_fs_approve(security, pm):
         if gl == GrantLevel.PERMANENT:
             return ("Permanent grants are disabled from tool calls. "
                     "Edit ~/.personal-mcp/config.json directly to add paths.")
-        ok, msg = pm.approve(ticket_id, gl)
+        ok, msg = pm.approve(ticket_id, gl, confirm_code)
         return msg
     return fs_approve
 
@@ -201,7 +201,9 @@ def _make_fs_request_allow(security, pm):
                     "Edit ~/.personal-mcp/config.json directly to add paths.")
         ticket = pm.request(path, operation="*", level=gl)
         return (f"Ticket {ticket.id} created for '{path}' (pending). "
-                f"Use fs_approve(ticket_id='{ticket.id}', level='{gl.value}') to confirm.")
+                f"A confirmation code was shown on your screen — it is NOT visible "
+                f"to this agent. Use fs_approve(ticket_id='{ticket.id}', "
+                f"confirm_code='<code from the popup>', level='{gl.value}') to confirm.")
     return fs_request_allow
 
 
@@ -485,14 +487,14 @@ class TestPermissionTools:
         config, _, pm = wired_system
         path = str(Path(config.security.paths_allow[0]) / "approve_single.txt")
         ticket = pm.request(path, "read", GrantLevel.SINGLE)
-        result = await tools["fs_approve"](ticket.id, "single")
+        result = await tools["fs_approve"](ticket.id, ticket.confirm_code, "single")
         assert "Granted single access" in result
 
     async def test_fs_approve_session(self, tools, wired_system):
         config, _, pm = wired_system
         path = str(Path(config.security.paths_allow[0]) / "approve_session.txt")
         ticket = pm.request(path, "read", GrantLevel.SESSION)
-        result = await tools["fs_approve"](ticket.id, "session")
+        result = await tools["fs_approve"](ticket.id, ticket.confirm_code, "session")
         assert "Granted session access" in result
 
     async def test_fs_approve_permanent_rejected(self, tools, wired_system):
@@ -500,12 +502,12 @@ class TestPermissionTools:
         path = config.data_dir + "\\..\\perm_approve.txt"
         resolved = str(Path(path).resolve())
         ticket = pm.request(resolved, "read", GrantLevel.PERMANENT)
-        result = await tools["fs_approve"](ticket.id, "permanent")
+        result = await tools["fs_approve"](ticket.id, ticket.confirm_code, "permanent")
         assert "disabled from tool calls" in result
         assert resolved not in config.security.paths_allow
 
     async def test_fs_approve_invalid_level(self, tools):
-        result = await tools["fs_approve"]("perm_xxx", "invalid")
+        result = await tools["fs_approve"]("perm_xxx", "any_code", level="invalid")
         assert "Invalid level" in result
 
     async def test_fs_deny(self, tools, wired_system):
@@ -529,7 +531,8 @@ class TestPermissionTools:
         path = str(Path(config.security.paths_allow[0]) / "pre_allow_full.txt")
         r1 = await tools["fs_request_allow"](path, "session")
         ticket_id = r1.split("Ticket ")[1].split(" ")[0]
-        result = await tools["fs_approve"](ticket_id, "session")
+        code = pm._tickets[ticket_id].confirm_code
+        result = await tools["fs_approve"](ticket_id, code, "session")
         assert "Granted session access" in result
         assert pm.check_granted(path, "*") is True
 
@@ -862,13 +865,14 @@ class TestFullTicketLifecycle:
 
     async def test_tool_call_then_approve_then_call_ok(self, tools, wired_system):
         """Write blocked → approve → write succeeds (write requires grant)."""
-        config, _, _ = wired_system
+        config, _, pm = wired_system
         f = _create_file(config, "lifecycle_approve.txt", "data")
         r1 = await tools["fs_write"](f["path"], "new")
         data = json.loads(r1)
         assert data["status"] == "permission_required"
         ticket_id = data["ticket"]
-        r_approve = await tools["fs_approve"](ticket_id, "session")
+        code = pm._tickets[ticket_id].confirm_code
+        r_approve = await tools["fs_approve"](ticket_id, code, "session")
         assert "Granted session access" in r_approve
         r2 = await tools["fs_write"](f["path"], "new")
         assert "Written" in r2
@@ -890,7 +894,7 @@ class TestFullTicketLifecycle:
         config, _, pm = wired_system
         f = _create_file(config, "lifecycle_session.txt", "data")
         ticket = pm.request(f["path"], "read", GrantLevel.SESSION)
-        await tools["fs_approve"](ticket.id, "session")
+        await tools["fs_approve"](ticket.id, ticket.confirm_code, "session")
         for _ in range(3):
             result = await tools["fs_read"](f["path"])
             assert "data" in result
@@ -900,7 +904,7 @@ class TestFullTicketLifecycle:
         config, sec, pm = wired_system
         f = _create_file(config, "lifecycle_single.txt", "data")
         ticket = pm.request(f["path"], "write", GrantLevel.SINGLE)
-        pm.approve(ticket.id)
+        pm.approve(ticket.id, confirm_code=ticket.confirm_code)
         # validate_tool_path consumes it (would pass to _impl)
         err = sec.validate_tool_path(f["path"], "write")
         assert err is None
@@ -933,8 +937,8 @@ class TestFullTicketLifecycle:
         f2 = _create_file(config, "lifecycle_stats_b.txt")
         t1 = pm.request(f1["path"], "read", GrantLevel.SESSION)
         t2 = pm.request(f2["path"], "read", GrantLevel.SINGLE)
-        await tools["fs_approve"](t1.id, "session")
-        await tools["fs_approve"](t2.id, "single")
+        await tools["fs_approve"](t1.id, t1.confirm_code, "session")
+        await tools["fs_approve"](t2.id, t2.confirm_code, "single")
         stats = json.loads(await tools["security_stats"]())
         assert stats["total_tickets"] == 2
         assert stats["approved"] == 2

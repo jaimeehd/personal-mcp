@@ -72,8 +72,47 @@ uno de estos patrones, queda bloqueada igual. Es una segunda capa de seguridad.
 - deny (lista negra): comandos que nunca se permiten. Incluye apagar el equipo,
   reiniciar, formatear discos, borrar todo de forma forzada, y modificar
   cuentas de usuario de Windows.
+
+  💡 **Recomendación (agregada 2026-07-05):** si usás `python` o `node`, vale
+  la pena sumar patrones específicos de operaciones peligrosas que esos
+  programas pueden ejecutar por dentro — por ejemplo `os.system`,
+  `subprocess.run`, `shutil.rmtree`, `child_process`. La idea, tomada del
+  mismo enfoque que usa Desktop Commander (otro asistente similar): no es una
+  protección perfecta — alguien decidido a evadirla puede reescribir el código
+  de otra forma — pero es gratis (solo texto en una lista) y frena el error
+  honesto, que es el riesgo más probable en el uso diario. Ejemplo de lista
+  ampliada, agregable a `deny`:
+  ```json
+  "os.system", "subprocess.run", "subprocess.Popen", "subprocess.call",
+  "shutil.rmtree", "child_process", "require('fs').unlink", "curl * | ",
+  "wget * | ", "iex (", "Invoke-Expression"
+  ```
 - require_flag_approval: banderas de comandos (como -force o /f) que obligan
   a una confirmación extra porque suelen ser destructivas.
+
+### approval_required_prefix — Pedir permiso antes de usar programas "todopoderosos" (agregado 2026-07-05)
+
+`python`, `node` y `bash` son distintos al resto de los comandos permitidos:
+una vez que se les deja correr, pueden hacer casi cualquier cosa por dentro —
+son como una navaja suiza, no una herramienta de un solo uso como `git status`.
+
+Por eso, además de estar en la lista de comandos permitidos, estos tres
+requieren un permiso aparte la primera vez que se usan en cada sesión de
+conversación — igual que ya te pide permiso para borrar un archivo. Una vez
+que decís que sí, no te vuelve a preguntar por ese mismo programa en esa
+sesión (salvo que uses `fs_approve` con "una sola vez" en lugar de "toda la
+sesión").
+
+⚠️ **Importante, para que no haya sorpresas:** esto NO convierte a `python`/
+`node`/`bash` en programas seguros. Solo agrega el paso de preguntarte antes
+de la primera vez. Una vez que decís que sí, siguen siendo tan potentes como
+siempre — de ahí que la recomendación de la lista negra de arriba siga
+siendo útil incluso después de aprobar.
+
+Si querés que esto NO te pida permiso (por ejemplo, si tenés algo automático
+corriendo sin supervisión), podés vaciar esta lista en tu config oficial. Si
+la vaciás, `python`/`node`/`bash` vuelven a correr sin preguntar, igual que
+`git` o `npm` hoy.
 
 ### rate_limit_commands_per_minute — Límite de comandos por minuto
 

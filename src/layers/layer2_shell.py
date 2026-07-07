@@ -455,6 +455,9 @@ def register_shell_tools(mcp: FastMCP, security: SecurityValidator,
         err = _validate_command_paths(command, security)
         if err:
             return err
+        err = security.validate_shell_execution(command)
+        if err:
+            return err
         try:
             si = manager.resolve_shell(shell) if shell else manager.shell_info
         except ValueError as e:
@@ -485,6 +488,9 @@ def register_shell_tools(mcp: FastMCP, security: SecurityValidator,
     @mcp.tool()
     async def sh_session_send(session_id: str, command: str, timeout: int = 30) -> str:
         err = _validate_command_paths(command, security)
+        if err:
+            return err
+        err = security.validate_shell_execution(command)
         if err:
             return err
         warnings = _scan_command_warnings(command, security)

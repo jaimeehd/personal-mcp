@@ -12,7 +12,7 @@ def register_permission_tools(mcp: FastMCP, security: SecurityValidator,
                               perm_manager: PermissionManager) -> None:
 
     @mcp.tool()
-    async def fs_approve(ticket_id: str, level: str = "single") -> str:
+    async def fs_approve(ticket_id: str, confirm_code: str, level: str = "single") -> str:
         try:
             gl = GrantLevel(level)
         except ValueError:
@@ -20,7 +20,7 @@ def register_permission_tools(mcp: FastMCP, security: SecurityValidator,
         if gl == GrantLevel.PERMANENT:
             return ("Permanent grants are disabled from tool calls. "
                     "Edit ~/.personal-mcp/config.json directly to add paths.")
-        ok, msg = perm_manager.approve(ticket_id, gl)
+        ok, msg = perm_manager.approve(ticket_id, gl, confirm_code)
         return msg
 
     @mcp.tool()
@@ -39,7 +39,9 @@ def register_permission_tools(mcp: FastMCP, security: SecurityValidator,
                     "Edit ~/.personal-mcp/config.json directly to add paths.")
         ticket = perm_manager.request(path, operation="*", level=gl)
         return (f"Ticket {ticket.id} created for '{path}' (pending). "
-                f"Use fs_approve(ticket_id='{ticket.id}', level='{gl.value}') to confirm.")
+                f"A confirmation code was shown on your screen — it is NOT visible "
+                f"to this agent. Use fs_approve(ticket_id='{ticket.id}', "
+                f"confirm_code='<code from the popup>', level='{gl.value}') to confirm.")
 
     @mcp.tool()
     async def security_pending() -> str:

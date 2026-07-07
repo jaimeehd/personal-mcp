@@ -185,7 +185,7 @@ async def test_sh_exec_argv_with_working_dir(sec, manager):
 @pytest.mark.asyncio
 async def test_sh_exec_shell_operators_fallback(sec, manager):
     """Commands with shell operators fall back to shell execution."""
-    result = await sh_exec_impl("echo pipe_test | findstr pipe_test", sec, timeout=10)
+    result = await sh_exec_impl("echo pipe_test | python --version", sec, timeout=10)
     assert "Exit code:" in result
 
 

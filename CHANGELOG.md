@@ -10,7 +10,7 @@
 - Also fixed in this release: `test_smoke_runtime.py::test_fs_read_outside_allowed_returns_error` was asserting against `C:\Windows\system.ini`, which stopped being "outside `paths_allow`" once `paths_allow` became `["C:\\"]` (`1.4.26`) — not a bug in the code, a stale assumption in the test. Now asserts against an `AppData` path, which `paths_deny` still genuinely blocks.
 
 ### Verified
-- Full suite re-run 2026-07-20: **283 passed, 0 failed**. Note: this does not match `1.4.23`'s claimed "331 tests" — discrepancy not investigated in this release, `283` is the current verified ground truth. `AGENTS.md`'s Quick start comment updated to reflect this rather than repeat the unverified `331` figure.
+- Full suite re-run 2026-07-20: **283 passed, 0 failed**. This does not match `1.4.23`'s claimed "331 tests". **Investigated same day**: compared the live tree against two independent full-repo backup copies (`.personal-mcp - copia`, a snapshot at v1.4.14, and `.personal-mcp - copia (2)`, a snapshot of the exact pre-recovery state this release's `1.4.28` entry describes — same branch name, same stash, same 8 uncommitted files). Neither copy collects more tests than the live tree (278 and fewer respectively, vs. 283 live) — both are earlier or equal states, not sources of missing work. Conclusion: no tests were lost; `1.4.23`'s "331" was never accurate (never verified again after that entry was written, per the pattern already flagged in `1.4.17`'s "Removed unverifiable '274 tests' claim"). `283` stands as the current, twice-verified ground truth.
 
 ## [1.4.28] — 2026-07-19
 

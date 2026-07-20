@@ -11,7 +11,7 @@
 ## Quick start
 ```powershell
 cd C:\Repos\.personal-mcp
-.\.venv\Scripts\python -m pytest tests/ -v       # 283 tests, verified 2026-07-20 (0 failed) — CHANGELOG 1.4.23 claimed 331; discrepancy not yet explained, treat 283 as current ground truth until investigated
+.\.venv\Scripts\python -m pytest tests/ -v       # 283 tests, verified 2026-07-20 (0 failed). CHANGELOG 1.4.23 claimed 331 -- investigated (1.4.29): compared against two independent repo backups, neither has more tests than this tree. 331 was never accurate, not a loss.
 .\.venv\Scripts\python -m src.server              # stdio mode for Claude Desktop
 .\install.ps1                                     # register with Claude Desktop (auto-creates venv)
 .\sync-config.ps1                                 # refresh the read-only config.json mirror from ~/.personal-mcp/config.json

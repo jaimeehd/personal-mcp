@@ -102,6 +102,19 @@ class SecurityConfig(BaseModel):
         "**\\node_modules\\**", "**\\.git\\**", "**\\bin\\**", "**\\obj\\**",
         str(Path.home() / "AppData"),
     ])
+    # Excepcion acotada a paths_deny, para necesidades legitimas como verificar
+    # artefactos de build de un proyecto (.NET, etc.) sin abrir **\bin\**/**\obj\**
+    # en general -- eso sigue bloqueado para todo lo demas (node_modules,
+    # binarios de terceros, etc.). Se evalua SOLO para operaciones de lectura
+    # (fs_find/fs_read) y SOLO si la extension del archivo esta en
+    # paths_deny_exception_extensions. Nunca aplica a escritura, borrado ni
+    # ejecucion -- ver SecurityValidator._deny_exception_applies() en security.py.
+    # Vacio por defecto: no cambia el comportamiento existente hasta que se
+    # agregue un patron explicitamente.
+    paths_deny_exceptions: List[str] = Field(default_factory=list)
+    paths_deny_exception_extensions: List[str] = Field(default_factory=lambda: [
+        ".dll", ".exe", ".pdb"
+    ])
     commands: CommandPolicy = Field(default_factory=CommandPolicy)
     rate_limit_commands_per_minute: int = 60
     rate_limit_files_per_operation: int = 100

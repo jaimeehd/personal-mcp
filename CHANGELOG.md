@@ -1,5 +1,144 @@
 # Changelog
 
+## [1.4.29] — 2026-07-20
+
+### Added — narrow, read-only exception to `paths_deny` for build artifacts
+- New `SecurityConfig` fields: `paths_deny_exceptions: List[str]` (explicit glob patterns, empty by default) and `paths_deny_exception_extensions: List[str]` (default `.dll`/`.exe`/`.pdb`). New `SecurityValidator._deny_exception_applies()`, checked in `resolve_and_validate()` only when a `paths_deny` pattern would otherwise reject the path.
+- Motivation: `paths_deny` blanket-blocks `**\bin\**`/`**\obj\**` (vendored/build noise, `1.4.9`+), but that also blocks legitimately inspecting a project's own build output (e.g. a compiled `.dll` in a .NET project like HikBioAccess) without opening those folders in general.
+- Scope, by design: only `operation="read"` (never write/delete/execute — verified by a dedicated test); only extensions explicitly in `paths_deny_exception_extensions`; only paths matching an explicit pattern in `paths_deny_exceptions` (empty by default — no behavior change until a pattern is added). Because `fnmatch`'s `**` has no true recursive semantics (it's just `*` twice), a pattern like `MyProj\**\bin\**` requires at least one intermediate subfolder and will not match `MyProj\bin\...` directly — a project needing both shapes needs two explicit patterns (documented inline in `config.py` and in the test fixtures).
+- 5 new tests in `test_security.py`: nested match, direct match, non-matching extension still blocked, non-matching project still blocked, write operation still blocked even with matching extension/pattern.
+- Also fixed in this release: `test_smoke_runtime.py::test_fs_read_outside_allowed_returns_error` was asserting against `C:\Windows\system.ini`, which stopped being "outside `paths_allow`" once `paths_allow` became `["C:\\"]` (`1.4.26`) — not a bug in the code, a stale assumption in the test. Now asserts against an `AppData` path, which `paths_deny` still genuinely blocks.
+
+### Verified
+- Full suite re-run 2026-07-20: **283 passed, 0 failed**. Note: this does not match `1.4.23`'s claimed "331 tests" — discrepancy not investigated in this release, `283` is the current verified ground truth. `AGENTS.md`'s Quick start comment updated to reflect this rather than repeat the unverified `331` figure.
+
+## [1.4.28] — 2026-07-19
+
+### Recovered — v1.4.15 through v1.4.27 committed to git (were working-tree-only edits, never committed)
+- **Root cause**: `1.4.15` through `1.4.27` (below) existed only as uncommitted changes in `src/` plus a manual backup copy under `stash_dump/*.stash` — none of it was ever `git commit`-ed. A `git stash` taken separately along the way (message "pre-tool-annotations-") turned out to be unrelated, containing only one untracked test file. The actual gap was purely "edited but never committed", confirmed via `git log`, `git status`, `git diff --stat` against the `stash_dump/` copies before touching anything.
+- **Also found via `git log --oneline --all --graph`**: the repository's `HEAD` was sitting on a secondary branch (`test-branch-123`), not `main` — `main` pointed at a separate, empty commit ("test") one step behind. Consolidated: `main` deleted and the working branch renamed to `main`, so there is a single branch again with the full history below.
+- **Action**: reviewed `git diff --stat` (10 files, 339 insertions / 60 deletions) confirming the changes matched exactly what `1.4.15`–`1.4.27` below describe, then `git add src/ tests/test_layer5_health.py && git commit`. `stash_dump/` deleted afterward (`fs_delete_batch`, one ticket) — its content is now superseded by real git history and the entries below.
+
+### Fixed — `request_permission()`'s single-resource ticket message never mentioned `confirm_code`
+- Regression/gap independent of `1.4.15`–`1.4.27`: when the HMAC `confirm_code` gate was implemented (`1.4.14`), the message returned by `SecurityValidator.request_permission()` (used by `validate_tool_path()` for `fs_write`/`fs_edit`/`fs_delete`/`fs_move`/`fs_create_directory`, and by `validate_shell_execution()`'s `execute` tickets) was never updated to mention it — it just said `"Use fs_approve(ticket_id=..., level='single')..."`, with no `confirm_code` parameter. The batch variant (`validate_tool_paths_batch()`, added later in `1.4.16`) and `fs_request_allow` (`layer6_permissions.py`) both had the correct wording from the start; only this one path was stale. Not a security hole — `PermissionManager.approve()` already required `confirm_code` regardless of what the message said, verified before treating it as low-risk — but it told the calling agent to do the wrong thing. **Fix**: message now states the code was shown on-screen, is not visible to the agent, and must be passed as `confirm_code`, matching the other two call sites.
+
+### Fixed — `resolve_shell()` called synchronously inside `async def` tool handlers (event-loop blocking regression)
+- Found while investigating the same class of hang described in `1.4.20`/`1.4.21`. `register_shell_tools()`'s `sh_exec`, `sh_script`, and `sh_session_start` closures called `manager.resolve_shell(shell)` directly (not wrapped in `asyncio.to_thread`) whenever an explicit `shell=` argument was passed. For `shell="bash"`, `resolve_shell()` → `_find_git_bash()` runs a **synchronous** `subprocess.run(["git", "--exec-path"], timeout=5)` — blocking the entire server event loop (not just the current call) for up to 5s per invocation. Not caught by `1.4.19`/`1.4.20`'s fixes, which only covered `sh_exec_impl`/`sh_script_impl`'s own subprocess handling, not this call site. **Fix**: all three call sites now wrap the call as `await asyncio.to_thread(manager.resolve_shell, shell)`.
+
+### Notes
+- `1.4.15`–`1.4.27` below were reconstructed from the working-tree diff and `stash_dump/`'s content (deleted after this release, per above) — dates and authorship preserved from that record, not re-verified commit-by-commit since they were never actual commits until now.
+- Two items documented as "hypothesis, not fully proven" in `1.4.21`'s original entry are applied as described there (see below) — this release does not add new evidence either way, only carries the fix forward into git history.
+
+## [1.4.27] — 2026-07-17
+
+### Security — `paths_deny` expanded with 14 credential-focused patterns
+- Follow-up to `1.4.26`'s AppData fix, same day, at the repo owner's explicit request ("aplica todas" on a list of candidates proposed after the AppData gap was found). With `paths_allow` now `["C:\\"]`, `paths_deny` is the only real control left for reads, and the AppData fix only closed one specific gap.
+- Added, folder-style (`**\\name\\**`, same pattern as existing entries): `.ssh`, `.aws`, `.azure`, `.kube`, `.gnupg`.
+- Added, exact-file style: `**\\.docker\\config.json`, `**\\.git-credentials`, `**\\.netrc`, `**\\.npmrc`, `**\\.pypirc`.
+- Added, filename-wildcard style (new pattern shape for this project): `**\\.env*`, `**\\*.pem`, `**\\id_rsa*`, `**\\id_ed25519*` — unlike every prior entry, these match by filename regardless of which folder they're in.
+- Deliberately not added: browser profile directories (already covered by `**\\AppData\\**` from `1.4.26`), and `C:\\Windows\\System32\\config\\SAM` (already locked by Windows itself, a `paths_deny` entry would be redundant).
+- Explicitly flagged as incomplete by design, not a gap: this is a list of known patterns, not a general mechanism. `scan_text()` (the secret scanner, wired since `1.4.9`) is the backstop for content in locations `paths_deny` didn't anticipate.
+- Verified: full suite (331/331) after the change. `config.json` repo mirror re-synced to match. `AGENTS.md` rule #14 updated; `pyproject.toml` bumped to 1.4.27.
+
+## [1.4.26] — 2026-07-17
+
+### Security policy change (deliberate, by the repo owner) — `paths_allow` broadened to `C:\`
+- `paths_allow` changed from `["C:\\Repos"]` to `["C:\\"]"` in the live config (`~/.personal-mcp/config.json`) — a deliberate decision: "eso fue una decisión porque se ha vuelto muy restrictivo para ciertas tareas que se están haciendo." Write/delete operations are unaffected — they still require an explicit grant via the ticket+HMAC flow regardless of `paths_allow` scope; only unticketed reads (`fs_read`, `fs_list`, `fs_search`, `fs_tree`, `fs_find`, `fs_info`) are now unrestricted across the whole `C:` drive except for `paths_deny`.
+- Found via a separate conversation's test run: `test_fs_read_outside_allowed_returns_error` started failing after this change — not a regression, the test's assumption (a plain `C:\` path is denied) stopped being true once `paths_allow` covers the whole drive. Updated the test to assert the invariant it actually protects (`paths_deny` still wins even when `paths_allow` is this broad) against a path that is genuinely still denied.
+- Found in the same pass: the `paths_deny` entry for AppData, `"C:\\Users\\User\\AppData"`, had no wildcard — unlike every other entry. `fnmatch` treats a pattern with no `*` as an exact match, so it only ever blocked that literal path, never anything inside it. With `paths_allow` now covering the whole drive, this meant every file under AppData (browser credential stores, app tokens, cached session data) was readable with zero restriction. **Fixed**: changed to `"**\\AppData\\**"`, matching the pattern style of every other deny entry. Verified via the corrected smoke test and a full run of the suite (331/331).
+
+### Fixed — `show_confirmation_code_batch` popup unreadable for large batches
+- `src/confirm_popup.py`'s batch popup listed every individual path — for a 100-file `fs_delete_batch` ticket this produced a `MessageBoxW` message of roughly 13,000 characters, unusable (confirmation code not findable on screen).
+- **Fixed**: the message now previews at most `MAX_PREVIEW_FILES` (10) paths, followed by a count of the remainder and a pointer to `security_pending` for the complete list. Message size no longer scales with N. `PermissionManager.request_batch()`'s ticket/grant behavior was never affected — only the display changed.
+- Applied via the generic `Filesystem` MCP connector (see rule #12) rather than this server's own `fs_edit` — using this server's own ticket flow to authorize a change to the code that generates that same ticket's popup would have been circular.
+
+## [1.4.25] — 2026-07-10
+
+### Docs — a security limitation only documented for AI agents, not for actual users
+- The rule #12 gap in `AGENTS.md` (the generic `Filesystem` MCP connector bypasses every ticket/HMAC/audit protection this server implements, if enabled in the same client with write access to the same folders) was only written in a document meant for AI agents, never in anything a human user would read.
+- Added to `README.md`: a new bullet in the Security section naming the `Filesystem` connector as the concrete example, stating there is no fix possible from within personal-mcp.
+- Added to `CONFIG-GUIA.md`: a full new section in plain Spanish explaining what "bypass" means in practice and what the reader can actually do about it (check which connectors are enabled, remove write access to the same folders, or uninstall the redundant one).
+
+## [1.4.24] — 2026-07-10
+
+### Docs — stale claim contradicting the project's own security model
+- `AGENTS.md` rule #11 stated the opposite of what rules #9/#10 (and the real code) guarantee — it described the pre-`1.4.14` state (self-approval possible for `execute` tickets) as still current. Re-verified `PermissionManager.approve()` directly: `confirm_code` is required via `hmac.compare_digest()`, shown only via the native popup, never returned by any tool. **Fix**: rule #11 corrected, with an explanation of when it was true and why it stopped being true.
+- No `src/` changes in this release — documentation-only.
+
+## [1.4.23] — 2026-07-10
+
+### Added
+- Secret scanning en `fs_read_media`: escanea el contenido decodificado antes de codificarlo a base64, mismos 12 patrones que `fs_read_impl`. No bloquea, solo advierte.
+- `fs_search` salta archivos >10 MB (`_SEARCH_MAX_FILE_MB`) para evitar consumo excesivo de memoria en binarios o archivos grandes.
+
+### Tests agregados (10 nuevos, 321 → 331 total)
+- `test_layer5_health.py` (nuevo, 5 tests), `test_filesystem.py` (+3, `fs_delete_batch_impl`), `test_permissions.py` (+7, batch), `test_integration_tool_flow.py` (+6, batch delete end-to-end).
+
+## [1.4.22] — 2026-07-10
+
+### Fixed
+- **`ShellSession.close()` no llamaba `_reap_after_kill()` — fuga de handles (regresión de v1.4.20)**: al exceder el timeout de cierre de una sesión interactiva, mataba el proceso pero luego llamaba `await self._process.wait()` sin timeout — exactamente el bug que `_reap_after_kill()` resolvió en v1.4.20 para `sh_exec_impl`/`sh_script_impl`, pero `ShellSession.close()` nunca se actualizó. Arreglado: ahora usa `_reap_after_kill()`.
+- **`ShellSession.execute()` no sanitizaba el log — inyección de logs (estilo INJ-05)**: `logger.debug(...)` interpolaba el comando sin `sanitize_log_value()`, a diferencia de `sh_exec_impl`/`sh_script_impl` (desde v1.4.9). Arreglado: ahora pasa por `sanitize_log_value()`.
+- **Deny list false positive: `"format"` bloqueaba `--format` flags y `git format-patch`**: el regex `\bformat\b` matcheaba en cualquier parte del comando. Refactor de `is_command_allowed()`: entradas de una sola palabra (`"format"`, `"shutdown"`) se revisan solo contra la primera palabra de cada segmento, mismo ámbito que `allow_prefix`; entradas multi-palabra (`"rm -rf"`, `"net user"`) mantienen el chequeo sobre todo el comando.
+
+### Tests agregados (26 nuevos, 316 → 321 total)
+- `split_command_segments()` (15), `_escape_workdir()` (6), `validate_shell_execution()` (6), deny list fix (5).
+
+## [1.4.21] — 2026-07-09
+
+### Fixed (second hang mechanism found in the same investigation as 1.4.20 — hypothesis, not fully proven)
+- `mcp_log` returned no entries newer than three days despite active multi-session use. **Working hypothesis**: `configure()` in `log.py` wires a plain `RotatingFileHandler` at a single shared path across multiple server processes (one per parallel Claude session). On Windows, if one process rotates while another still has the file open, the rename raises `PermissionError`; `logging`'s default error handling can print a traceback to `stderr` on every subsequent `emit()` while the size condition persists — and on a stdio-transport MCP server, an unread `stderr` pipe can fill and block the writer, hanging the entire process.
+- **Not conclusively proven**: circumstantial evidence (stale logs + a known Windows failure mode + a plausible mechanism), not a captured stack trace.
+- **Fix, scoped to what's certain**: `logging.raiseExceptions = False` set in `configure()` — makes a failed rotation a silently-dropped log line instead of a potential hang. Does not fix the underlying multi-process rollover race itself.
+
+## [1.4.20] — 2026-07-09
+
+### Fixed (follow-up to 1.4.19 — same symptom, different root cause, confirmed still reproducing after 1.4.19's fix)
+- **Root cause**: `sh_exec_impl`'s two `except asyncio.TimeoutError:` handlers and `sh_script_impl`'s handler all called `_kill_process_tree(process.pid)` and returned immediately — none ever called `process.wait()` on the original `Process` object. On Windows, this left stdout/stderr pipe transports registered with the event loop's IOCP-based subprocess watcher but never released. Confirmed independent of `1.4.19`'s fix (reproduced live with that fix already on disk). Each additional timeout leaked more handles; with enough accumulated, even trivial unrelated commands started timing out.
+- **Fix** (`layer2_shell.py`): new `_reap_after_kill(process)` — `await asyncio.wait_for(process.wait(), timeout=10)` after `_kill_process_tree()`, letting asyncio release the transport. Called at all `except asyncio.TimeoutError:` sites in `sh_exec_impl`/`sh_script_impl`.
+
+## [1.4.19] — 2026-07-09
+
+### Fixed (server hang — reproduced live twice, root cause confirmed in source)
+- **Root cause**: `src/server.py` runs `app.run(transport="stdio")` — the server's own `stdin` **is** the JSON-RPC channel to the client. None of `sh_exec_impl`'s subprocess calls specified `stdin=`, so every spawned child inherited that handle; a child that blocks on stdin can hang forever. Compounded by `_kill_process_tree()`'s `await proc.wait()` on `taskkill` having no timeout at all.
+- **Fix** (`layer2_shell.py`): `sh_exec_impl`'s shared `proc_kwargs` now includes `stdin=asyncio.subprocess.DEVNULL`; `sh_script_impl`'s subprocess creation gets the same; `_kill_process_tree()`'s `taskkill` subprocess also gets `stdin=DEVNULL`, and its `await proc.wait()` is wrapped in `asyncio.wait_for(timeout=10)`.
+
+## [1.4.18] — 2026-07-08
+
+### Fixed (security — explicit user request: "todo lo anterior debe pasar por ticket")
+- `install.ps1`'s default `allow_prefix` for a fresh install let filesystem mutations (`remove-item`, `del`, `copy`, `move`, `mkdir`, `new-item`, etc.) bypass the ticket system entirely. Removed all 10 verbs from the default list.
+- Known gap surfaced same day: the real `~/.personal-mcp/config.json` in use had `mkdir`/`rmdir` in `allow_prefix` — same bypass class, already active. Fixed same day by the repo owner directly (outside this repo's reach), confirmed via the repo's read-only config mirror.
+
+## [1.4.17] — 2026-07-08
+
+### Context
+Full re-audit against source code as ground truth. Tool counts (56 total / 52 active) re-confirmed independently.
+
+### Fixed
+- `verify.py`'s layer breakdown miscounted Layer 6 — no bucket for Permissions tools, `fs_approve`/`fs_deny`/`fs_request_allow` silently counted as Layer 1. Added a Layer 6 bucket.
+
+### Docs
+- Removed unverifiable "274 tests (all pass)" claim from `AGENTS.md`/`README.md` Quick start blocks. New `AGENTS.md` rule #13 documenting `install.ps1`'s broader-than-live `allow_prefix` gap (not fixed — policy decision flagged for the repo owner).
+
+## [1.4.16] — 2026-07-08
+
+### Added
+- **`fs_delete_batch(paths: List[str])`** — new Layer 1 tool (18th → 19th). One ticket/one `confirm_code` bound to a specific, enumerated list of paths, instead of one popup per file. `PermissionTicket` gained an optional `resources: List[str]` field for batch tickets. `PermissionManager.request_batch()`/`approve()` extended; `confirm_popup.show_confirmation_code_batch()` new; `SecurityValidator.validate_tool_paths_batch()` peeks all paths before consuming any. Delete remains forced to `SINGLE` — no exceptions, same rule as single-file delete.
+
+### Tests
+- 16 new tests across `test_permissions.py`, `test_filesystem.py`, `test_integration_tool_flow.py`.
+
+## [1.4.15] — 2026-07-08
+
+### Docs — tool counts corrected against real `@mcp.tool()` decorators
+- `AGENTS.md` header claimed "47 tools"; real count (by counting decorators directly) was 55 (51 active). Layer 1 was undercounted by 7 tools that existed in code but were never added to the header. `README.md`/`SEGURIDAD-COMPARATIVA.md` corrected to match.
+
+### Fixed
+- `validate_security.py` Test 3 broken by the `1.4.14` `confirm_code` gate — updated to prompt and read the code via `input()`, same as the real `fs_approve` flow, without reopening the auto-approval gap the HMAC gate exists to close.
+
+### Notes
+- `pyproject.toml` version bumped to 1.4.15 in this release — closing out the "version bump still outstanding" note carried unresolved across `1.4.7` through `1.4.14`.
+
 ## [1.4.14] — 2026-07-07
 
 ### Security (fixed — closes the gap tracked since 1.4.10)

@@ -74,6 +74,28 @@ class SecurityValidator:
                 return pattern
         return None
 
+    def _deny_exception_applies(self, resolved: Path, operation: str) -> bool:
+        """Narrow, explicit exception to a paths_deny match (e.g. **\\bin\\**),
+        for legitimate needs like verifying a project's build output (.NET, etc.)
+        without opening bin/obj in general -- that stays blocked for everything
+        else (node_modules, vendored binaries, etc.).
+
+        Only ever applies to read operations (fs_find/fs_read), and only to file
+        extensions explicitly listed in paths_deny_exception_extensions. Never
+        applies to write/delete/execute. Both paths_deny_exceptions (patterns)
+        and paths_deny_exception_extensions default to a safe, narrow set -- see
+        SecurityConfig in config.py.
+        """
+        if operation != "read":
+            return False
+        if resolved.suffix.lower() not in self.config.security.paths_deny_exception_extensions:
+            return False
+        candidate = str(resolved)
+        for pattern in self.config.security.paths_deny_exceptions:
+            if fnmatch.fnmatch(candidate, pattern) or fnmatch.fnmatch(candidate, pattern.replace("\\", "\\\\")):
+                return True
+        return False
+
     def resolve_and_validate(self, raw_path: str, operation: str = "read") -> Path:
         given = Path(raw_path)
         if not given.is_absolute():
@@ -94,9 +116,11 @@ class SecurityValidator:
                 )
             resolved = real_path
 
-        # Deny always wins, even over session/permanent grants.
+        # Deny always wins, even over session/permanent grants -- except for the
+        # narrow, explicit read-only build-artifact exception (see
+        # _deny_exception_applies).
         denied = self._matched_deny_pattern(resolved)
-        if denied:
+        if denied and not self._deny_exception_applies(resolved, operation):
             raise PathNotAllowedError(f"Path denied by pattern '{denied}': {resolved}")
 
         # Check static allowlist: MUST be inside paths_allow or data_dir

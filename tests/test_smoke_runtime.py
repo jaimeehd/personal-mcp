@@ -471,8 +471,15 @@ class TestFilesystemReadSmoke:
 class TestPermissionRequired:
 
     def test_fs_read_outside_allowed_returns_error(self, mcp_server):
+        # paths_allow es "C:\\" (todo el disco, cambio intencional) -- ya no hay
+        # ninguna ruta que quede "fuera" de paths_allow salvo por unidades
+        # distintas. El caso real que sigue debiendo bloquearse es paths_deny,
+        # asi que este test usa una ruta bajo AppData ("**\\AppData\\**" esta
+        # en paths_deny) en vez de C:\Windows\system.ini, que nunca estuvo en
+        # paths_deny -- solo quedaba afuera por el paths_allow acotado anterior.
+        appdata_path = str(Path.home() / "AppData" / "Local" / "Microsoft" / "nonexistent-smoke-check.txt")
         result = mcp_server.call_tool(
-            "fs_read", {"path": "C:\\Windows\\system.ini"}, timeout=10
+            "fs_read", {"path": appdata_path}, timeout=10
         )
         text = _extract_text(result)
         assert "Access denied" in text

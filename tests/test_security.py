@@ -52,6 +52,89 @@ def test_path_denied_pattern(strict_security, temp_home):
         strict_security.resolve_and_validate(str(denied_path))
 
 
+# --- paths_deny_exceptions: build-artifact read exception ---
+
+@pytest.fixture
+def exception_config(temp_home):
+    config = AppConfig(
+        security=SecurityConfig(
+            paths_allow=[str(temp_home / "Repos")],
+            paths_deny=["**\\node_modules\\**", "**\\.git\\**", "**\\bin\\**", "**\\obj\\**"],
+            paths_deny_exceptions=[
+                # Dos patrones por la misma razon documentada en
+                # _deny_exception_applies: fnmatch's "**" no tiene semantica
+                # recursiva real (es solo "*" duplicado), asi que "proyecto\**\bin\**"
+                # exige al menos una subcarpeta intermedia entre el proyecto y bin\ --
+                # no matchea "proyecto\bin\..." directamente. Se necesita un segundo
+                # patron explicito para el caso "bin\ justo bajo la raiz del proyecto".
+                str(temp_home / "Repos" / "MyProj" / "**" / "bin" / "**"),
+                str(temp_home / "Repos" / "MyProj" / "bin" / "**"),
+            ],
+            paths_deny_exception_extensions=[".dll", ".exe", ".pdb"],
+        ),
+        config_path=str(temp_home / ".personal-mcp" / "config.json"),
+    )
+    return config
+
+
+@pytest.fixture
+def exception_security(exception_config):
+    validator = SecurityValidator(exception_config)
+    validator.perm_manager = PermissionManager(exception_config)
+    for path in exception_config.security.paths_allow:
+        validator.perm_manager.grant_direct(path, "*", GrantLevel.SESSION)
+    return validator
+
+
+def test_deny_exception_allows_matching_dll_read_nested(exception_security, temp_home):
+    # bin\ bajo una subcarpeta intermedia (ej. src\MyProj\bin\..., el caso real
+    # en HikBioAccess) -- matchea el patron con "**\bin\**".
+    dll_path = temp_home / "Repos" / "MyProj" / "src" / "bin" / "Release" / "MyProj.dll"
+    dll_path.parent.mkdir(parents=True, exist_ok=True)
+    dll_path.write_bytes(b"fake dll content")
+    result = exception_security.resolve_and_validate(str(dll_path))
+    assert result == dll_path.resolve()
+
+
+def test_deny_exception_allows_matching_dll_read_direct(exception_security, temp_home):
+    # bin\ directamente bajo la raiz del proyecto, sin subcarpeta intermedia --
+    # requiere el segundo patron explicito ("proyecto\bin\**").
+    dll_path = temp_home / "Repos" / "MyProj" / "bin" / "Release" / "MyProj.dll"
+    dll_path.parent.mkdir(parents=True, exist_ok=True)
+    dll_path.write_bytes(b"fake dll content")
+    result = exception_security.resolve_and_validate(str(dll_path))
+    assert result == dll_path.resolve()
+
+
+def test_deny_exception_still_blocks_non_matching_extension(exception_security, temp_home):
+    txt_path = temp_home / "Repos" / "MyProj" / "bin" / "Release" / "notes.txt"
+    txt_path.parent.mkdir(parents=True, exist_ok=True)
+    txt_path.write_text("no deberia poder leerse")
+    # .txt no esta en paths_deny_exception_extensions -- el bloqueo de bin\ sigue aplicando.
+    with pytest.raises(PathNotAllowedError, match="Path denied by pattern"):
+        exception_security.resolve_and_validate(str(txt_path))
+
+
+def test_deny_exception_still_blocks_non_matching_pattern(exception_security, temp_home):
+    # Mismo nombre de archivo/extension, pero bajo un proyecto que NO esta en
+    # paths_deny_exceptions -- debe seguir bloqueado (la excepcion es por proyecto,
+    # no una apertura general de **\bin\**).
+    dll_path = temp_home / "Repos" / "OtroProyecto" / "bin" / "Release" / "Otro.dll"
+    dll_path.parent.mkdir(parents=True, exist_ok=True)
+    dll_path.write_bytes(b"fake dll content")
+    with pytest.raises(PathNotAllowedError, match="Path denied by pattern"):
+        exception_security.resolve_and_validate(str(dll_path))
+
+
+def test_deny_exception_never_applies_to_write(exception_security, temp_home):
+    dll_path = temp_home / "Repos" / "MyProj" / "bin" / "Release" / "MyProj.dll"
+    dll_path.parent.mkdir(parents=True, exist_ok=True)
+    dll_path.write_bytes(b"fake dll content")
+    # Aunque extension y patron coincidan, la excepcion es SOLO para operation="read".
+    with pytest.raises(PathNotAllowedError, match="Path denied by pattern"):
+        exception_security.resolve_and_validate(str(dll_path), operation="write")
+
+
 def test_path_relative_rejected(strict_security, temp_home):
     with pytest.raises(PathNotAllowedError):
         strict_security.resolve_and_validate("Repos/file.txt")

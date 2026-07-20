@@ -186,6 +186,7 @@ async def fs_tree_impl(path: str, security: SecurityValidator, max_depth: int = 
 # but it guarantees the MCP call returns to the caller instead of hanging the server
 # indefinitely — the actual failure mode this fixes.
 _SEARCH_TIMEOUT_SECONDS = 10.0
+_SEARCH_MAX_FILE_MB = 10
 
 
 def _fs_search_sync(rpath: Path, regex: "re.Pattern", glob_pattern: Optional[str],
@@ -202,6 +203,8 @@ def _fs_search_sync(rpath: Path, regex: "re.Pattern", glob_pattern: Optional[str
             if len(matches) >= max_results:
                 break
             try:
+                if filepath.stat().st_size > _SEARCH_MAX_FILE_MB * 1024 * 1024:
+                    continue
                 for lineno, line in enumerate(filepath.read_text("utf-8", errors="replace").splitlines(), 1):
                     if regex.search(line):
                         matches.append(f"{filepath.relative_to(rpath)}:{lineno}: {line.strip()[:120]}")
@@ -401,6 +404,41 @@ async def fs_delete_impl(path: str, security: SecurityValidator) -> str:
     return f"Deleted {rpath} ({size:,} bytes)"
 
 
+async def fs_delete_batch_impl(paths: List[str], security: SecurityValidator) -> str:
+    """Same 'don't re-pass the operation' reasoning as fs_delete_impl: the
+    fs_delete_batch() wrapper already validated + consumed the batch grant via
+    validate_tool_paths_batch(paths, "delete") for every path in the list, so
+    each resolve_and_validate() call below uses the default operation="read"
+    (deny/paths_allow check only) rather than re-checking/re-consuming "delete".
+
+    No file-count limit here by design (2026-07-19) - matches
+    PermissionManager.request_batch()/validate_tool_paths_batch(), neither of
+    which caps len(paths) either. Partial failure is reported per-file rather
+    than aborting the whole batch on the first error, since a delete grant is
+    already consumed per-path regardless of what happens to its neighbors.
+    """
+    results = []
+    deleted = 0
+    for p in paths:
+        try:
+            rpath = security.resolve_and_validate(p)
+            if not rpath.exists():
+                results.append(f"Error: path does not exist: {rpath}")
+                continue
+            if rpath.is_dir():
+                results.append(f"Error: fs_delete_batch only supports individual files, not directories: {rpath}")
+                continue
+            size = rpath.stat().st_size
+            await asyncio.to_thread(rpath.unlink)
+            deleted += 1
+            results.append(f"Deleted {rpath} ({size:,} bytes)")
+        except Exception as e:
+            results.append(f"Error deleting {p}: {e}")
+    logger.info("fs_delete_batch requested=%d deleted=%d", len(paths), deleted)
+    summary = f"{deleted}/{len(paths)} files deleted"
+    return summary + "\n" + "\n".join(results)
+
+
 async def fs_read_multi_impl(paths: List[str], security: SecurityValidator,
                               encoding: str = "utf-8", max_size_mb: int = 0) -> str:
     results = []
@@ -466,8 +504,17 @@ async def fs_read_media_impl(path: str, security: SecurityValidator) -> str:
         return (f"Error: not a supported media file (only image/* and audio/*): "
                 f"{mime_type or 'unknown'}")
     data = await asyncio.to_thread(rpath.read_bytes)
+    findings = None
+    if security.config.security.secret_scanning_enabled:
+        text_content = data.decode("utf-8", errors="replace")
+        findings = scan_text(text_content)
+        if findings:
+            logger.warning("SECRET_SCAN findings=%d path=%s", len(findings), path)
     b64 = base64.b64encode(data).decode("ascii")
-    return f"data:{mime_type};base64,{b64}"
+    result = f"data:{mime_type};base64,{b64}"
+    if findings:
+        result += format_findings(findings)
+    return result
 
 
 async def fs_edit_advanced_impl(path: str, edits: List[Dict[str, str]],
@@ -646,6 +693,15 @@ def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None
         if err:
             return err
         return await fs_delete_impl(path, security)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False, destructiveHint=True))
+    async def fs_delete_batch(paths: List[str]) -> str:
+        if not paths:
+            return "Error: empty paths list"
+        err = security.validate_tool_paths_batch(paths, "delete")
+        if err:
+            return err
+        return await fs_delete_batch_impl(paths, security)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def fs_read_multi(paths: List[str], encoding: str = "utf-8",

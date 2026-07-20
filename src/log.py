@@ -34,6 +34,19 @@ def configure(data_dir: str, level: str = "INFO",
               max_bytes: int = 10 * 1024 * 1024,
               backup_count: int = 3) -> None:
     global _logger
+    # A shared server.log can be opened by more than one personal-mcp server
+    # process at once (e.g. several parallel Claude sessions). RotatingFileHandler
+    # is documented upstream as unsafe across processes: if one process's
+    # doRollover() renames the file while another still has it open for writing,
+    # the rename raises PermissionError on Windows. By default that error is
+    # printed to stderr on every subsequent emit() while the size condition
+    # persists - and on a stdio-transport MCP server, an unread stderr pipe can
+    # fill and block the writer, freezing the whole process, not just logging.
+    # Losing a log line to a rotation race is an acceptable, cosmetic cost;
+    # a hung server is not. This does not fix the underlying rollover race
+    # itself, only how a failure there can cascade (hypothesis, see CHANGELOG
+    # 1.4.21 - not conclusively reproduced, but low-risk to apply regardless).
+    logging.raiseExceptions = False
     log_path = Path(data_dir) / "server.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger("personal-mcp")

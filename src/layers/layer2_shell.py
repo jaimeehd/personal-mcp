@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from src.security import SecurityValidator, CommandNotAllowedError
 from src.shell_resolver import ShellInfo, resolve_shell, tokenize_command, has_shell_operators
@@ -42,10 +43,33 @@ async def _kill_process_tree(pid: int) -> None:
     try:
         proc = await asyncio.create_subprocess_exec(
             "taskkill", "/pid", str(pid), "/T", "/F",
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        await proc.wait()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            logger.error("kill_process_tree pid=%d taskkill did not exit within 10s", pid)
+    except Exception:
+        pass
+
+
+async def _reap_after_kill(process: asyncio.subprocess.Process) -> None:
+    """After _kill_process_tree(), the original Process object still has a pending
+    exit-wait registered with the event loop's subprocess watcher, and its stdout/
+    stderr pipe transports are still open - nothing ever calls process.wait() on it,
+    so asyncio never releases those handles (IOCP handles on Windows). Left
+    unreaped across enough repeated timeouts, this leaks OS-level async I/O
+    resources and can progressively degrade the event loop's ability to spawn or
+    await NEW subprocesses - up to and including making unrelated commands hang.
+    Best-effort: taskkill /F already ran, so this should return near-instantly;
+    if it doesn't, we log and move on rather than hang the caller further.
+    """
+    try:
+        await asyncio.wait_for(process.wait(), timeout=10)
+    except asyncio.TimeoutError:
+        logger.error("reap_after_kill pid=%d did not reap within 10s - possible handle leak", process.pid)
     except Exception:
         pass
 
@@ -121,7 +145,7 @@ class ShellSession:
             return "Session not started"
         self.command_count += 1
         self.last_activity = time.time()
-        logger.debug("session_send id=%s command=%.100s", self.session_id, command)
+        logger.debug("session_send id=%s command=%.100s", self.session_id, sanitize_log_value(command))
         lines: List[str] = []
         self._process.stdin.write(f"{command}\n".encode("utf-8"))
         await self._process.stdin.drain()
@@ -169,7 +193,7 @@ class ShellSession:
                 await asyncio.wait_for(self._process.wait(), timeout=5)
             except asyncio.TimeoutError:
                 await _kill_process_tree(self._process.pid)
-                await self._process.wait()
+                await _reap_after_kill(self._process)
 
 
 class ShellManager:
@@ -250,6 +274,7 @@ async def sh_exec_impl(command: str, security: SecurityValidator, timeout: int =
     security.validate_command(command)
     logger.info("sh_exec command=%.200s shell=%s timeout=%d", sanitize_log_value(command), shell_info.name if shell_info else "default", timeout)
     proc_kwargs = dict(
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -282,6 +307,7 @@ async def sh_exec_impl(command: str, security: SecurityValidator, timeout: int =
                     return result
                 except asyncio.TimeoutError:
                     await _kill_process_tree(process.pid)
+                    await _reap_after_kill(process)
                     return f"Command timed out after {timeout}s"
 
     # Fallback: shell execution
@@ -313,6 +339,7 @@ async def sh_exec_impl(command: str, security: SecurityValidator, timeout: int =
         return result
     except asyncio.TimeoutError:
         await _kill_process_tree(process.pid)
+        await _reap_after_kill(process)
         return f"Command timed out after {timeout}s"
 
 
@@ -391,6 +418,7 @@ async def sh_script_impl(script: str, security: SecurityValidator, timeout: int 
     try:
         process = await asyncio.create_subprocess_exec(
             si.executable, *si.script_args, str(temp_file),
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -410,6 +438,7 @@ async def sh_script_impl(script: str, security: SecurityValidator, timeout: int 
         return result
     except asyncio.TimeoutError:
         await _kill_process_tree(process.pid)
+        await _reap_after_kill(process)
         return f"Script timed out after {timeout}s"
     finally:
         exists = await asyncio.to_thread(temp_file.exists)
@@ -444,7 +473,7 @@ def _format_warnings(warnings: List[str]) -> str:
 def register_shell_tools(mcp: FastMCP, security: SecurityValidator,
                          manager: ShellManager) -> None:
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
     async def sh_exec(command: str, timeout: int = 30,
                       working_dir: Optional[str] = None,
                       shell: Optional[str] = None) -> str:
@@ -459,7 +488,7 @@ def register_shell_tools(mcp: FastMCP, security: SecurityValidator,
         if err:
             return err
         try:
-            si = manager.resolve_shell(shell) if shell else manager.shell_info
+            si = await asyncio.to_thread(manager.resolve_shell, shell) if shell else manager.shell_info
         except ValueError as e:
             return str(e)
         warnings = _scan_command_warnings(command, security)
@@ -469,23 +498,23 @@ def register_shell_tools(mcp: FastMCP, security: SecurityValidator,
             result = wtext + "\n" + result
         return result
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
     async def sh_session_start(timeout: Optional[int] = None,
-                               shell: Optional[str] = None) -> str:
+                                shell: Optional[str] = None) -> str:
         if shell:
             try:
-                si = manager.resolve_shell(shell)
+                si = await asyncio.to_thread(manager.resolve_shell, shell)
             except ValueError as e:
                 return str(e)
         else:
             si = None
         return await sh_session_start_impl(manager, timeout, si)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
     async def sh_session_list() -> str:
         return await sh_session_list_impl(manager)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
     async def sh_session_send(session_id: str, command: str, timeout: int = 30) -> str:
         err = _validate_command_paths(command, security)
         if err:
@@ -500,19 +529,19 @@ def register_shell_tools(mcp: FastMCP, security: SecurityValidator,
             result = wtext + "\n" + result
         return result
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
     async def sh_session_read(session_id: str, timeout: float = 1.0) -> str:
         return await sh_session_read_impl(session_id, manager, timeout)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
     async def sh_session_interrupt(session_id: str) -> str:
         return await sh_session_interrupt_impl(session_id, manager)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True))
     async def sh_session_close(session_id: str) -> str:
         return await sh_session_close_impl(session_id, manager)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
     async def sh_script(script: str, timeout: int = 60,
                         working_dir: Optional[str] = None,
                         shell: Optional[str] = None) -> str:
@@ -524,7 +553,7 @@ def register_shell_tools(mcp: FastMCP, security: SecurityValidator,
         if err:
             return err
         try:
-            si = manager.resolve_shell(shell) if shell else manager.shell_info
+            si = await asyncio.to_thread(manager.resolve_shell, shell) if shell else manager.shell_info
         except ValueError as e:
             return str(e)
         warnings = _scan_command_warnings(script, security)
@@ -534,6 +563,6 @@ def register_shell_tools(mcp: FastMCP, security: SecurityValidator,
             result = wtext + "\n" + result
         return result
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
     async def sh_history() -> str:
         return await sh_history_impl(manager)

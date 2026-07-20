@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from src.config import AppConfig
 from src.security import SecurityValidator
@@ -246,37 +247,37 @@ def register_personal_tools(mcp: FastMCP, config: AppConfig,
 
     journal = Journal(Path(config.journal.path))
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
     async def journal_add(content: str, tags: Optional[str] = None,
                           category: str = "general") -> str:
         return journal_add_impl(content, journal, config, tags, category)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
     async def journal_list(limit: int = 20, offset: int = 0,
                            tag: Optional[str] = None,
                            category: Optional[str] = None) -> str:
         return journal_list_impl(journal, limit, offset, tag, category)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
     async def journal_search(query: str) -> str:
         return journal_search_impl(query, journal)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
     async def journal_stats() -> str:
         return journal_stats_impl(journal)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
     async def journal_export(format: str = "json") -> str:
         return journal_export_impl(journal, format)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
     async def note_quick(content: str) -> str:
         return note_quick_impl(content, config)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
     async def project_scan(path: Optional[str] = None) -> str:
         return await project_scan_impl(security, path)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
     async def project_find(filename: str, path: Optional[str] = None) -> str:
         return await project_find_impl(filename, security, path)

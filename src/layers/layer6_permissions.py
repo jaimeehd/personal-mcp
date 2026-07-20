@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from src.permissions import GrantLevel, PermissionManager
 from src.security import SecurityValidator
@@ -11,7 +12,7 @@ from src.security import SecurityValidator
 def register_permission_tools(mcp: FastMCP, security: SecurityValidator,
                               perm_manager: PermissionManager) -> None:
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
     async def fs_approve(ticket_id: str, confirm_code: str, level: str = "single") -> str:
         try:
             gl = GrantLevel(level)
@@ -23,12 +24,12 @@ def register_permission_tools(mcp: FastMCP, security: SecurityValidator,
         ok, msg = perm_manager.approve(ticket_id, gl, confirm_code)
         return msg
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True))
     async def fs_deny(ticket_id: str) -> str:
         ok, msg = perm_manager.deny(ticket_id)
         return msg
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
     async def fs_request_allow(path: str, level: str = "session") -> str:
         try:
             gl = GrantLevel(level)
@@ -43,20 +44,20 @@ def register_permission_tools(mcp: FastMCP, security: SecurityValidator,
                 f"to this agent. Use fs_approve(ticket_id='{ticket.id}', "
                 f"confirm_code='<code from the popup>', level='{gl.value}') to confirm.")
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
     async def security_pending() -> str:
         pending = perm_manager.pending()
         if not pending:
             return "No pending permission requests"
         return json.dumps(pending, indent=2, ensure_ascii=False)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True))
     async def security_revoke(resource: str) -> str:
         ok = perm_manager.revoke(resource)
         if ok:
             return f"Revoked grants for: {resource}"
         return f"No active grants found for: {resource}"
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
     async def security_stats() -> str:
         return json.dumps(perm_manager.stats(), indent=2, ensure_ascii=False)

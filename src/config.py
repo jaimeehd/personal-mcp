@@ -34,13 +34,27 @@ class CommandPolicy(BaseModel):
 
     def is_command_allowed(self, command: str) -> tuple[bool, str]:
         cmd_lower = command.strip().lower()
-        for denied in self.deny:
-            if re.search(r'\b' + re.escape(denied) + r'\b', cmd_lower):
-                return False, f"Command denied: '{denied}' is in the deny list"
-        if not self.allow_prefix:
-            return False, "Command blocked: No allowed command prefixes configured"
         from src.shell_resolver import split_command_segments
         segments = split_command_segments(command) or [command]
+
+        for denied in self.deny:
+            denied_lower = denied.lower()
+            if " " in denied_lower:
+                # Multi-word phrase: match anywhere in the full command.
+                if re.search(r'\b' + re.escape(denied_lower) + r'\b', cmd_lower):
+                    return False, f"Command denied: '{denied}' is in the deny list"
+            else:
+                # Single word: only match a segment's own first token, not as a
+                # substring anywhere else (avoids false positives like
+                # 'Format-Table' or '--format' being blocked by a bare 'format' entry).
+                for segment in segments:
+                    seg_first = segment.strip().lower().split()[0] if segment.strip() else ""
+                    seg_first_clean = Path(seg_first).stem.lower()
+                    if seg_first_clean == denied_lower:
+                        return False, f"Command denied: '{denied}' is in the deny list"
+
+        if not self.allow_prefix:
+            return False, "Command blocked: No allowed command prefixes configured"
         for segment in segments:
             seg_lower = segment.strip().lower()
             first_word = seg_lower.split()[0] if seg_lower.split() else ""

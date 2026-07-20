@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from src.config import AppConfig
 from src.audit import AuditLog
@@ -43,7 +44,7 @@ def _get_uptime() -> str:
 def register_health_tools(mcp: FastMCP, config: AppConfig,
                           audit_log: AuditLog) -> None:
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     async def health_check() -> str:
         checks = {}
         checks["timestamp"] = datetime.now().isoformat()
@@ -86,7 +87,7 @@ def register_health_tools(mcp: FastMCP, config: AppConfig,
         }
         return json.dumps(checks, indent=2, ensure_ascii=False)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     async def health_disk(paths: Optional[str] = None) -> str:
         check_paths = [Path(p.strip()) for p in (paths or str(Path.home())).split(";") if p.strip()]
         results = {}
@@ -103,28 +104,34 @@ def register_health_tools(mcp: FastMCP, config: AppConfig,
                 results[str(p)] = f"error: {e}"
         return json.dumps(results, indent=2, ensure_ascii=False)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     async def health_processes(top: int = 10) -> str:
         try:
+            # top va por env var, no interpolado en el string de PowerShell -
+            # top: int en la firma deberia bastar (FastMCP/pydantic coerciona),
+            # pero esto no depende de esa validacion para estar a salvo de
+            # inyeccion si algun dia el tipo cambia o se relaja.
+            env = os.environ.copy()
+            env["_MCP_TOP"] = str(top)
             r = subprocess.run(
                 ["powershell", "-NoProfile", "-Command",
-                 f"Get-Process | Sort-Object CPU -Descending | Select-Object -First {top} "
+                 "Get-Process | Sort-Object CPU -Descending | Select-Object -First $env:_MCP_TOP "
                  "Name, Id, @{N='CPU(s)';E={$_.CPU.ToString('F1')}}, "
                  "@{N='MemMB';E={($_.WorkingSet/1MB).ToString('F0')}} | Format-Table -AutoSize"],
-                capture_output=True, text=True, timeout=10
+                capture_output=True, text=True, timeout=10, env=env,
             )
             return r.stdout or r.stderr
         except Exception as e:
             return f"Error: {e}"
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     async def health_config() -> str:
         try:
             return json.dumps(config.model_dump(mode="json"), indent=2, ensure_ascii=False)
         except Exception as e:
             return f"Config validation error: {e}"
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     async def mcp_diag() -> str:
         diag = {}
         diag["timestamp"] = datetime.now().isoformat()
@@ -147,12 +154,12 @@ def register_health_tools(mcp: FastMCP, config: AppConfig,
         diag["audit"] = f"{audit_stats['total_entries']} operations ({audit_stats['failed']} failed)"
         return json.dumps(diag, indent=2, ensure_ascii=False)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     async def mcp_audit_log(n: int = 50) -> str:
         entries = audit_log.recent(n)
         return json.dumps(entries, indent=2, ensure_ascii=False)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     async def mcp_list_tools() -> str:
         try:
             tm = mcp._tool_manager
@@ -164,7 +171,7 @@ def register_health_tools(mcp: FastMCP, config: AppConfig,
         except Exception as e:
             return f"Tool listing unavailable: {e}"
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
     async def mcp_benchmark() -> str:
         results = {}
         start = time.time()
@@ -191,7 +198,7 @@ def register_health_tools(mcp: FastMCP, config: AppConfig,
             results["audit_record"] = f"error: {e}"
         return json.dumps(results, indent=2, ensure_ascii=False)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     async def mcp_log(lines: int = 50, level: str = "INFO") -> str:
         log_path = Path(config.data_dir) / "server.log"
         if not log_path.exists():

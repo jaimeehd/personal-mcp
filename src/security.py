@@ -184,6 +184,82 @@ class SecurityValidator:
         except PathNotAllowedError as e:
             return f"Access denied: {e}"
 
+    def validate_tool_paths_batch(self, raw_paths: List[str], operation: str = "delete") -> Optional[str]:
+        """Batch counterpart to validate_tool_path (2026-07-19, for fs_delete_batch).
+
+        Validates every path in one pass; if any of them still needs a grant,
+        requests ONE ticket/confirm_code covering the whole list instead of one
+        per path (PermissionManager.request_batch). No cap on len(raw_paths) -
+        see request_batch()'s docstring for why that's intentional here.
+
+        Returns None when every path already has a grant (or the operation is
+        "read", which never needs one - same rule as resolve_and_validate).
+        Returns an error string on the first path that's hard-denied (deny
+        pattern match, or outside paths_allow/data_dir) - that's a config-level
+        rejection, not something a ticket can fix, so it short-circuits the
+        whole batch rather than silently dropping just that one path.
+        Returns a ticket JSON string if a batch grant is needed.
+        """
+        try:
+            self._check_rate_limit(operation)
+        except RateLimitError as e:
+            return str(e)
+
+        resolved_paths: List[str] = []
+        for raw_path in raw_paths:
+            try:
+                # operation="read" here on purpose: this call is only checking
+                # deny/paths_allow membership, not the real operation's grant -
+                # resolve_and_validate() never raises PermissionRequiredError
+                # for operation="read", so this can't accidentally short-circuit
+                # into a single-resource ticket flow.
+                resolved = self.resolve_and_validate(raw_path, "read")
+            except PathNotAllowedError as e:
+                return f"Access denied: {e}"
+            resolved_paths.append(str(resolved))
+
+        if operation == "read":
+            return None
+
+        if self.perm_manager:
+            # Peek first (consume=False) across the WHOLE set before consuming
+            # anything - if path 3 of 5 lacks a grant, we must not have already
+            # burned the single-use grants on paths 1-2 just from checking them.
+            all_granted = all(
+                self.perm_manager.check_granted(p, operation, consume=False)
+                for p in resolved_paths
+            )
+            if all_granted:
+                for p in resolved_paths:
+                    self.perm_manager.check_granted(p, operation, consume=True)
+                return None
+
+        if not self.perm_manager:
+            return json.dumps({
+                "status": "permission_required",
+                "resource": f"{len(resolved_paths)} files",
+                "operation": operation,
+                "message": "Access denied. No PermissionManager configured.",
+            })
+
+        from src.permissions import GrantLevel
+        ticket = self.perm_manager.request_batch(resolved_paths, operation, GrantLevel.SINGLE)
+        return json.dumps({
+            "status": "permission_required",
+            "ticket": ticket.id,
+            "resource": f"{len(resolved_paths)} files",
+            "resources": resolved_paths,
+            "operation": operation,
+            "level": ticket.level.value,
+            "message": (
+                f"Access to {len(resolved_paths)} files needs {operation} permission. "
+                f"A confirmation code was shown on your screen - it is NOT visible to "
+                f"this agent. Use fs_approve(ticket_id='{ticket.id}', "
+                f"confirm_code='<code from the popup>', level='single') to authorize "
+                f"all of them at once."
+            ),
+        })
+
     def request_permission(self, raw_path: str, operation: str = "read",
                            level: Optional["GrantLevel"] = None) -> str:
         if self.perm_manager:
@@ -198,7 +274,9 @@ class SecurityValidator:
                 "level": ticket.level.value,
                 "message": (
                     f"Access to '{raw_path}' needs {operation} permission. "
-                    f"Use fs_approve(ticket_id='{ticket.id}', level='single') "
+                    f"A confirmation code was shown on your screen - it is NOT visible "
+                    f"to this agent. Use fs_approve(ticket_id='{ticket.id}', "
+                    f"confirm_code='<code from the popup>', level='single') "
                     f"for one-time, or level='session' for this session."
                 ),
             })

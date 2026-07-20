@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set
 
 from src.config import AppConfig
-from src.confirm_popup import show_confirmation_code
+from src.confirm_popup import show_confirmation_code, show_confirmation_code_batch
 
 
 class GrantLevel(str, Enum):
@@ -22,9 +22,15 @@ class GrantLevel(str, Enum):
 class PermissionTicket:
     def __init__(self, resource: str, operation: str,
                  level: GrantLevel = GrantLevel.SINGLE,
-                 ttl_seconds: int = 300):
+                 ttl_seconds: int = 300,
+                 resources: Optional[List[str]] = None):
         self.id = f"perm_{uuid.uuid4().hex[:8]}"
         self.resource = resource
+        # Batch ticket: resources is the real, complete list this ticket is bound
+        # to. `resource` above stays a human-readable summary ("N files") for
+        # to_dict()/logging - approve()/check_granted() always operate on
+        # `resources` when it is set, never on the summary string.
+        self.resources = resources
         self.operation = operation
         self.level = level
         self.created_at = time.time()
@@ -41,7 +47,7 @@ class PermissionTicket:
 
     def to_dict(self) -> dict:
         remaining = max(0, int(self.expires_at - time.time()))
-        return {
+        d = {
             "id": self.id,
             "resource": self.resource,
             "operation": self.operation,
@@ -50,6 +56,9 @@ class PermissionTicket:
             "expires_in_seconds": remaining,
             "created_seconds_ago": int(time.time() - self.created_at),
         }
+        if self.resources is not None:
+            d["resources"] = self.resources
+        return d
 
 
 class PermissionManager:
@@ -82,6 +91,26 @@ class PermissionManager:
         show_confirmation_code(ticket.resource, ticket.operation, ticket.confirm_code)
         return ticket
 
+    def request_batch(self, resources: List[str], operation: str,
+                       level: GrantLevel = GrantLevel.SINGLE) -> PermissionTicket:
+        """Same contract as request(), for a call that needs to touch several
+        enumerated resources under one ticket/one confirm_code - e.g. fs_delete_batch.
+
+        No cap on len(resources) here by design (2026-07-19, explicit requirement):
+        the previous incarnation of this used rate_limit_files_per_operation (100)
+        to chunk into multiple tickets, which meant multiple confirm_codes for a
+        single logical delete. The actual problem that caused was the popup
+        growing unreadable with N, which show_confirmation_code_batch already
+        solves independently of N (bounded preview). So there is nothing left for
+        a file-count cap to protect here - it would just be friction.
+        """
+        summary = f"{len(resources)} files"
+        ticket = PermissionTicket(summary, operation, level, resources=resources)
+        ticket.confirm_code = self._generate_confirm_code(ticket.id)
+        self._tickets[ticket.id] = ticket
+        show_confirmation_code_batch(resources, operation, ticket.confirm_code)
+        return ticket
+
     def approve(self, ticket_id: str,
                 level: Optional[GrantLevel] = None,
                 confirm_code: Optional[str] = None) -> tuple[bool, str]:
@@ -102,16 +131,18 @@ class PermissionManager:
         if forced_single:
             grant_level = GrantLevel.SINGLE
 
-        if grant_level == GrantLevel.SESSION:
-            resolved = self._resolve(ticket.resource)
-            ops = self._session_grants.setdefault(resolved, set())
-            ops.add(ticket.operation)
-        elif grant_level == GrantLevel.SINGLE:
-            resolved = self._resolve(ticket.resource)
-            ops = self._single_grants.setdefault(resolved, {})
-            ops[ticket.operation] = 1
-        elif grant_level == GrantLevel.PERMANENT:
-            self._add_permanent_grant(self._resolve(ticket.resource))
+        targets = ticket.resources if ticket.resources is not None else [ticket.resource]
+        for target in targets:
+            if grant_level == GrantLevel.SESSION:
+                resolved = self._resolve(target)
+                ops = self._session_grants.setdefault(resolved, set())
+                ops.add(ticket.operation)
+            elif grant_level == GrantLevel.SINGLE:
+                resolved = self._resolve(target)
+                ops = self._single_grants.setdefault(resolved, {})
+                ops[ticket.operation] = 1
+            elif grant_level == GrantLevel.PERMANENT:
+                self._add_permanent_grant(self._resolve(target))
 
         msg = f"Granted {grant_level.value} access to {ticket.resource}"
         if forced_single:

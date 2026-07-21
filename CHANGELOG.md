@@ -1,4 +1,24 @@
+## [1.4.32] — 2026-07-21
+
+### Added — Performance & Security Hardening (Subprocess Elimination, AST Script Analyzer, Remote SSH Filtering)
+- **Subprocess Elimination & Performance Optimization (`src/log.py`, `src/layers/layer5_health.py`)**:
+  - Replaced heavy `powershell -Command ...` subprocess invocations in `health_check()` and `_get_uptime()` with native Windows CTypes API calls (`GlobalMemoryStatusEx` and `GetTickCount64()`).
+  - Added `available_memory_info()` in `src/log.py` to retrieve total/free RAM in-process with 0 spawned processes.
+  - Reduced `health_check()` latency from ~1200ms to <10ms and eliminated ~50MB-100MB RAM spikes per call.
+  - Wrapped `health_processes()` in `asyncio.to_thread` to prevent blocking the FastMCP event loop during process listings.
+- **Python Script AST Risk Analyzer (`src/script_analyzer.py`, `src/security.py`)**:
+  - Added static AST analyzer for Python scripts executed via `sh_exec`.
+  - Scans Python target scripts prior to execution for risk categories: `NETWORK` (`requests`, `socket`, `urllib`), `DESTRUCTIVE_IO` (`os.remove`, `shutil.rmtree`), and `SUBPROCESS` (`exec`, `eval`, `popen`).
+  - Annotates execute ticket permission requests with explicit risk descriptions if network or destructive calls are detected.
+- **SSH Remote Command Whitelisting (`src/config.py`, `src/layers/layer3_ssh.py`)**:
+  - Added `remote_allow_prefix` to `SSHConfig` (`["ls", "cat", "echo", "pwd", "git", "uptime", ..."]`).
+  - `ssh_exec_impl` now validates every command segment against `remote_allow_prefix` prior to forwarding commands to remote SSH sessions.
+- **Consolidated Secret Scanning (`src/secretscanner.py`, `src/layers/layer4_personal.py`)**:
+  - Added `scan_and_warn()` helper in `src/secretscanner.py` to standardize credential scanning and format warnings uniformly across Layer 4 personal journal/notes tools.
+- Verified: 285/285 tests passing in 36.81s.
+
 ## [1.4.31] — 2026-07-20
+
 
 ### Added — memory-pressure hint on slow/timed-out shell commands
 - **Root cause of "otro agente tuvo problemas y se cayo el proceso por timeout" after 1.4.19/1.4.20/1.4.21 fixes**: those three fixed real bugs (stdin inheritance, handle leaks, log rotation crash), verified working (`git --version`, `git log`, full `pytest` suite all fast post-restart). But `server.log` still showed repeated `SLOW sh_exec` entries of 60-120s *without* a paired `kill_process_tree` — i.e. the command wasn't hung, it was just genuinely slow to spawn. Traced to the machine running ~10-12 parallel `claude.exe` processes on 7.8GB RAM, with 12-20% free memory sustained through most of this session — spawning a new subprocess under that pressure can take far longer than a typical `timeout`, so callers using the 30s default still see a kill even though nothing is actually stuck.

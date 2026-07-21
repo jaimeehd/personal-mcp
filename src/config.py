@@ -131,6 +131,10 @@ class ShellConfig(BaseModel):
 
 class SSHConfig(BaseModel):
     enabled: bool = False
+    remote_allow_prefix: List[str] = Field(default_factory=lambda: [
+        "ls", "cat", "echo", "pwd", "git", "uptime", "whoami", "uname", "df", "free", "ps", "top"
+    ])
+
 
 
 class LogConfig(BaseModel):

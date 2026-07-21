@@ -161,6 +161,7 @@ class SecurityValidator:
     def validate_shell_execution(self, command: str) -> Optional[str]:
         """Gate general-purpose interpreters (config.security.commands.approval_required_prefix)
         behind an explicit execute ticket, on top of the existing allow_prefix whitelist.
+        Also scans Python script targets using AST to warn against network/destructive IO risks.
 
         Returns None when execution is allowed. Returns a ticket JSON string (same
         contract as validate_tool_path) when an interpreter segment needs approval.
@@ -170,6 +171,7 @@ class SecurityValidator:
         if not prefixes:
             return None
         from src.shell_resolver import split_command_segments
+        from src.script_analyzer import analyze_python_script, analyze_javascript_script
         prefixes_lower = {p.lower() for p in prefixes}
         for segment in (split_command_segments(command) or [command]):
             words = segment.strip().split()
@@ -179,10 +181,39 @@ class SecurityValidator:
             if first_word_clean not in prefixes_lower:
                 continue
             exe_path = shutil.which(words[0]) or words[0]
+
+            # If target is python or node and a script path is provided, analyze the script
+            if len(words) > 1:
+                script_path = Path(words[1].strip('"\''))
+                if script_path.exists():
+                    ext = script_path.suffix.lower()
+                    findings = []
+                    if first_word_clean == "python" and ext == ".py":
+                        try:
+                            code = script_path.read_text(encoding="utf-8", errors="replace")
+                            findings = analyze_python_script(code)
+                        except Exception:
+                            pass
+                    elif first_word_clean == "node" and ext in (".js", ".ts", ".mjs", ".cjs"):
+                        try:
+                            code = script_path.read_text(encoding="utf-8", errors="replace")
+                            findings = analyze_javascript_script(code)
+                        except Exception:
+                            pass
+
+                    if findings:
+                        risk_summary = "; ".join(f"[{f.category}] L{f.line}: {f.description}" for f in findings)
+                        exe_path_annotated = f"{exe_path} (Script Risks Detected: {risk_summary})"
+                        if self.perm_manager and self.perm_manager.check_granted(exe_path, "execute"):
+                            continue
+                        return self.request_permission(exe_path_annotated, "execute")
+
+
             if self.perm_manager and self.perm_manager.check_granted(exe_path, "execute"):
                 continue
             return self.request_permission(exe_path, "execute")
         return None
+
 
     def validate_file_count(self, count: int) -> int:
         limit = self.config.security.rate_limit_files_per_operation

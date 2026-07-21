@@ -105,13 +105,27 @@ async def ssh_exec_impl(session_id: str, command: str, manager: SSHManager, time
     allowed, reason = manager.config.security.commands.is_command_allowed(command)
     if not allowed:
         return f"Command blocked: {reason}"
+
+    # Enforce remote_allow_prefix for SSH commands
+    remote_allowed_prefixes = manager.config.ssh.remote_allow_prefix
+    if remote_allowed_prefixes:
+        from src.shell_resolver import split_command_segments
+        segments = split_command_segments(command) or [command]
+        for seg in segments:
+            words = seg.strip().split()
+            if not words:
+                continue
+            first_word = words[0].lower()
+            if not any(first_word == p.lower() for p in remote_allowed_prefixes):
+                return f"Command blocked: Remote command '{first_word}' is not in SSH remote_allow_prefix whitelist"
+
     result = await session.execute(command, timeout=timeout)
     return (
-        "[WARNING] This command passed local allowlist validation, but the remote "
-        "host does not enforce it — SSH forwards commands verbatim once validated "
-        "locally. Treat remote hosts as trusted execution targets, not sandboxed.\n"
+        "[WARNING] This command passed local and remote allowlist validation, but the remote "
+        "host executes with its target user privileges. Treat remote hosts as trusted targets.\n"
         + result
     )
+
 
 
 async def ssh_disconnect_impl(session_id: str, manager: SSHManager) -> str:

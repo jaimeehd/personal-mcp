@@ -154,7 +154,29 @@ false.
 Apagado por defecto por seguridad — conectarse a otras máquinas es más sensible
 que trabajar en la tuya.
 
+**Archivo de configuración SSH (`~/.ssh/config`):**
+Para usar SSH, necesitas definir tus hosts en `C:\Users\User\.ssh\config`. Se
+creó un archivo de ejemplo con plantillas comentadas — edítalo, descomenta los
+hosts que uses y pon tus datos reales (IP/hostname, usuario, puerto, clave).
+Ver la sección "Si quiero activar SSH" abajo.
+
 ---
+
+## Si quiero activar SSH
+
+1. Edita `C:\Users\User\.ssh\config` y descomenta/agrega tus hosts reales.
+2. Asegúrate de tener las claves privadas correspondientes en `~/.ssh/`.
+3. En el config oficial (`C:\Users\User\.personal-mcp\config.json`), pon:
+   ```json
+   "ssh": { "enabled": true }
+   ```
+4. Reinicia Claude Desktop.
+5. Ejecuta `sync-config.ps1` si quieres actualizar la copia del repo.
+
+> ⚠️ **Solo activa SSH si confías en los hosts destino.** El asistente valida
+> los comandos contra `remote_allow_prefix` (lista blanca remota) antes de
+> enviarlos, pero una vez en el host remoto corren con los privilegios de ese
+> usuario SSH — no hay contención real desde aquí.
 
 ## Sección journal (tu diario/bitácora personal)
 

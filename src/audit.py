@@ -45,8 +45,8 @@ class AuditLog:
                duration_ms: float, error: Optional[str] = None) -> AuditEntry:
         entry = AuditEntry(tool, args, success, duration_ms, error)
         self._entries.append(entry)
-        if self.persist_path and len(self._entries) % 10 == 0:
-            self._flush()
+        if self.persist_path:
+            self._append_to_disk(entry)
         return entry
 
     def recent(self, n: int = 50) -> list:
@@ -68,11 +68,19 @@ class AuditLog:
         }
 
     def _flush(self) -> None:
+        """Deprecated flush helper kept for test compatibility. Entries are now flushed instantly via _append_to_disk."""
+        pass
+
+    def _append_to_disk(self, entry: AuditEntry) -> None:
         if not self.persist_path:
             return
-        self.persist_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.persist_path, "w", encoding="utf-8") as f:
-            json.dump([e.to_dict() for e in self._entries], f, ensure_ascii=False)
+        try:
+            self.persist_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.persist_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry.to_dict(), ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
 
     @classmethod
     def load(cls, max_entries: int = 10000,
@@ -81,7 +89,12 @@ class AuditLog:
         if persist_path and persist_path.exists():
             try:
                 with open(persist_path, encoding="utf-8") as f:
-                    data = json.load(f)
+                    # Support both legacy single-array JSON and new append-only JSONL format
+                    content = f.read().strip()
+                    if content.startswith("["):
+                        data = json.loads(content)
+                    else:
+                        data = [json.loads(line) for line in content.splitlines() if line.strip()]
                 for item in data[-max_entries:]:
                     entry = AuditEntry(
                         tool=item["tool"],
@@ -92,6 +105,7 @@ class AuditLog:
                     )
                     entry.timestamp = item["timestamp"]
                     log._entries.append(entry)
-            except (json.JSONDecodeError, KeyError):
+            except Exception:
                 pass
         return log
+

@@ -87,3 +87,12 @@ def format_findings(findings: List[SecretFinding]) -> str:
         warn_lines.append(f"  [{f.severity.upper()}] Line {f.line}: {f.secret_type}")
         warn_lines.append(f"          {f.snippet}")
     return "\n".join(warn_lines)
+
+
+def scan_and_warn(content: str, enabled: bool = True) -> str:
+    """Scan content for secrets if enabled and append standard warning block if findings exist."""
+    if not enabled or not content or not content.strip():
+        return ""
+    findings = scan_text(content)
+    return format_findings(findings) if findings else ""
+

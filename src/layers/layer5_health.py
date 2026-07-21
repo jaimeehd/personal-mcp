@@ -1,10 +1,12 @@
+import asyncio
+import ctypes
 import json
 import os
 import platform
 import shutil
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -13,6 +15,7 @@ from mcp.types import ToolAnnotations
 
 from src.config import AppConfig
 from src.audit import AuditLog
+from src.log import available_memory_info
 
 
 def _get_version(cmd: str, flag: str) -> str:
@@ -30,6 +33,14 @@ def _get_version(cmd: str, flag: str) -> str:
 
 
 def _get_uptime() -> str:
+    """Return OS boot time string via Windows GetTickCount64 (no subprocess spawned)."""
+    try:
+        if hasattr(ctypes, "windll"):
+            uptime_ms = ctypes.windll.kernel32.GetTickCount64()
+            boot_time = datetime.now() - timedelta(milliseconds=uptime_ms)
+            return boot_time.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        pass
     try:
         r = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
@@ -59,24 +70,13 @@ def register_health_tools(mcp: FastMCP, config: AppConfig,
             }
         except Exception:
             checks["disk"] = "unavailable"
-        try:
-            mem = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 "$os = Get-CimInstance Win32_OperatingSystem; Write-Output \"$($os.TotalVisibleMemorySize),$($os.FreePhysicalMemory)\""],
-                capture_output=True, text=True, timeout=5
-            )
-            line = mem.stdout.strip()
-            parts = line.split(",")
-            if len(parts) >= 2:
-                total_kb = int(parts[0].strip())
-                free_kb = int(parts[1].strip())
-                checks["memory"] = {
-                    "total_gb": round(total_kb / (1024**2), 1),
-                    "free_gb": round(free_kb / (1024**2), 1),
-                    "free_pct": round((free_kb / total_kb) * 100, 1),
-                }
-        except Exception:
+
+        mem_info = available_memory_info()
+        if mem_info:
+            checks["memory"] = mem_info
+        else:
             checks["memory"] = "unavailable"
+
         checks["hostname"] = platform.node()
         checks["config_valid"] = True
         checks["uptime"] = _get_uptime()
@@ -106,11 +106,7 @@ def register_health_tools(mcp: FastMCP, config: AppConfig,
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     async def health_processes(top: int = 10) -> str:
-        try:
-            # top va por env var, no interpolado en el string de PowerShell -
-            # top: int en la firma deberia bastar (FastMCP/pydantic coerciona),
-            # pero esto no depende de esa validacion para estar a salvo de
-            # inyeccion si algun dia el tipo cambia o se relaja.
+        def _fetch_processes():
             env = os.environ.copy()
             env["_MCP_TOP"] = str(top)
             r = subprocess.run(
@@ -121,6 +117,9 @@ def register_health_tools(mcp: FastMCP, config: AppConfig,
                 capture_output=True, text=True, timeout=10, env=env,
             )
             return r.stdout or r.stderr
+
+        try:
+            return await asyncio.to_thread(_fetch_processes)
         except Exception as e:
             return f"Error: {e}"
 

@@ -24,6 +24,29 @@ class _MEMORYSTATUSEX(ctypes.Structure):
     ]
 
 
+def available_memory_info() -> Optional[dict]:
+    """Return dict with total_gb, free_gb, free_pct via GlobalMemoryStatusEx API.
+    Zero subprocesses spawned. Returns None if non-Windows or call fails.
+    """
+    try:
+        stat = _MEMORYSTATUSEX()
+        stat.dwLength = ctypes.sizeof(_MEMORYSTATUSEX)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+            total_bytes = stat.ullTotalPhys
+            free_bytes = stat.ullAvailPhys
+            total_gb = round(total_bytes / (1024**3), 1)
+            free_gb = round(free_bytes / (1024**3), 1)
+            free_pct = round((free_bytes / total_bytes) * 100, 1) if total_bytes else 0.0
+            return {
+                "total_gb": total_gb,
+                "free_gb": free_gb,
+                "free_pct": free_pct,
+            }
+    except Exception:
+        pass
+    return None
+
+
 def available_memory_pct() -> Optional[float]:
     """% of physical RAM currently free, via GlobalMemoryStatusEx (Windows API
     call, no subprocess spawned - safe to call from inside a timeout handler
@@ -37,14 +60,9 @@ def available_memory_pct() -> Optional[float]:
     moment of a timeout/slow-op turns "is this a bug or my machine" from a
     multi-turn investigation into something visible in the error itself.
     """
-    try:
-        stat = _MEMORYSTATUSEX()
-        stat.dwLength = ctypes.sizeof(_MEMORYSTATUSEX)
-        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
-            return 100.0 - float(stat.dwMemoryLoad)
-    except Exception:
-        pass
-    return None
+    info = available_memory_info()
+    return info["free_pct"] if info else None
+
 
 
 # Below this = likely resource contention, not a genuine hang; worth saying so.

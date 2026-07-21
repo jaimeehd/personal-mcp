@@ -12,16 +12,13 @@ from mcp.types import ToolAnnotations
 
 from src.config import AppConfig
 from src.security import SecurityValidator
-from src.secretscanner import scan_text, format_findings
+from src.secretscanner import scan_text, format_findings, scan_and_warn
 
 
 def _scan_and_append(content: str, config: AppConfig, result: str) -> str:
-    if not config.security.secret_scanning_enabled or not content.strip():
-        return result
-    findings = scan_text(content)
-    if findings:
-        result += format_findings(findings)
-    return result
+    warning = scan_and_warn(content, enabled=config.security.secret_scanning_enabled)
+    return result + warning if warning else result
+
 
 
 class Journal:
@@ -204,15 +201,29 @@ def _git_project_info(entry: Path) -> dict:
     return info
 
 
+_PROJECT_SCAN_CACHE: dict = {}
+_PROJECT_SCAN_CACHE_TTL: float = 30.0
+
+
 async def project_scan_impl(security: SecurityValidator, path: Optional[str] = None) -> str:
-    base = Path(security.resolve_and_validate(path or _default_project_root(security)))
+    resolved_path = str(security.resolve_and_validate(path or _default_project_root(security)))
+    now = time.time()
+    if resolved_path in _PROJECT_SCAN_CACHE:
+        cached_time, cached_result = _PROJECT_SCAN_CACHE[resolved_path]
+        if now - cached_time < _PROJECT_SCAN_CACHE_TTL:
+            return cached_result + "\n\n(cached result - TTL 30s)"
+
+    base = Path(resolved_path)
     if not base.is_dir():
         return f"Directory not found: {base}"
     entries = [e for e in sorted(base.iterdir()) if e.is_dir() and not e.name.startswith(".")]
     results = [await asyncio.to_thread(_git_project_info, e) for e in entries]
     lines = [f"{r['project']:30s} branch: {r.get('branch', '?'):20s} changes: {r.get('uncommitted_changes', 0)}"
              for r in results]
-    return "\n".join(lines)
+    output = "\n".join(lines)
+    _PROJECT_SCAN_CACHE[resolved_path] = (now, output)
+    return output
+
 
 
 def _find_files_sync(base: Path, filename: str) -> List[str]:

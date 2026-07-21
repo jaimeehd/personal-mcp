@@ -80,15 +80,23 @@ class SecurityValidator:
         without opening bin/obj in general -- that stays blocked for everything
         else (node_modules, vendored binaries, etc.).
 
-        Only ever applies to read operations (fs_find/fs_read), and only to file
-        extensions explicitly listed in paths_deny_exception_extensions. Never
-        applies to write/delete/execute. Both paths_deny_exceptions (patterns)
-        and paths_deny_exception_extensions default to a safe, narrow set -- see
+        Only ever applies to read operations (fs_find/fs_read/fs_list/fs_tree),
+        never to write/delete/execute. Both paths_deny_exceptions (patterns) and
+        paths_deny_exception_extensions default to a safe, narrow set -- see
         SecurityConfig in config.py.
+
+        Directories vs. files (fixed 2026-07-19): fs_find/fs_list/fs_tree validate
+        the SEARCH DIRECTORY itself (e.g. "...\\bin\\Release"), not each file found
+        inside it -- a directory has no file extension, so an extension-only check
+        could never let those tools traverse into an excepted bin/obj folder in the
+        first place. For a directory, matching an exceptions pattern is enough
+        (this only reveals names/sizes/dates, not file content). For a file, the
+        extension check still applies -- fs_read on anything other than
+        .dll/.exe/.pdb inside that same folder stays blocked.
         """
         if operation != "read":
             return False
-        if resolved.suffix.lower() not in self.config.security.paths_deny_exception_extensions:
+        if not resolved.is_dir() and resolved.suffix.lower() not in self.config.security.paths_deny_exception_extensions:
             return False
         candidate = str(resolved)
         for pattern in self.config.security.paths_deny_exceptions:

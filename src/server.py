@@ -14,7 +14,7 @@ from src.config import AppConfig
 from src.security import SecurityValidator
 from src.audit import AuditLog
 from src.permissions import PermissionManager
-from src.log import configure as configure_logging, get_logger
+from src.log import configure as configure_logging, get_logger, memory_pressure_hint
 from src.layers.layer1_filesystem import register_filesystem_tools
 from src.layers.layer2_shell import ShellManager, register_shell_tools
 from src.layers.layer3_ssh import SSHManager, register_ssh_tools
@@ -58,7 +58,7 @@ class AuditedFastMCP(FastMCP):
             result = await super().call_tool(name, arguments)
             elapsed = (time.time() - start) * 1000
             if elapsed > 30_000:
-                self._audit_logger.warning("SLOW %s %.0fms", name, elapsed)
+                self._audit_logger.warning("SLOW %s %.0fms%s", name, elapsed, memory_pressure_hint())
             else:
                 self._audit_logger.info("OK   %s %.0fms", name, elapsed)
             self._audit_log.record(name, arguments, True, elapsed)

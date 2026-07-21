@@ -13,7 +13,7 @@ from mcp.types import ToolAnnotations
 from src.security import SecurityValidator, CommandNotAllowedError
 from src.shell_resolver import ShellInfo, resolve_shell, tokenize_command, has_shell_operators
 from src.secretscanner import scan_text, format_findings
-from src.log import get_logger, sanitize_log_value
+from src.log import get_logger, sanitize_log_value, memory_pressure_hint
 
 logger = get_logger("layer2_shell")
 
@@ -308,7 +308,7 @@ async def sh_exec_impl(command: str, security: SecurityValidator, timeout: int =
                 except asyncio.TimeoutError:
                     await _kill_process_tree(process.pid)
                     await _reap_after_kill(process)
-                    return f"Command timed out after {timeout}s"
+                    return f"Command timed out after {timeout}s{memory_pressure_hint()}"
 
     # Fallback: shell execution
     si = shell_info or ShellInfo(name="powershell", executable="powershell.exe",
@@ -340,7 +340,7 @@ async def sh_exec_impl(command: str, security: SecurityValidator, timeout: int =
     except asyncio.TimeoutError:
         await _kill_process_tree(process.pid)
         await _reap_after_kill(process)
-        return f"Command timed out after {timeout}s"
+        return f"Command timed out after {timeout}s{memory_pressure_hint()}"
 
 
 async def sh_session_start_impl(manager: ShellManager, timeout: Optional[int] = None,
@@ -439,7 +439,7 @@ async def sh_script_impl(script: str, security: SecurityValidator, timeout: int 
     except asyncio.TimeoutError:
         await _kill_process_tree(process.pid)
         await _reap_after_kill(process)
-        return f"Script timed out after {timeout}s"
+        return f"Script timed out after {timeout}s{memory_pressure_hint()}"
     finally:
         exists = await asyncio.to_thread(temp_file.exists)
         if exists:

@@ -1,6 +1,6 @@
 # Comparativa de Seguridad: personal-mcp vs. Ecosistema MCP
 
-> **Fecha:** 2 de julio de 2026
+> **Fecha:** 2 de julio de 2026 (conteos de herramientas y estado del sistema HITL actualizados 2026-07-20 tras verificación directa contra el código)
 >
 > Esta guía compara las características de seguridad de personal-mcp con las de
 > otros servidores MCP populares, basándose en investigación pública, CVEs
@@ -13,12 +13,12 @@
 personal-mcp tiene **el modelo de seguridad más completo** entre todos los
 servidores MCP analizados. Es el único con:
 
-- Sistema de aprobación por tickets (SINGLE / SESSION / PERMANENT)
+- Sistema de aprobación por tickets con **código de confirmación HMAC** (SINGLE / SESSION / PERMANENT) — el código solo es visible en un popup nativo en la pantalla del usuario, nunca en la respuesta de ninguna tool; un agente no tiene ningún canal para leerlo o adivinarlo
 - Límite de tasa por operación (ventana deslizante read/write separados)
 - Escaneo de secretos en archivos leídos
 - Protección contra symlinks/junctions
 - Capa SSH deshabilitada por defecto (opt-in)
-- 6 capas hexagonales de seguridad con 46 herramientas
+- 6 capas hexagonales de seguridad con 56 herramientas (52 activas)
 
 Mientras que servidores populares como Desktop Commander tienen **3+ CVEs
 activos** por path traversal y command injection, personal-mcp no tiene CVEs
@@ -34,7 +34,7 @@ conocidos.
 | **Path traversal** | ✅ validate() con realpath | ❌ **3+ CVEs activos** | ✅ Bueno | ✅ Básico | N/A |
 | **Whitelist comandos** | ✅ Prefix allow + deny list | ❌ By-passeable con `$()` | N/A | N/A | N/A |
 | **Output truncation** | ✅ 1 MiB con aviso | ❌ No | ❌ No | ❌ No | ❌ No |
-| **Permisos (HITL)** | ✅ Tickets (SINGLE/SESSION) | ❌ No | ⚠️ ToolAnnotations (solo pistas) | ❌ No | ✅ Token-scoped |
+| **Permisos (HITL)** | ✅ Tickets + código de confirmación HMAC (popup nativo, invisible al agente) | ❌ No | ⚠️ ToolAnnotations (solo pistas) | ❌ No | ✅ Token-scoped |
 | **Auditoría** | ✅ RotatingFileHandler | ❌ No | ❌ No | ❌ No | ✅ GitHub audit log |
 | **Secret scanning** | ✅ En fs_read (12 patrones) | ❌ No | ❌ No | ❌ No | ❌ No |
 | **Rate limiting** | ✅ Per-operación (read/write) | ❌ No | ❌ No | ⚠️ Sesión timeout | ✅ API limits |

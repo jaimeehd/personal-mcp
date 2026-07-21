@@ -126,6 +126,29 @@ def test_deny_exception_still_blocks_non_matching_pattern(exception_security, te
         exception_security.resolve_and_validate(str(dll_path))
 
 
+def test_deny_exception_allows_listing_matching_directory(exception_security, temp_home):
+    # Bug real encontrado 2026-07-19: fs_find/fs_list/fs_tree validan el
+    # DIRECTORIO de busqueda, no cada archivo encontrado adentro -- un directorio
+    # no tiene extension, asi que el chequeo de extension solo nunca dejaba pasar
+    # nada. Para un directorio que matchea el patron de excepcion, alcanza con
+    # el match de patron (esto solo revela nombres/tamanos/fechas, no contenido).
+    bin_dir = temp_home / "Repos" / "MyProj" / "bin" / "Release"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    result = exception_security.resolve_and_validate(str(bin_dir))
+    assert result == bin_dir.resolve()
+
+
+def test_deny_exception_directory_listing_does_not_unblock_file_read(exception_security, temp_home):
+    # El listado de la carpeta esta permitido (test anterior), pero eso NO debe
+    # habilitar la lectura de CONTENIDO de un archivo que no sea .dll/.exe/.pdb
+    # dentro de esa misma carpeta -- el gate de extension sigue vigente por archivo.
+    txt_path = temp_home / "Repos" / "MyProj" / "bin" / "Release" / "secret.txt"
+    txt_path.parent.mkdir(parents=True, exist_ok=True)
+    txt_path.write_text("no deberia poder leerse aunque la carpeta si se pueda listar")
+    with pytest.raises(PathNotAllowedError, match="Path denied by pattern"):
+        exception_security.resolve_and_validate(str(txt_path))
+
+
 def test_deny_exception_never_applies_to_write(exception_security, temp_home):
     dll_path = temp_home / "Repos" / "MyProj" / "bin" / "Release" / "MyProj.dll"
     dll_path.parent.mkdir(parents=True, exist_ok=True)

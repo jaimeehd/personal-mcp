@@ -1,4 +1,24 @@
-# Changelog
+## [1.4.31] — 2026-07-20
+
+### Added — memory-pressure hint on slow/timed-out shell commands
+- **Root cause of "otro agente tuvo problemas y se cayo el proceso por timeout" after 1.4.19/1.4.20/1.4.21 fixes**: those three fixed real bugs (stdin inheritance, handle leaks, log rotation crash), verified working (`git --version`, `git log`, full `pytest` suite all fast post-restart). But `server.log` still showed repeated `SLOW sh_exec` entries of 60-120s *without* a paired `kill_process_tree` — i.e. the command wasn't hung, it was just genuinely slow to spawn. Traced to the machine running ~10-12 parallel `claude.exe` processes on 7.8GB RAM, with 12-20% free memory sustained through most of this session — spawning a new subprocess under that pressure can take far longer than a typical `timeout`, so callers using the 30s default still see a kill even though nothing is actually stuck.
+- **This is not fixable in this codebase** — it's the host machine being memory-constrained while running many parallel MCP server instances, one per open Claude Desktop window/session. What *is* fixable: making that diagnosis visible in the moment instead of requiring a multi-turn investigation each time it recurs.
+- **`src/log.py`**: added `available_memory_pct()` (via `GlobalMemoryStatusEx`, a Windows API call — deliberately not a subprocess, so checking memory pressure never itself adds to subprocess pressure) and `memory_pressure_hint()`, which returns an appendable clause when free memory is below 25%, empty string otherwise.
+- **Wired in three places**: `timed()`'s SLOW log line, `AuditedFastMCP.call_tool()`'s SLOW log line (`server.py`), and — most visibly — the actual timeout return string in `sh_exec_impl` (both code paths) and `sh_script_impl` (`layer2_shell.py`), so the calling agent sees "...may be resource contention from multiple parallel sessions rather than a hung command..." directly in the tool result, not just in a log file it may never read.
+- Verified: full suite, 285/285 passing.
+
+## [1.4.30] — 2026-07-19
+
+### Fixed — `_deny_exception_applies()` never actually let `fs_find`/`fs_list`/`fs_tree` through
+- Follow-up to `1.4.29`, same feature, found the same day while actually using it against a real project (HikBioAccess) instead of only the unit tests. `fs_find`/`fs_list`/`fs_tree` validate the **search directory itself** (e.g. `...\bin\Release`) via `validate_tool_path()` → `resolve_and_validate()`, not each file found inside it. A directory has no file extension — `resolved.suffix.lower() not in paths_deny_exception_extensions` was always true for a directory path, so the exception could only ever apply to a direct `fs_read` of an already-known exact filename, never to browsing/finding what's inside an excepted `bin`/`obj` folder in the first place. This made the whole feature effectively unusable for its actual purpose.
+- **Fix**: `_deny_exception_applies()` now skips the extension check when `resolved.is_dir()` — a directory only needs to match a `paths_deny_exceptions` pattern. A file still needs both the pattern match and the extension match, unchanged. Net effect: `fs_find`/`fs_list`/`fs_tree` can enumerate names/sizes/dates inside an excepted `bin`/`obj` folder; `fs_read` on anything other than `.dll`/`.exe`/`.pdb` inside that same folder stays blocked.
+- 2 new tests in `test_security.py`: directory listing allowed for a matching exception path; a non-build file inside that same directory still blocked for content read.
+- Verified: full suite, 285/285 (283 + the 2 new tests above).
+
+### Process failure, documented for the record (not a code bug)
+- Spent several rounds diagnosing why `paths_deny_exceptions` had no effect after a server restart, including re-testing `fnmatch` in isolation and importing the real module directly to compare behavior — before checking the one thing that would have answered it immediately: **`AGENTS.md`'s own first 9 lines**, an unmissable warning block that the `config.json` in the repo root is a read-only mirror and the actual file the server loads is `~/.personal-mcp/config.json`. Edited the repo mirror only, restarted, confirmed no effect, repeated — twice — before this was pointed out. `CONFIG-GUIA.md` (a dedicated plain-language guide for exactly this) was also never opened.
+- Once pointed at it: applied the change directly to the real `~/.personal-mcp/config.json`, then used `sync-config.ps1`'s own documented logic (validate the official file is valid JSON, copy official → mirror, never the reverse) to bring the repo mirror back in sync, instead of continuing to hand-edit both files independently.
+- No code or doc change needed to close this — the warning was already maximally prominent (first thing in the file, blockquote, explicit pointer to the dedicated guide). The gap was not reading it before acting, not a documentation gap.
 
 ## [1.4.29] — 2026-07-20
 

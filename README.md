@@ -6,13 +6,15 @@ Custom MCP server for Windows workstation orchestration. Allowlist-based securit
 
 ```
 6 layers, hexagonal design:
-  Layer 1: Filesystem      — 12 tools (read, write, edit, delete, list, tree, search, find, info, diff, batch, snapshot)
+  Layer 1: Filesystem      — 20 tools (read, write, edit, delete, delete-batch, list, tree, search, find, info, diff, batch, snapshot, create-dir, move, read-multi, list-allowed, list-with-sizes, read-media, edit-advanced)
 Layer 2: Shell — 9 tools (exec, persistent sessions, script execution, history, configurable shell)
   Layer 3: SSH             — 4 tools (list hosts, connect, exec, disconnect) [disabled by default]
   Layer 4: Personal        — 8 tools (journal CRUD, quick notes, project scan, project find)
-  Layer 5: Health/Diagnostics — 8 tools (health check, disk, processes, config, diag, audit log, tool list, benchmark)
+  Layer 5: Health/Diagnostics — 9 tools (health check, disk, processes, config, diag, audit log, tool list, benchmark, log tail)
   Layer 6: Permissions     — 6 tools (approve, deny, pre-authorize, list pending, revoke, stats)
 ```
+
+56 tools total, 52 active (SSH's 4 disabled by default).
 
 ## Tools
 
@@ -23,14 +25,22 @@ Layer 2: Shell — 9 tools (exec, persistent sessions, script execution, history
 | `fs_write` | Write file content |
 | `fs_edit` | Replace text in file with diff preview |
 | `fs_delete` | Delete a single file (no directories/recursion). `delete` tickets are always single-use — session/permanent grants are not possible, by design |
+| `fs_delete_batch` | Delete multiple explicitly-listed files under one ticket/one confirmation code, instead of one popup per file. Same `delete`-only-single-use rule as `fs_delete` |
 | `fs_list` | List directory with filters |
 | `fs_tree` | Directory tree with depth limit |
-| `fs_search` | Grep-like regex search across files |
+| `fs_search` | Grep-like regex search across files (skips files >10MB) |
 | `fs_find` | Find files by name, size, age |
 | `fs_info` | File metadata including SHA256 hash |
 | `fs_diff` | Diff two files or file vs snapshot |
 | `fs_batch` | Batch copy/move/rename with dry-run |
 | `fs_snapshot` | Snapshot directory state to JSON |
+| `fs_create_directory` | Create a directory (and parents as needed) |
+| `fs_move` | Move/rename a file |
+| `fs_read_multi` | Read several files in one call |
+| `fs_list_allowed` | List the configured `paths_allow` directories |
+| `fs_list_with_sizes` | List directory entries with file sizes, sortable |
+| `fs_read_media` | Read an image/binary file as base64, with secret scanning on decoded content |
+| `fs_edit_advanced` | Multiple find/replace edits to a file in one call, with dry-run |
 
 ### Layer 2 — Shell (multi-shell execution, runtime shell switching)
 | Tool | Description |
@@ -75,6 +85,7 @@ Layer 2: Shell — 9 tools (exec, persistent sessions, script execution, history
 | `mcp_audit_log` | Recent operation audit trail |
 | `mcp_list_tools` | List all registered tools |
 | `mcp_benchmark` | Performance benchmarks |
+| `mcp_log` | Tail the server's own log file, filterable by level |
 
 ### Layer 6 — Permissions
 | Tool | Description |
@@ -88,17 +99,20 @@ Layer 2: Shell — 9 tools (exec, persistent sessions, script execution, history
 
 ## Security
 
-- **Human-in-the-Loop (HITL)**: Write operations and shell executions require explicit user approval via tickets. Use `fs_request_allow` to create a pending ticket, then `fs_approve` to confirm — no longer bypasses the ticket system. Read operations within `paths_allow` pass directly (no ticket needed).
-- **Strict Path Hard-Lock**: Only paths defined in `security.paths_allow` (and internal `data_dir`) are accessible. Any attempt to access paths outside this list is immediately denied with a hard error—no dynamic requests are permitted for external paths.
-- **Command Whitelist**: Shell execution is restricted to a strict whitelist of approved command prefixes (e.g., `git`, `npm`, `python`, `ls`). Commands not in the whitelist are blocked.
+- **Human-in-the-Loop (HITL) with HMAC confirmation**: Write/delete operations and shell executions require explicit user approval via tickets. `fs_approve` requires a `confirm_code` — a 6-digit code shown *only* via a native Windows popup on the user's screen, never returned by any tool response. An agent has no channel to read or guess it (`hmac.compare_digest()` verification against an in-memory secret). Use `fs_request_allow` to create a pending ticket, then `fs_approve(ticket_id, confirm_code, level)` to confirm. Read operations within `paths_allow` pass directly (no ticket needed).
+- **Execute-approval gate for general-purpose interpreters**: `python`/`node`/`bash` are whitelisted for legitimate dev workflows, but running one is a black box once approved — an explicit `execute` ticket (same HMAC-confirmed flow) is required before the interpreter is allowed to start at all, on top of the command whitelist below.
+- **Batch operations use one ticket, not one per file**: `fs_delete_batch` binds a single ticket/confirmation code to an explicit list of paths.
+- **Strict Path Hard-Lock**: Only paths defined in `security.paths_allow` (and internal `data_dir`) are accessible for reads without a ticket; paths outside are denied. Write/delete still require an explicit grant regardless of `paths_allow`'s scope.
+- **Command Whitelist**: Shell execution is restricted to a strict whitelist of approved command prefixes (e.g., `git`, `npm`, `python`, `ls`). Commands not in the whitelist, or explicitly denied, are blocked.
 - **Recursive Session Grants**: Approving a directory for a session (`level='session'`) automatically grants access to all its sub-directories and files, reducing approval friction for complex projects.
-- **Path denylist**: Paths matching `security.paths_deny` patterns (e.g. `**\node_modules\**`, `**\.git\**`) are blocked even if they're under an allowed directory.
-- **`validate_tool_path()`**: All layer 1 tools validate paths through this method. For write operations in `paths_allow` without a grant, a `permission_required` JSON ticket is returned. Reads in `paths_allow` pass directly (no ticket).
+- **Path denylist**: Paths matching `security.paths_deny` patterns (e.g. `**\node_modules\**`, `**\.git\**`, `**\.ssh\**`, `**\.env*`, `**\*.pem`, credential files for git/npm/pip/docker/aws/azure/kube) are blocked even if they're under an allowed directory. A narrow, explicit, read-only exception exists for inspecting a project's own build artifacts (`.dll`/`.exe`/`.pdb` under `**\bin\**`/`**\obj\**`) without opening those folders in general — off by default, opt-in per project via `security.paths_deny_exceptions`.
+- **`validate_tool_path()`**: All layer 1 tools validate paths through this method. For write/delete operations without a grant, a `permission_required` JSON ticket is returned. Reads in `paths_allow` pass directly (no ticket).
 - **Rate limiting per-operation**: Sliding window rate limiter (`security.rate_limit_commands_per_minute`) applied independently per operation type (read/write) in `validate_tool_path()`. Disabled when set to 0.
-- **Secret scanning**: File contents scanned for credentials (GitHub tokens, AWS keys, private keys, DB connection strings, etc.) on every `fs_read` — warns only, never blocks. Configurable via `security.secret_scanning_enabled`.
+- **Secret scanning**: File and media contents scanned for credentials (GitHub tokens, AWS keys, private keys, DB connection strings, etc.) on `fs_read`/`fs_read_media`/shell output/journal entries — warns only, never blocks. Configurable via `security.secret_scanning_enabled`.
 - **Output truncation**: All shell output is capped at 1 MiB to prevent memory issues. Truncated output is flagged with a notice.
-- **Process tree cleanup**: Timed-out commands use `taskkill /T /F` to recursively terminate all child processes.
+- **Process tree cleanup**: Timed-out commands use `taskkill /T /F` to recursively terminate all child processes, followed by reaping the original process handle to avoid leaking OS-level async I/O resources on Windows.
 - **Audit trail**: Every operation logged (circular buffer, 10k entries) with sensitive data automatically scrubbed.
+- **Known limitation — the generic `Filesystem` MCP connector, if also enabled with write access to this repo's own folder, bypasses every protection above.** It writes directly to disk with no tickets, no `confirm_code`, no audit trail — this server's security model only covers the tools *this* server exposes, not the repository as a file on disk. There is no code fix possible from within this project; if you also use the official `Filesystem` connector in the same MCP client, either avoid granting it write access to this repo's path, or accept that it's a parallel, unprotected write path to your own security configuration.
 
 ## Shell Configuration
 
@@ -157,8 +171,9 @@ explanation of every field (in Spanish).
 
 - **Interactive Setup**: Use `python configure_paths.py` to manage your allowed directories without editing the JSON manually.
 - **Example Config**: See `config.demo.json` for a secure, productivity-optimized template.
-- `security.paths_allow`: Accessible directories (default: `~/Repos`, `~/Desktop`, `~/OneDrive`, `~/.personal-mcp`)
-- `security.paths_deny`: Blocked path patterns (default: `**\node_modules\**`, `**\.git\**`, `**\bin\**`, `**\obj\**`, `~/AppData`)
+- `security.paths_allow`: Accessible directories for reads without a ticket. In this deployment, deliberately set to `["C:\\"]` (whole drive) — write/delete still requires an explicit ticket regardless. Default for a fresh install remains scoped (e.g. `~/Repos`, `~/Desktop`, `~/OneDrive`, `~/.personal-mcp`); widen only if you understand `paths_deny` becomes your only real read control at that point.
+- `security.paths_deny`: Blocked path patterns (default: `**\node_modules\**`, `**\.git\**`, `**\bin\**`, `**\obj\**`, `~/AppData` (recursive), plus credential-focused patterns: `.ssh`, `.aws`, `.azure`, `.kube`, `.gnupg`, `.env*`, `*.pem`, `id_rsa*`, `id_ed25519*`, git/npm/pip/docker credential files)
+- `security.paths_deny_exceptions` / `paths_deny_exception_extensions`: narrow, read-only, opt-in exception to `paths_deny` for inspecting a project's own build artifacts (see Security section above). Empty by default.
 - `security.commands.allow_prefix`: Mandatory whitelist of permitted command prefixes (e.g. `git`, `npm`, `python`).
 - `security.rate_limit_commands_per_minute`: Max commands per minute (default: 60, 0 = disabled)
 - `security.secret_scanning_enabled`: Scan file contents for secrets on fs_read (default: true)
@@ -168,7 +183,7 @@ explanation of every field (in Spanish).
 ## Development
 
 ```bash
-.\.venv\Scripts\python -m pytest tests/ -v      # 257 tests (all pass)
+.\.venv\Scripts\python -m pytest tests/ -v      # 283 tests, verified 2026-07-20 (0 failed)
 .\.venv\Scripts\python -m src.server             # stdio mode
 .\install.ps1                    # register with Claude Desktop (auto-creates venv)
 ```

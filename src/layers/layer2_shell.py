@@ -56,10 +56,13 @@ def _escape_workdir(working_dir: str, shell_name: str) -> str:
     backtick-quote for all three let a `"` in working_dir break out of the quoted
     string on cmd.exe and bash (INJ-02 fix).
     """
+    # Linux/macOS shells: bash, zsh, fish, sh all use backslash
+    if shell_name in ("bash", "zsh", "fish", "sh"):
+        return working_dir.replace('"', '\\"')
+    # Windows cmd.exe
     if shell_name == "cmd":
         return working_dir.replace('"', '""')
-    if shell_name == "bash":
-        return working_dir.replace('"', '\\"')
+    # Windows PowerShell / pwsh
     return working_dir.replace('"', '`"')
 
 

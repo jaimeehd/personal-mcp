@@ -1,9 +1,57 @@
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
+
+
+def _default_paths_allow() -> List[str]:
+    """Platform-aware default allowed paths."""
+    home = Path.home()
+    if sys.platform == "win32":
+        paths = [str(home / "Repos")]
+        desktop = home / "Desktop"
+        if desktop.exists():
+            paths.append(str(desktop))
+        onedrive = home / "OneDrive"
+        if onedrive.exists():
+            paths.append(str(onedrive))
+        paths.append(str(home / ".personal-mcp"))
+        return paths
+    # Linux/macOS: just home directory
+    return [str(home)]
+
+
+def _default_paths_deny() -> List[str]:
+    """Platform-aware default denied paths."""
+    home = Path.home()
+    base = [
+        "**/node_modules/**", "**/.git/**", "**/bin/**", "**/obj/**",
+        "**/.ssh/**", "**/.aws/**", "**/.azure/**", "**/.kube/**",
+        "**/.gnupg/**", "**/.docker/config.json", "**/.git-credentials",
+        "**/.netrc", "**/.npmrc", "**/.pypirc", "**/.env*", "**/*.pem",
+        "**/id_rsa*", "**/id_ed25519*",
+    ]
+    if sys.platform == "win32":
+        base.append(str(home / "AppData"))
+    else:
+        # Linux/macOS common sensitive dirs
+        base.extend([
+            str(home / ".config" / "Code" / "User" / "globalStorage"),
+            str(home / ".config" / "google-chrome"),
+            str(home / ".config" / "chromium"),
+            str(home / ".mozilla"),
+        ])
+    return base
+
+
+def _default_shell() -> str:
+    """Return platform-appropriate default shell."""
+    if sys.platform == "win32":
+        return "powershell"
+    return "bash"
 
 
 class CommandPolicy(BaseModel):
@@ -92,16 +140,8 @@ class CommandPolicy(BaseModel):
 
 
 class SecurityConfig(BaseModel):
-    paths_allow: List[str] = Field(default_factory=lambda: [
-        str(Path.home() / "Repos"),
-        str(Path.home() / "Desktop"),
-        str(Path.home() / "OneDrive"),
-        str(Path.home() / ".personal-mcp"),
-    ])
-    paths_deny: List[str] = Field(default_factory=lambda: [
-        "**\\node_modules\\**", "**\\.git\\**", "**\\bin\\**", "**\\obj\\**",
-        str(Path.home() / "AppData"),
-    ])
+    paths_allow: List[str] = Field(default_factory=_default_paths_allow)
+    paths_deny: List[str] = Field(default_factory=_default_paths_deny)
     # Excepcion acotada a paths_deny, para necesidades legitimas como verificar
     # artefactos de build de un proyecto (.NET, etc.) sin abrir **\bin\**/**\obj\**
     # en general -- eso sigue bloqueado para todo lo demas (node_modules,
@@ -123,7 +163,7 @@ class SecurityConfig(BaseModel):
 
 class ShellConfig(BaseModel):
     enabled: bool = True
-    default_shell: str = "powershell"
+    default_shell: str = Field(default_factory=_default_shell)
     shell_map: Dict[str, str] = Field(default_factory=dict)
     session_timeout_seconds: int = 600
     command_timeout_seconds: int = 120

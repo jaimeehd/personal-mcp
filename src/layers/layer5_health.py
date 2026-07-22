@@ -1,5 +1,4 @@
 import asyncio
-import ctypes
 import json
 import os
 import platform
@@ -15,7 +14,7 @@ from mcp.types import ToolAnnotations
 
 from src.config import AppConfig
 from src.audit import AuditLog
-from src.log import available_memory_info
+from src.oslayer.system import available_memory_info, uptime_seconds
 
 
 def _get_version(cmd: str, flag: str) -> str:
@@ -33,23 +32,66 @@ def _get_version(cmd: str, flag: str) -> str:
 
 
 def _get_uptime() -> str:
-    """Return OS boot time string via Windows GetTickCount64 (no subprocess spawned)."""
-    try:
-        if hasattr(ctypes, "windll"):
-            uptime_ms = ctypes.windll.kernel32.GetTickCount64()
-            boot_time = datetime.now() - timedelta(milliseconds=uptime_ms)
-            return boot_time.strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
-        pass
+    """Return OS boot time string via platform-native call (no subprocess)."""
+    uptime = uptime_seconds()
+    if uptime is not None:
+        boot_time = datetime.now() - timedelta(seconds=uptime)
+        return boot_time.strftime("%Y-%m-%d %H:%M:%S")
+    return "unavailable"
+
+
+def _fetch_processes_linux(top: int) -> str:
+    """Fetch top processes on Linux using ps."""
     try:
         r = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "(Get-CimInstance Win32_OperatingSystem).LastBootUpTime"],
-            capture_output=True, text=True, timeout=5
+            ["ps", "aux", "--sort=-%cpu"],
+            capture_output=True, text=True, timeout=10,
         )
-        return r.stdout.strip()
-    except Exception:
-        return "unavailable"
+        lines = r.stdout.splitlines()
+        if len(lines) > top + 1:
+            lines = lines[:top + 1]  # header + top N
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def _fetch_processes_macos(top: int) -> str:
+    """Fetch top processes on macOS using ps."""
+    try:
+        r = subprocess.run(
+            ["ps", "aux", "-r"],
+            capture_output=True, text=True, timeout=10,
+        )
+        lines = r.stdout.splitlines()
+        if len(lines) > top + 1:
+            lines = lines[:top + 1]
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error: {e}"
+
+
+def _fetch_processes_windows(top: int) -> str:
+    """Fetch top processes on Windows using PowerShell."""
+    env = os.environ.copy()
+    env["_MCP_TOP"] = str(top)
+    r = subprocess.run(
+        ["powershell", "-NoProfile", "-Command",
+         "Get-Process | Sort-Object CPU -Descending | Select-Object -First $env:_MCP_TOP "
+         "Name, Id, @{N='CPU(s)';E={$_.CPU.ToString('F1')}}, "
+         "@{N='MemMB';E={($_.WorkingSet/1MB).ToString('F0')}} | Format-Table -AutoSize"],
+        capture_output=True, text=True, timeout=10, env=env,
+    )
+    return r.stdout or r.stderr
+
+
+async def health_processes(top: int = 10) -> str:
+    """Cross-platform top processes."""
+    if platform.system() == "Windows":
+        return await asyncio.to_thread(_fetch_processes_windows, top)
+    elif platform.system() == "Darwin":
+        return await asyncio.to_thread(_fetch_processes_macos, top)
+    else:
+        return await asyncio.to_thread(_fetch_processes_linux, top)
 
 
 def register_health_tools(mcp: FastMCP, config: AppConfig,
@@ -106,22 +148,7 @@ def register_health_tools(mcp: FastMCP, config: AppConfig,
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     async def health_processes(top: int = 10) -> str:
-        def _fetch_processes():
-            env = os.environ.copy()
-            env["_MCP_TOP"] = str(top)
-            r = subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 "Get-Process | Sort-Object CPU -Descending | Select-Object -First $env:_MCP_TOP "
-                 "Name, Id, @{N='CPU(s)';E={$_.CPU.ToString('F1')}}, "
-                 "@{N='MemMB';E={($_.WorkingSet/1MB).ToString('F0')}} | Format-Table -AutoSize"],
-                capture_output=True, text=True, timeout=10, env=env,
-            )
-            return r.stdout or r.stderr
-
-        try:
-            return await asyncio.to_thread(_fetch_processes)
-        except Exception as e:
-            return f"Error: {e}"
+        return await health_processes(top)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     async def health_config() -> str:
@@ -182,10 +209,17 @@ def register_health_tools(mcp: FastMCP, config: AppConfig,
             results["fs_write_delete"] = f"error: {e}"
         start = time.time()
         try:
-            r = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", "echo test"],
-                capture_output=True, text=True, timeout=10
-            )
+            # Use platform-appropriate shell for benchmark
+            if platform.system() == "Windows":
+                r = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", "echo test"],
+                    capture_output=True, text=True, timeout=10
+                )
+            else:
+                r = subprocess.run(
+                    ["bash", "-c", "echo test"],
+                    capture_output=True, text=True, timeout=10
+                )
             results["shell_exec"] = round((time.time() - start) * 1000, 1)
         except Exception as e:
             results["shell_exec"] = f"error: {e}"

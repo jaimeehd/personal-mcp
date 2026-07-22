@@ -149,17 +149,50 @@ When `shell` is omitted, the configured `default_shell` is used. Invalid shell n
 
 ## Installation
 
+### Windows (PowerShell)
 ```powershell
 .\install.ps1
 ```
 
-This will:
+### Linux / macOS (bash)
+```bash
+chmod +x install.sh
+./install.sh
+```
+
+Both installers will:
 1. Verify Python 3.10+
 2. Create virtual environment (`.venv`)
 3. Create directory structure
 4. Install Python dependencies in the venv
 5. Generate default config with auto-detected workspace paths
 6. Register with Claude Desktop using the venv Python
+
+### Manual Installation (all platforms)
+```bash
+python3 -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+# Windows: pip install pywin32
+python -m src.server  # test run
+```
+
+Then configure Claude Desktop manually:
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+- **Linux:** `~/.config/Claude/claude_desktop_config.json`
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+
+Add to `mcpServers`:
+```json
+{
+  "mcpServers": {
+    "personal-mcp": {
+      "command": "/full/path/to/.venv/bin/python",
+      "args": ["/full/path/to/run_server.py"]
+    }
+  }
+}
+```
 
 ## Configuration
 
@@ -183,7 +216,21 @@ explanation of every field (in Spanish).
 ## Development
 
 ```bash
-.\.venv\Scripts\python -m pytest tests/ -v      # 283 tests, verified 2026-07-20 (0 failed)
-.\.venv\Scripts\python -m src.server             # stdio mode
-.\install.ps1                    # register with Claude Desktop (auto-creates venv)
+# Windows
+.\.venv\Scripts\python -m pytest tests/ -v
+.\.venv\Scripts\python -m src.server
+
+# Linux / macOS
+source .venv/bin/activate
+python -m pytest tests/ -v
+python -m src.server
+```
+
+### Sync config mirror (repo copy → user config)
+```bash
+# Windows
+.\sync-config.ps1
+
+# Linux / macOS
+./sync-config.sh
 ```

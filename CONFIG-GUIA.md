@@ -6,12 +6,19 @@ Este documento explica, en lenguaje simple, qué significa cada parte del archiv
 > IMPORTANTE: el archivo que de verdad controla el comportamiento del asistente
 > está en tu carpeta de usuario, no en este repositorio:
 >
-> `C:\Users\User\.personal-mcp\config.json`
+> **Windows:** `C:\Users\TuUsuario\.personal-mcp\config.json`
+>
+> **Linux:** `~/.personal-mcp/config.json`  (ej: `/home/tuusuario/.personal-mcp/config.json`)
+>
+> **macOS:** `~/.personal-mcp/config.json`  (ej: `/Users/tuusuario/.personal-mcp/config.json`)
 >
 > El archivo `config.json` que está aquí, junto a esta guía, es solo una copia de
 > lectura para que puedas revisarla sin salir del repositorio. Si la editas aquí,
 > no cambia nada en el comportamiento real. Para actualizar el espejo con los
-> cambios más recientes, ejecuta `sync-config.ps1` desde esta misma carpeta.
+> cambios más recientes:
+>
+> - **Windows:** ejecuta `sync-config.ps1` desde esta carpeta
+> - **Linux/macOS:** ejecuta `./sync-config.sh` desde esta carpeta
 
 ---
 
@@ -31,36 +38,66 @@ Carpetas donde el asistente sí puede leer, escribir o modificar archivos. Si un
 carpeta no está en esta lista, el asistente no puede tocarla, sin importar qué
 se le pida.
 
+**Windows (valor por defecto):**
 | Ruta | Qué es |
 |---|---|
-| C:\Repos | Tu carpeta de repositorios/proyectos. **Todo** lo que esté dentro — cualquier subcarpeta, sin importar cuántos niveles — queda accesible automáticamente. No hace falta listar cada proyecto por separado. |
+| `C:\Repos` | Tu carpeta de repositorios/proyectos. **Todo** lo que esté dentro — cualquier subcarpeta, sin importar cuántos niveles — queda accesible automáticamente. No hace falta listar cada proyecto por separado. |
+| `C:\Users\TuUsuario\Desktop` | Tu Escritorio (si existe) |
+| `C:\Users\TuUsuario\OneDrive` | Tu OneDrive (si existe) |
+| `C:\Users\TuUsuario\.personal-mcp` | Carpeta interna del asistente |
 
-⚠️ **Nota de corrección (2026-07-04):** una versión anterior de esta guía
-listaba 7 rutas separadas (`C:\Users\User\Repos`, `Desktop`, `OneDrive`,
-`C:\Users\User\.personal-mcp`, y 3 subcarpetas de `C:\Repos`). Esa lista ya
-**no coincide** con la configuración real: hoy el asistente **no** puede
-acceder a tu Escritorio, OneDrive, ni a `C:\Users\User\Repos` — solo a lo que
-esté dentro de `C:\Repos`. Si necesitas que el asistente trabaje en alguna de
-esas carpetas, hay que agregarlas explícitamente a `paths_allow` en el config
-oficial (`C:\Users\User\.personal-mcp\config.json`), no en esta copia de
-lectura.
+**Linux/macOS (valor por defecto):**
+| Ruta | Qué es |
+|---|---|
+| `~` (tu home) | Tu carpeta personal completa (`/home/tuusuario` o `/Users/tuusuario`). Incluye Documentos, Descargas, proyectos, etc. |
+
+> ⚠️ En Windows, si necesitas acceso a Escritorio, OneDrive u otras carpetas,
+> agrégalas explícitamente a `paths_allow` en el config oficial. En Linux/macOS,
+> el valor por defecto (`~`) ya cubre todo.
 
 ### paths_deny — Carpetas prohibidas (incluso dentro de una permitida)
 
 Aunque una carpeta esté "por dentro" de una carpeta permitida, si coincide con
 uno de estos patrones, queda bloqueada igual. Es una segunda capa de seguridad.
 
+**Comunes a todos los sistemas:**
 | Patrón | Qué bloquea |
 |---|---|
-| **\node_modules\** | Carpetas de dependencias de JavaScript |
-| **\.git\** | Archivos internos de control de versiones de Git |
-| **\bin\** | Carpetas de archivos compilados |
-| **\obj\** | Carpetas temporales de compilación de .NET |
-| C:\Users\User\AppData | Carpeta interna de configuración de Windows |
+| `**/node_modules/**` | Carpetas de dependencias de JavaScript |
+| `**/.git/**` | Archivos internos de control de versiones de Git |
+| `**/bin/**` | Carpetas de archivos compilados |
+| `**/obj/**` | Carpetas temporales de compilación de .NET |
+| `**/.ssh/**` | Claves y configuración SSH |
+| `**/.aws/**` | Credenciales AWS |
+| `**/.azure/**` | Credenciales Azure |
+| `**/.kube/**` | Configuración Kubernetes |
+| `**/.gnupg/**` | Claves GPG |
+| `**/.docker/config.json` | Credenciales Docker |
+| `**/.git-credentials` | Credenciales Git guardadas |
+| `**/.netrc` | Credenciales de red (curl, etc.) |
+| `**/.npmrc` | Token npm |
+| `**/.pypirc` | Token PyPI |
+| `**/.env*` | Archivos de variables de entorno |
+| `**/*.pem` | Claves PEM (certificados) |
+| `**/id_rsa*` | Claves SSH RSA |
+| `**/id_ed25519*` | Claves SSH Ed25519 |
+
+**Solo Windows:**
+| Patrón | Qué bloquea |
+|---|---|
+| `C:\Users\TuUsuario\AppData` | Carpeta interna de configuración de Windows (recursivo) |
+
+**Solo Linux/macOS:**
+| Patrón | Qué bloquea |
+|---|---|
+| `~/.config/Code/User/globalStorage` | Tokens de VS Code |
+| `~/.config/google-chrome` | Datos Chrome/Chromium |
+| `~/.config/chromium` | Datos Chromium |
+| `~/.mozilla` | Datos Firefox |
 
 ### commands — Qué comandos puede ejecutar en la terminal
 
-- allow_prefix (lista blanca): define qué comandos SÍ puede ejecutar el
+- **allow_prefix (lista blanca):** define qué comandos SÍ puede ejecutar el
   asistente. Si tiene nombres adentro (por ejemplo `git`, `npm`, `python`),
   SOLO esos están permitidos — cualquier otro comando queda bloqueado
   automáticamente, incluso si no aparece en `deny`.
@@ -69,9 +106,10 @@ uno de estos patrones, queda bloqueada igual. Es una segunda capa de seguridad.
   absoluto, porque una lista vacía se interpreta como "ningún comando está
   autorizado". Por eso, en la práctica, esta lista casi nunca debería dejarse
   vacía si quieres poder usar la terminal.
-- deny (lista negra): comandos que nunca se permiten. Incluye apagar el equipo,
+
+- **deny (lista negra):** comandos que nunca se permiten. Incluye apagar el equipo,
   reiniciar, formatear discos, borrar todo de forma forzada, y modificar
-  cuentas de usuario de Windows.
+  cuentas de usuario/administradores.
 
   💡 **Recomendación (agregada 2026-07-05):** si usás `python` o `node`, vale
   la pena sumar patrones específicos de operaciones peligrosas que esos
@@ -87,7 +125,8 @@ uno de estos patrones, queda bloqueada igual. Es una segunda capa de seguridad.
   "shutil.rmtree", "child_process", "require('fs').unlink", "curl * | ",
   "wget * | ", "iex (", "Invoke-Expression"
   ```
-- require_flag_approval: banderas de comandos (como -force o /f) que obligan
+
+- **require_flag_approval:** banderas de comandos (como `-force` o `/f`) que obligan
   a una confirmación extra porque suelen ser destructivas.
 
 ### approval_required_prefix — Pedir permiso antes de usar programas "todopoderosos" (agregado 2026-07-05)
@@ -135,13 +174,20 @@ false.
 
 ## Sección shell (la terminal que usa el asistente)
 
-| Campo | Significado | Valor actual |
-|---|---|---|
-| enabled | Si el asistente puede usar la terminal | Sí |
-| default_shell | Terminal por defecto | PowerShell |
-| shell_map | Rutas personalizadas para otras terminales | Ninguna configurada |
-| session_timeout_seconds | Segundos de inactividad antes de cerrar una sesión | 600 (10 min) |
-| command_timeout_seconds | Segundos antes de cancelar un comando que no termina | 120 (2 min) |
+| Campo | Significado | Valor actual (Windows) | Valor actual (Linux/macOS) |
+|---|---|---|---|
+| enabled | Si el asistente puede usar la terminal | Sí | Sí |
+| default_shell | Terminal por defecto | `powershell` | `bash` |
+| shell_map | Rutas personalizadas para otras terminales | Ninguna configurada | Ninguna configurada |
+| session_timeout_seconds | Segundos de inactividad antes de cerrar una sesión | 600 (10 min) | 600 (10 min) |
+| command_timeout_seconds | Segundos antes de cancelar un comando que no termina | 120 (2 min) | 120 (2 min) |
+
+**Shells disponibles por plataforma:**
+- **Windows:** `powershell`, `pwsh` (PowerShell Core), `cmd`, `bash` (via Git Bash)
+- **Linux/macOS:** `bash`, `zsh`, `fish`, `sh`
+
+Puedes cambiar de shell en tiempo de ejecución pasando el parámetro `shell` a
+`sh_exec`, `sh_script` o `sh_session_start`.
 
 ---
 
@@ -155,8 +201,11 @@ Apagado por defecto por seguridad — conectarse a otras máquinas es más sensi
 que trabajar en la tuya.
 
 **Archivo de configuración SSH (`~/.ssh/config`):**
-Para usar SSH, necesitas definir tus hosts en `C:\Users\User\.ssh\config`. Se
-creó un archivo de ejemplo con plantillas comentadas — edítalo, descomenta los
+Para usar SSH, necesitas definir tus hosts en:
+- **Windows:** `C:\Users\TuUsuario\.ssh\config`
+- **Linux/macOS:** `~/.ssh/config`
+
+Se creó un archivo de ejemplo con plantillas comentadas — edítalo, descomenta los
 hosts que uses y pon tus datos reales (IP/hostname, usuario, puerto, clave).
 Ver la sección "Si quiero activar SSH" abajo.
 
@@ -164,26 +213,28 @@ Ver la sección "Si quiero activar SSH" abajo.
 
 ## Si quiero activar SSH
 
-1. Edita `C:\Users\User\.ssh\config` y descomenta/agrega tus hosts reales.
+1. Edita `~/.ssh/config` y descomenta/agrega tus hosts reales.
 2. Asegúrate de tener las claves privadas correspondientes en `~/.ssh/`.
-3. En el config oficial (`C:\Users\User\.personal-mcp\config.json`), pon:
+3. En el config oficial (`~/.personal-mcp/config.json`), pon:
    ```json
    "ssh": { "enabled": true }
    ```
 4. Reinicia Claude Desktop.
-5. Ejecuta `sync-config.ps1` si quieres actualizar la copia del repo.
+5. Ejecuta `sync-config.ps1` (Windows) o `./sync-config.sh` (Linux/macOS) si quieres actualizar la copia del repo.
 
 > ⚠️ **Solo activa SSH si confías en los hosts destino.** El asistente valida
 > los comandos contra `remote_allow_prefix` (lista blanca remota) antes de
 > enviarlos, pero una vez en el host remoto corren con los privilegios de ese
 > usuario SSH — no hay contención real desde aquí.
 
+---
+
 ## Sección journal (tu diario/bitácora personal)
 
 | Campo | Significado | Valor actual |
 |---|---|---|
 | enabled | Si la función de diario está activa | Sí |
-| path | Dónde se guardan las entradas | C:\Users\User\.personal-mcp\data\journal |
+| path | Dónde se guardan las entradas | Windows: `C:\Users\TuUsuario\.personal-mcp\data\journal`<br>Linux/macOS: `~/.personal-mcp/data/journal` |
 
 ---
 
@@ -192,29 +243,42 @@ Ver la sección "Si quiero activar SSH" abajo.
 | Campo | Significado | Valor actual |
 |---|---|---|
 | audit_max_entries | Cuántas operaciones recientes quedan registradas (como caja negra de avión) | 10,000 |
-| data_dir | Carpeta donde el asistente guarda diario, historial y snapshots | C:\Users\User\.personal-mcp\data |
+| data_dir | Carpeta donde el asistente guarda diario, historial y snapshots | Windows: `C:\Users\TuUsuario\.personal-mcp\data`<br>Linux/macOS: `~/.personal-mcp/data` |
 | config_path | Campo técnico interno, normalmente vacío. No necesitas tocarlo. | (vacío) |
 
 ---
 
 ## Si quiero cambiar algo
 
-1. Edita el archivo oficial: C:\Users\User\.personal-mcp\config.json (no el de este repositorio).
+1. Edita el archivo oficial:
+   - **Windows:** `C:\Users\TuUsuario\.personal-mcp\config.json`
+   - **Linux/macOS:** `~/.personal-mcp/config.json`
+   (NO el de este repositorio).
 2. Guarda el archivo.
 3. Reinicia Claude Desktop completo para que tome el cambio.
-4. Opcional: ejecuta sync-config.ps1 en este repo para que la copia de lectura quede al día.
+4. Opcional:
+   - **Windows:** ejecuta `sync-config.ps1` en este repo.
+   - **Linux/macOS:** ejecuta `./sync-config.sh` en este repo.
+
+---
 
 ## Cómo mantengo la copia del repo actualizada
 
-Manualmente, desde PowerShell:
-
+**Windows (PowerShell):**
 ```
 cd C:\Repos\.personal-mcp
 .\sync-config.ps1
 ```
 
+**Linux/macOS (bash):**
+```bash
+cd /ruta/a/.personal-mcp
+./sync-config.sh
+```
+
 Copia el archivo oficial hacia la copia del repo. Nunca al revés.
 
-Si quieres que esto pase automáticamente al iniciar sesión en Windows, pregúntame
-y lo configuro contigo — requiere crear una tarea programada de Windows, así que
-prefiero confirmarlo antes de tocar esa parte del sistema.
+Si quieres que esto pase automáticamente al iniciar sesión:
+- **Windows:** requiere crear una tarea programada (pregúntame y lo configuramos).
+- **Linux:** puedes añadir una entrada a tu `.bashrc`/`.zshrc` o usar systemd user timer.
+- **macOS:** `launchd` user agent o añadido a `.zshrc`.

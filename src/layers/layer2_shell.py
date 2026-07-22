@@ -14,6 +14,7 @@ from src.security import SecurityValidator, CommandNotAllowedError
 from src.shell_resolver import ShellInfo, resolve_shell, tokenize_command, has_shell_operators
 from src.secretscanner import scan_text, format_findings
 from src.log import get_logger, sanitize_log_value, memory_pressure_hint
+from src.oslayer.process import kill_process_tree, reap_after_kill
 
 logger = get_logger("layer2_shell")
 
@@ -36,42 +37,6 @@ def _append_secret_scan(result: str, output_text: str, security: SecurityValidat
         logger.warning("SECRET_SCAN findings=%d source=%s", len(findings), source)
         result += format_findings(findings)
     return result
-
-
-async def _kill_process_tree(pid: int) -> None:
-    logger.warning("kill_process_tree pid=%d", pid)
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "taskkill", "/pid", str(pid), "/T", "/F",
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=10)
-        except asyncio.TimeoutError:
-            logger.error("kill_process_tree pid=%d taskkill did not exit within 10s", pid)
-    except Exception:
-        pass
-
-
-async def _reap_after_kill(process: asyncio.subprocess.Process) -> None:
-    """After _kill_process_tree(), the original Process object still has a pending
-    exit-wait registered with the event loop's subprocess watcher, and its stdout/
-    stderr pipe transports are still open - nothing ever calls process.wait() on it,
-    so asyncio never releases those handles (IOCP handles on Windows). Left
-    unreaped across enough repeated timeouts, this leaks OS-level async I/O
-    resources and can progressively degrade the event loop's ability to spawn or
-    await NEW subprocesses - up to and including making unrelated commands hang.
-    Best-effort: taskkill /F already ran, so this should return near-instantly;
-    if it doesn't, we log and move on rather than hang the caller further.
-    """
-    try:
-        await asyncio.wait_for(process.wait(), timeout=10)
-    except asyncio.TimeoutError:
-        logger.error("reap_after_kill pid=%d did not reap within 10s - possible handle leak", process.pid)
-    except Exception:
-        pass
 
 
 def _scan_command_warnings(command: str, security: SecurityValidator) -> List[str]:

@@ -1,7 +1,7 @@
 import os
 import re
 import shutil
-import subprocess
+import sys
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -95,7 +95,8 @@ def split_command_segments(command: str) -> List[str]:
     return [s.strip() for s in segments if s.strip()]
 
 
-SHELL_REGISTRY: Dict[str, ShellInfo] = {
+# Platform-specific shell registries
+_WINDOWS_SHELLS: Dict[str, ShellInfo] = {
     "powershell": ShellInfo(
         name="powershell",
         executable="powershell.exe",
@@ -130,13 +131,61 @@ SHELL_REGISTRY: Dict[str, ShellInfo] = {
     ),
 }
 
+_LINUX_SHELLS: Dict[str, ShellInfo] = {
+    "bash": ShellInfo(
+        name="bash",
+        executable="bash",
+        command_args=["-c"],
+        session_args=[],
+        script_args=["-c"],
+        workdir_prefix='cd "{wd}" && ',
+    ),
+    "zsh": ShellInfo(
+        name="zsh",
+        executable="zsh",
+        command_args=["-c"],
+        session_args=[],
+        script_args=["-c"],
+        workdir_prefix='cd "{wd}" && ',
+    ),
+    "fish": ShellInfo(
+        name="fish",
+        executable="fish",
+        command_args=["-c"],
+        session_args=[],
+        script_args=["-c"],
+        workdir_prefix='cd "{wd}" && ',
+    ),
+    "sh": ShellInfo(
+        name="sh",
+        executable="sh",
+        command_args=["-c"],
+        session_args=[],
+        script_args=["-c"],
+        workdir_prefix='cd "{wd}" && ',
+    ),
+}
+
+if sys.platform == "win32":
+    SHELL_REGISTRY = _WINDOWS_SHELLS
+else:
+    SHELL_REGISTRY = _LINUX_SHELLS
+
+
+def get_default_shell() -> str:
+    """Return the default shell for the current platform."""
+    if sys.platform == "win32":
+        return "powershell"
+    # On Linux/macOS, prefer bash (ubiquitous)
+    return "bash"
+
 
 def _find_executable(name: str, shell_map: Optional[Dict[str, str]] = None) -> Optional[str]:
     if shell_map and name in shell_map:
         candidate = shell_map[name]
         if os.path.isfile(candidate):
             return candidate
-    if name == "bash":
+    if name == "bash" and sys.platform == "win32":
         return _find_git_bash()
     return shutil.which(name)
 

@@ -1,85 +1,18 @@
 import logging
 import logging.handlers
 import time
-import json
-import ctypes
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, Any
 
+from src.oslayer.system import available_memory_info, memory_pressure_hint
+
 _logger: Optional[logging.Logger] = None
-
-
-class _MEMORYSTATUSEX(ctypes.Structure):
-    _fields_ = [
-        ("dwLength", ctypes.c_ulong),
-        ("dwMemoryLoad", ctypes.c_ulong),
-        ("ullTotalPhys", ctypes.c_ulonglong),
-        ("ullAvailPhys", ctypes.c_ulonglong),
-        ("ullTotalPageFile", ctypes.c_ulonglong),
-        ("ullAvailPageFile", ctypes.c_ulonglong),
-        ("ullTotalVirtual", ctypes.c_ulonglong),
-        ("ullAvailVirtual", ctypes.c_ulonglong),
-        ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
-    ]
-
-
-def available_memory_info() -> Optional[dict]:
-    """Return dict with total_gb, free_gb, free_pct via GlobalMemoryStatusEx API.
-    Zero subprocesses spawned. Returns None if non-Windows or call fails.
-    """
-    try:
-        stat = _MEMORYSTATUSEX()
-        stat.dwLength = ctypes.sizeof(_MEMORYSTATUSEX)
-        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
-            total_bytes = stat.ullTotalPhys
-            free_bytes = stat.ullAvailPhys
-            total_gb = round(total_bytes / (1024**3), 1)
-            free_gb = round(free_bytes / (1024**3), 1)
-            free_pct = round((free_bytes / total_bytes) * 100, 1) if total_bytes else 0.0
-            return {
-                "total_gb": total_gb,
-                "free_gb": free_gb,
-                "free_pct": free_pct,
-            }
-    except Exception:
-        pass
-    return None
-
-
-def available_memory_pct() -> Optional[float]:
-    """% of physical RAM currently free, via GlobalMemoryStatusEx (Windows API
-    call, no subprocess spawned - safe to call from inside a timeout handler
-    without risking adding to the exact kind of subprocess pressure this is
-    meant to diagnose). Returns None if the call fails for any reason (e.g.
-    non-Windows) - callers must treat that as "unknown", not "0% free".
-
-    2026-07-20: added after a session reported sh_exec timeouts that turned
-    out to be ~10-12 parallel Claude Desktop processes competing for RAM on an
-    8GB machine, not a hang - see CHANGELOG. Surfacing this number at the
-    moment of a timeout/slow-op turns "is this a bug or my machine" from a
-    multi-turn investigation into something visible in the error itself.
-    """
-    info = available_memory_info()
-    return info["free_pct"] if info else None
-
 
 
 # Below this = likely resource contention, not a genuine hang; worth saying so.
 LOW_MEMORY_THRESHOLD_PCT = 25.0
 
-
-def memory_pressure_hint() -> str:
-    """Empty string when memory looks fine or can't be read; otherwise a short,
-    appendable clause explaining a slow/timed-out operation may not be a bug.
-    """
-    pct = available_memory_pct()
-    if pct is not None and pct < LOW_MEMORY_THRESHOLD_PCT:
-        return (f" (system memory is low: {pct:.0f}% free - this may be resource "
-                f"contention from multiple parallel sessions rather than a hung "
-                f"command; consider closing unused Claude Desktop windows, or "
-                f"retrying with a longer timeout)")
-    return ""
 
 # Lista de claves que siempre deben ser enmascaradas
 SENSITIVE_KEYS = {"password", "token", "secret", "key", "api_key", "auth", "cookie", "bearer"}
@@ -97,7 +30,7 @@ def sanitize_log_value(value: str) -> str:
     """Escape control characters before interpolating a raw string into a log line.
 
     Call sites that log a tool argument directly via %s (not via json.dumps, which
-    already escapes \\n/\\r as part of JSON string encoding) must sanitize it first —
+    already escapes \n/\r as part of JSON string encoding) must sanitize it first —
     otherwise a crafted argument containing a literal newline can forge fake log
     entries (e.g. a fake "[INFO] User authenticated as admin" line) in server.log.
     """

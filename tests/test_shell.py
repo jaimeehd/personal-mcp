@@ -14,8 +14,9 @@ from src.layers.layer2_shell import (
     ShellManager, sh_exec_impl, sh_session_start_impl,
     sh_session_list_impl, sh_session_send_impl, sh_session_close_impl,
     sh_script_impl, sh_history_impl,
-    _truncate, _kill_process_tree, _scan_command_warnings, MAX_CAPTURE_BYTES,
+    _truncate, _scan_command_warnings, MAX_CAPTURE_BYTES,
 )
+from src.oslayer import kill_process_tree
 
 
 @pytest.fixture
@@ -214,7 +215,7 @@ async def test_kill_process_tree(sec):
         stderr=asyncio.subprocess.PIPE,
     )
     await asyncio.sleep(0.5)
-    await _kill_process_tree(proc.pid)
+    await kill_process_tree(proc.pid)
     ret = await proc.wait()
     assert ret != 0
 

@@ -179,8 +179,9 @@ class PermissionManager:
         resolved = self._resolve(resource)
         # A deny pattern always wins, even over an existing session/permanent grant
         # or a resource that happens to live under data_dir/paths_allow.
+        resolved_norm = resolved.replace("\\", "/")
         for pattern in self.config.security.paths_deny:
-            if fnmatch.fnmatch(resolved, pattern) or fnmatch.fnmatch(resolved, pattern.replace("\\", "\\\\")):
+            if fnmatch.fnmatch(resolved_norm, pattern.replace("\\", "/")):
                 return False
         # Recursive check for session grants
         current = Path(resolved)

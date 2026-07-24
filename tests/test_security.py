@@ -15,7 +15,7 @@ def strict_config(temp_home):
     config = AppConfig(
         security=SecurityConfig(
             paths_allow=[str(temp_home / "Repos")],
-            paths_deny=["**\\node_modules\\**", "**\\.git\\**"],
+            paths_deny=["**/node_modules/**", "**/.git/**"],
         ),
         config_path=str(temp_home / ".personal-mcp" / "config.json"),
     )
@@ -59,7 +59,7 @@ def exception_config(temp_home):
     config = AppConfig(
         security=SecurityConfig(
             paths_allow=[str(temp_home / "Repos")],
-            paths_deny=["**\\node_modules\\**", "**\\.git\\**", "**\\bin\\**", "**\\obj\\**"],
+            paths_deny=["**/node_modules/**", "**/.git/**", "**/bin/**", "**/obj/**"],
             paths_deny_exceptions=[
                 # Dos patrones por la misma razon documentada en
                 # _deny_exception_applies: fnmatch's "**" no tiene semantica

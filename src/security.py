@@ -68,9 +68,10 @@ class SecurityValidator:
 
     def _matched_deny_pattern(self, resolved: Path) -> Optional[str]:
         """Return the first paths_deny pattern that matches, or None."""
-        candidate = str(resolved)
+        candidate = str(resolved).replace("\\", "/")
         for pattern in self.config.security.paths_deny:
-            if fnmatch.fnmatch(candidate, pattern) or fnmatch.fnmatch(candidate, pattern.replace("\\", "\\\\")):
+            normalized = pattern.replace("\\", "/")
+            if fnmatch.fnmatch(candidate, normalized):
                 return pattern
         return None
 
@@ -98,9 +99,10 @@ class SecurityValidator:
             return False
         if not resolved.is_dir() and resolved.suffix.lower() not in self.config.security.paths_deny_exception_extensions:
             return False
-        candidate = str(resolved)
+        candidate = str(resolved).replace("\\", "/")
         for pattern in self.config.security.paths_deny_exceptions:
-            if fnmatch.fnmatch(candidate, pattern) or fnmatch.fnmatch(candidate, pattern.replace("\\", "\\\\")):
+            normalized = pattern.replace("\\", "/")
+            if fnmatch.fnmatch(candidate, normalized):
                 return True
         return False
 

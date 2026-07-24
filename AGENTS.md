@@ -8,40 +8,40 @@
 > Para actualizar el espejo tras editar el oficial, ejecuta `sync-config.ps1` desde
 > la raíz del repo. Explicación completa en `CONFIG-GUIA.md`.
 
-## Quick start
+## Arranque rápido
 ```powershell
 cd C:\Repos\.personal-mcp
-.\.venv\Scripts\python -m pytest tests/ -v       # 285 tests, verified 2026-07-19 (0 failed). CHANGELOG 1.4.23 claimed 331 -- investigated (1.4.29): compared against two independent repo backups, neither has more tests than this tree. 331 was never accurate, not a loss.
-.\.venv\Scripts\python -m src.server              # stdio mode for Claude Desktop
-.\install.ps1                                     # register with Claude Desktop (auto-creates venv)
-.\sync-config.ps1                                 # refresh the read-only config.json mirror from ~/.personal-mcp/config.json
+.\.venv\Scripts\python -m pytest tests/ -v       # 285 tests, verificado 2026-07-19 (0 fallidos). El CHANGELOG 1.4.23 decía 331 -- investigado (1.4.29): comparado contra dos backups independientes del repo, ninguno tiene más tests que este árbol. 331 nunca fue exacto, no es una pérdida.
+.\.venv\Scripts\python -m src.server              # modo stdio para Claude Desktop
+.\install.ps1                                     # registrar con Claude Desktop (crea el venv automáticamente)
+.\sync-config.ps1                                 # refrescar el espejo de solo lectura config.json desde ~/.personal-mcp/config.json
 ```
 
-## Architecture — 6 hexagonal layers, 56 tools (52 active — SSH's 4 disabled by default)
-| Layer | File | Tools | Security boundary |
-|-------|------|-------|-------------------|
-| 1 Filesystem | `layer1_filesystem.py` | 20 | `resolve_and_validate()` on every path |
-| 2 Shell | `layer2_shell.py` + `shell_resolver.py` | 9 | command deny list + path scanning + multi-shell (powershell/pwsh/cmd/bash) |
-| 3 SSH | `layer3_ssh.py` | 4 | disabled by default (`ssh.enabled: false`) |
-| 4 Personal | `layer4_personal.py` | 8 | journal, notes, project scan |
-| 5 Health | `layer5_health.py` | 9 | diagnostics, audit, benchmark, log tail (`mcp_log`) |
-| 6 Permissions | `layer6_permissions.py` | 6 | ticket-based approval flow |
+## Arquitectura — 6 capas hexagonales, 56 tools (52 activas — las 4 de SSH deshabilitadas por defecto)
+| Capa | Archivo | Tools | Frontera de seguridad |
+|------|---------|-------|------------------------|
+| 1 Filesystem | `layer1_filesystem.py` | 20 | `resolve_and_validate()` en cada ruta |
+| 2 Shell | `layer2_shell.py` + `shell_resolver.py` | 9 | lista de denegación de comandos + escaneo de rutas + multi-shell (powershell/pwsh/cmd/bash) |
+| 3 SSH | `layer3_ssh.py` | 4 | deshabilitado por defecto (`ssh.enabled: false`) |
+| 4 Personal | `layer4_personal.py` | 8 | diario, notas, escaneo de proyectos |
+| 5 Health | `layer5_health.py` | 9 | diagnóstico, auditoría, benchmark, log tail (`mcp_log`) |
+| 6 Permissions | `layer6_permissions.py` | 6 | flujo de aprobación basado en tickets |
 
-- Every tool has a standalone `_impl` async function (testable without FastMCP)
-- Closures in `register_*()` wrap `_impl` with security/permission checks
-- `sys.path.insert(0, ...)` at top of `server.py` and `conftest.py` — always run from repo root
+- Cada tool tiene una función `_impl` async independiente (testeable sin FastMCP)
+- Los closures en `register_*()` envuelven `_impl` con verificaciones de seguridad/permisos
+- `sys.path.insert(0, ...)` al inicio de `server.py` y `conftest.py` — ejecutar siempre desde la raíz del repo
 
-## Security rules (don't violate)
-1. **All paths** go through `security.resolve_and_validate()`. Read operations in `paths_allow` or `data_dir` pass directly. Write operations in `paths_allow` require explicit grant (session/single/permanent) via `check_granted()`. Paths outside both raise `PathNotAllowedError`.
-2. **Shell commands** validated via a strict whitelist defined in `config.security.commands.allow_prefix`. Commands not matching the whitelist or explicitly denied are blocked.
-   - ✅ **`sh_script` is genuinely read-only, enforced line by line**: `CommandPolicy.is_script_readonly()` validates EVERY non-empty, non-comment line against `security.commands.readonly_prefix` (a separate, stricter list than `allow_prefix`). A single line not matching an explicit read-only prefix rejects the whole script before it's written to disk or executed. (Previously this claim was documented but not enforced — only the first 100 characters were checked against the general whitelist; fixed 2026-07-03.)
-   - ✅ **Every segment of a chained command is validated independently, including across newlines**: `split_command_segments()` (`shell_resolver.py`) splits on `| ; & < > `` $( and \n` before each segment's first word is checked against `allow_prefix`. Until 2026-07-04 the splitter did not treat `\n` as a boundary, so a command like `"echo hola\nWrite-Host 'INYECTADO'"` validated only against the first segment (`echo`, whitelisted) while the second statement after the newline executed unchecked — PowerShell/cmd/bash all treat a literal `\n` inside a `-Command`/`-c` argument as a statement separator. Fixed in v1.4.9 (`INJ-01`, CRITICAL). Any future change to command parsing must keep `\n` in `_SHELL_OPERATORS_RE` and in `split_command_segments()`'s boundary set — removing it silently reopens this exact bypass.
-3. **No tickets on hot path**: `validate_tool_path()` returns `None` for allowed read operations, a `permission_required` JSON payload for blocked write operations, or an error string for strictly denied paths (outside `paths_allow`/`data_dir`).
-4. `working_dir` prefix resolved from `shell_info.workdir_prefix` (per-shell: `Set-Location`, `cd /d`, `cd`). **Quoting inside that prefix must be escaped per-shell, not with one hardcoded style**: `_escape_workdir(working_dir, shell_name)` (`layer2_shell.py`) picks the correct quote-escape for the resolved shell (`` `" `` for powershell/pwsh, `""` for cmd, `\"` for bash). Until 2026-07-04 the PowerShell escape was applied unconditionally regardless of target shell — a `working_dir` containing a literal `"` could break out of the quoted segment on `cmd`/`bash` and inject further shell syntax. Fixed in v1.4.9 (`INJ-02`, HIGH).
-5. Shell commands scanned for absolute paths (`C:\...`, `C:/...`) via `security.extract_absolute_paths()`
-6. `check_granted()` now uses `Dict[str, Set[str]]` — grants are per-operation, "read" != "write"
-7. **`fs_delete`** uses `operation="delete"`, fully isolated from `"read"`/`"write"` — an existing write session grant on a path does NOT authorize delete on it. `PermissionManager.approve()` forces delete tickets to `SINGLE` regardless of the level requested via `fs_approve` — no session/permanent grants are possible for delete, by design (no exceptions). `fs_delete` only supports individual files, never directories/recursion.
-8. **Wrapper validates, `_impl` never re-checks permissions**: every `register_filesystem_tools()` closure calls `security.validate_tool_path(path, <real_operation>)` before invoking its `_impl`. The `_impl` functions call `security.resolve_and_validate(path)` **without** passing `operation` — the default (`"read"`) skips `check_granted()` entirely, so path resolution doesn't re-consume a grant already spent by the wrapper. `fs_delete_impl` broke this convention until 2026-07-04 (see CHANGELOG 1.4.6): it passed `"delete"` explicitly, causing a second `check_granted()` call that consumed the same `SINGLE` grant twice in one request, uncaught, surfacing as a raw exception instead of a `permission_required` response. Any new `_impl` must NOT pass the real operation to its own `resolve_and_validate()` call — that's the wrapper's job, exactly once.
+## Reglas de seguridad (no violar)
+1. **Todas las rutas** pasan por `security.resolve_and_validate()`. Las operaciones de lectura en `paths_allow` o `data_dir` pasan directamente. Las operaciones de escritura en `paths_allow` requieren grant explícito (session/single/permanent) vía `check_granted()`. Las rutas fuera de ambos lanzan `PathNotAllowedError`.
+2. **Comandos de shell** validados mediante una whitelist estricta definida en `config.security.commands.allow_prefix`. Los comandos que no coinciden con la whitelist o están explícitamente denegados son bloqueados.
+   - ✅ **`sh_script` es genuinamente de solo lectura, aplicado línea por línea**: `CommandPolicy.is_script_readonly()` valida CADA línea no vacía y no comentada contra `security.commands.readonly_prefix` (una lista separada y más estricta que `allow_prefix`). Una sola línea que no coincida con un prefijo de solo lectura explícito rechaza el script completo antes de que se escriba a disco o se ejecute. (Antes esta afirmación estaba documentada pero no se aplicaba — solo se verificaban los primeros 100 caracteres contra la whitelist general; corregido 2026-07-03.)
+   - ✅ **Cada segmento de un comando encadenado se valida independientemente, incluso a través de saltos de línea**: `split_command_segments()` (`shell_resolver.py`) divide en `| ; & < > `` $( y \n` antes de verificar la primera palabra de cada segmento contra `allow_prefix`. Hasta 2026-07-04 el splitter no trataba `\n` como separador, por lo que un comando como `"echo hola\nWrite-Host 'INYECTADO'"` se validaba solo contra el primer segmento (`echo`, en whitelist) mientras la segunda instrucción después del salto de línea se ejecutaba sin verificación — PowerShell/cmd/bash tratan un `\n` literal dentro de un argumento `-Command`/`-c` como separador de instrucciones. Corregido en v1.4.9 (`INJ-01`, CRÍTICO). Cualquier cambio futuro en el parseo de comandos debe mantener `\n` en `_SHELL_OPERATORS_RE` y en el conjunto de separadores de `split_command_segments()` — eliminarlo reabre silenciosamente este mismo bypass.
+3. **Sin tickets en el hot path**: `validate_tool_path()` devuelve `None` para lecturas permitidas, un payload JSON `permission_required` para escrituras bloqueadas, o un string de error para rutas estrictamente denegadas (fuera de `paths_allow`/`data_dir`).
+4. El prefijo `working_dir` se resuelve desde `shell_info.workdir_prefix` (por shell: `Set-Location`, `cd /d`, `cd`). **El quoting dentro de ese prefijo debe escaparse por shell, no con un estilo hardcodeado**: `_escape_workdir(working_dir, shell_name)` (`layer2_shell.py`) elige el escape de comillas correcto para el shell resuelto (`` `" `` para powershell/pwsh, `""` para cmd, `\"` para bash). Hasta 2026-07-04 el escape de PowerShell se aplicaba incondicionalmente sin importar el shell destino — un `working_dir` con una `"` literal podía escapar del segmento entrecomillado en `cmd`/`bash` e inyectar más sintaxis de shell. Corregido en v1.4.9 (`INJ-02`, ALTO).
+5. Los comandos de shell se escanean en busca de rutas absolutas (`C:\...`, `C:/...`) vía `security.extract_absolute_paths()`
+6. `check_granted()` ahora usa `Dict[str, Set[str]]` — los grants son por operación, "read" != "write"
+7. **`fs_delete`** usa `operation="delete"`, completamente aislado de `"read"`/`"write"` — un grant de sesión de escritura existente sobre una ruta NO autoriza delete sobre ella. `PermissionManager.approve()` fuerza los tickets de delete a `SINGLE` sin importar el nivel solicitado vía `fs_approve` — no son posibles grants de sesión ni permanentes para delete, por diseño (sin excepciones). `fs_delete` solo soporta archivos individuales, nunca directorios/recursión.
+8. **El wrapper valida, `_impl` nunca re-verifica permisos**: cada closure de `register_filesystem_tools()` llama a `security.validate_tool_path(path, <operación_real>)` antes de invocar su `_impl`. Las funciones `_impl` llaman a `security.resolve_and_validate(path)` **sin** pasar `operation` — el default (`"read"`) omite `check_granted()` completamente, así que la resolución de ruta no re-consume un grant ya gastado por el wrapper. `fs_delete_impl` rompió esta convención hasta 2026-07-04 (ver CHANGELOG 1.4.6): pasaba `"delete"` explícitamente, causando una segunda llamada a `check_granted()` que consumía el mismo grant `SINGLE` dos veces en una misma solicitud, sin ser detectado, manifestándose como una excepción cruda en vez de una respuesta `permission_required`. Cualquier nuevo `_impl` NO debe pasar la operación real a su propia llamada a `resolve_and_validate()` — ese es el trabajo del wrapper, exactamente una vez.
 9. **`fs_approve` gate de confirmación (HMAC) — implementado en v1.4.14**: `fs_approve` ahora exige un `confirm_code` obligatorio, verificado con `hmac.compare_digest()` contra un código generado por `PermissionManager` en el momento del `request()`. La clave secreta (`_confirm_secret`, 32 bytes vía `secrets.token_bytes()`) se genera en memoria al construir cada `PermissionManager` y nunca se persiste a disco ni se expone por ningún tool — es lo único que impide que un agente adivine o derive el código. El código (`_generate_confirm_code()`, 6 dígitos derivados de un HMAC-SHA256 del `ticket_id`) se muestra **solo** vía `src/confirm_popup.py::show_confirmation_code()` — un `MessageBoxW` nativo de Windows, lanzado en un hilo daemon separado para no bloquear el event loop de asyncio del servidor mientras el usuario no está frente a la pantalla. Este es el único canal donde el código es visible; no se devuelve nunca en la respuesta de ningún tool MCP (`fs_request_allow`, `security_pending`, etc.) — si en el futuro alguien lo expone ahí "para depurar", se reabre exactamente el gap que este mecanismo cierra. `show_confirmation_code()` se desactiva bajo pytest (`PYTEST_CURRENT_TEST` en el entorno) para no bloquear la suite con popups reales.
     - Reemplaza el diseño anterior documentado aquí (Token HMAC "pendiente de implementar", ver CHANGELOG 1.4.10/1.4.13). La alternativa `elicitation` evaluada en 1.4.13 sigue descartada (el cliente MCP conectado no declara esa capability) — revisar esa decisión solo si el cliente usado cambia.
     - ⚠️ **Regresión corregida en v1.4.28**: el mensaje que devuelve `request_permission()` para tickets de un solo recurso (`fs_write`/`fs_edit`/`fs_delete`/`fs_move`/`fs_create_directory`, y los tickets `execute`) nunca mencionaba `confirm_code` — decía solo `fs_approve(ticket_id=..., level='single')`, sin el parámetro obligatorio. La variante batch (`validate_tool_paths_batch`) y `fs_request_allow` sí lo tenían bien desde el principio; solo este path quedó desactualizado desde que se implementó el gate en v1.4.14. No era un hueco de seguridad (`PermissionManager.approve()` ya exigía el código igual), pero le decía al agente que llamara mal a la tool. Corregido — los tres mensajes (single/batch/request_allow) son ahora consistentes.
@@ -58,51 +58,51 @@ cd C:\Repos\.personal-mcp
 
 14. **`paths_allow` ampliado deliberadamente a `["C:\\"]` (v1.4.26, decisión del dueño del repo)**: antes era `["C:\\Repos"]`. Las operaciones de escritura/borrado NO se ven afectadas — siguen requiriendo grant explícito vía el flujo de tickets+HMAC sin importar el alcance de `paths_allow`; solo las lecturas sin ticket (`fs_read`, `fs_list`, `fs_search`, `fs_tree`, `fs_find`, `fs_info`) quedan sin restricción en todo el disco `C:` salvo por `paths_deny`. Con `paths_allow` así de amplio, `paths_deny` es el único control real que queda para lecturas — ver `config.json` (espejo) para la lista completa (`.ssh`, `.aws`, `.azure`, `.kube`, `.gnupg`, `.env*`, `*.pem`, `id_rsa*`, `id_ed25519*`, `AppData` con wildcard, credenciales de git/npm/pip, etc., ampliada en v1.4.26/v1.4.27). Explícitamente incompleta por diseño, no un gap: es una lista de patrones conocidos, no un mecanismo general — `scan_text()` (el scanner de secretos, activo desde v1.4.9) es el respaldo para contenido en ubicaciones que `paths_deny` no anticipó. **Antes de agregar cualquier `paths_allow` nuevo o ampliar el existente, revisa primero si `paths_deny` cubre lo que se está exponiendo** — el error de v1.4.26 (AppData sin wildcard, exact-match en vez de recursivo) pasó inadvertido durante semanas precisamente porque nadie lo verificó al momento de ampliar `paths_allow`.
 
-## Key modules
-- `src/log.py` — `configure()`, `get_logger()`, `timed()` context manager; `RotatingFileHandler` via stdlib `logging`. `logging.raiseExceptions = False` set in `configure()` since v1.4.28 (hypothesis fix, see CHANGELOG 1.4.21 — not conclusively proven, low-risk regardless).
-- `src/shell_resolver.py` — `ShellInfo` dataclass, `SHELL_REGISTRY` (4 shells), `resolve_shell()`, `_find_executable()`, `_find_git_bash()`. `_find_git_bash()` runs a **synchronous** `subprocess.run(timeout=5)` — any caller must wrap `resolve_shell()` in `asyncio.to_thread()` when calling from an `async def` (regression fixed v1.4.28 in `sh_exec`/`sh_script`/`sh_session_start`; if a new call site is added, check this first).
-- `src/config.py:LogConfig` — `level`, `max_bytes`, `backup_count` for structured logging
-- `src/config.py:ShellConfig` — `default_shell` (string), `shell_map` (dict for custom paths)
-- `src/layers/layer2_shell.py` — `MAX_CAPTURE_BYTES=1MiB`, `_truncate()`, `_kill_process_tree()` (taskkill /T /F, `stdin=DEVNULL` since v1.4.19), `_reap_after_kill()` (since v1.4.20 — must be called after every `_kill_process_tree()`, or subprocess handles leak on Windows until the whole server hangs; see CHANGELOG 1.4.19/1.4.20), `_scan_command_warnings()`
+## Módulos clave
+- `src/log.py` — `configure()`, `get_logger()`, context manager `timed()`; `RotatingFileHandler` vía `logging` de stdlib. `logging.raiseExceptions = False` configurado en `configure()` desde v1.4.28 (fix de hipótesis, ver CHANGELOG 1.4.21 — no probado concluyentemente, bajo riesgo de todas formas).
+- `src/shell_resolver.py` — dataclass `ShellInfo`, `SHELL_REGISTRY` (4 shells), `resolve_shell()`, `_find_executable()`, `_find_git_bash()`. `_find_git_bash()` ejecuta un `subprocess.run(timeout=5)` **síncrono** — cualquier llamador debe envolver `resolve_shell()` en `asyncio.to_thread()` al llamar desde un `async def` (regresión corregida en v1.4.28 en `sh_exec`/`sh_script`/`sh_session_start`; si se agrega un nuevo punto de llamada, verificar esto primero).
+- `src/config.py:LogConfig` — `level`, `max_bytes`, `backup_count` para logging estructurado
+- `src/config.py:ShellConfig` — `default_shell` (string), `shell_map` (dict para rutas personalizadas)
+- `src/layers/layer2_shell.py` — `MAX_CAPTURE_BYTES=1MiB`, `_truncate()`, `_kill_process_tree()` (taskkill /T /F, `stdin=DEVNULL` desde v1.4.19), `_reap_after_kill()` (desde v1.4.20 — debe llamarse después de cada `_kill_process_tree()`, o los handles de subprocesos se fugan en Windows hasta que el servidor entero se cuelga; ver CHANGELOG 1.4.19/1.4.20), `_scan_command_warnings()`
 
-## PermissionManager quirks
+## Peculiaridades de PermissionManager
 - `GrantLevel`: `SINGLE`, `SESSION`, `PERMANENT`
-- `_session_grants` changed from `Set[str]` to `Dict[str, Set[str]]` — stores (path, operation) pairs
-- `_single_grants: Dict[str, Dict[str, int]]` — single-use grants, consumed on first access. Wildcard `"*"` matches any operation.
-- `check_granted(resource, operation)` verifies operation matches (or "*"); auto-grants `data_dir` paths only (not `paths_allow` — reads are handled by `resolve_and_validate()` directly)
-- Permanent grants add to `paths_allow`, which auto-allows reads; writes still need session/single grant
-- Tickets expire after 300s
-- `grant_direct()` creates approved ticket but `fs_request_allow_impl` no longer uses it — goes through pending→approve flow
-- `config.save()` writes to config_path — tests set `config_path` to temp path
-- **Batch tickets (since v1.4.16)**: `PermissionTicket` has an optional `resources: List[str]` field; `request_batch()`/`approve()` bind one ticket/one `confirm_code` to an enumerated list of paths (`fs_delete_batch`). Still forced to `SINGLE` for delete, same rule as single-file delete (#7). `validate_tool_paths_batch()` peeks every path before consuming any grant.
+- `_session_grants` cambió de `Set[str]` a `Dict[str, Set[str]]` — almacena pares (ruta, operación)
+- `_single_grants: Dict[str, Dict[str, int]]` — grants de un solo uso, consumidos en el primer acceso. El comodín `"*"` coincide con cualquier operación.
+- `check_granted(resource, operation)` verifica que la operación coincida (o "*"); auto-otorga solo rutas en `data_dir` (no `paths_allow` — las lecturas son manejadas por `resolve_and_validate()` directamente)
+- Los grants permanentes se agregan a `paths_allow`, lo que auto-permite lecturas; las escrituras siguen necesitando grant de sesión/single
+- Los tickets expiran después de 300s
+- `grant_direct()` crea un ticket aprobado pero `fs_request_allow_impl` ya no lo usa — pasa por el flujo pendiente→aprobar
+- `config.save()` escribe en config_path — los tests configuran `config_path` en una ruta temporal
+- **Tickets batch (desde v1.4.16)**: `PermissionTicket` tiene un campo opcional `resources: List[str]`; `request_batch()`/`approve()` vinculan un ticket/un `confirm_code` a una lista enumerada de rutas (`fs_delete_batch`). Forzado a `SINGLE` para delete, misma regla que delete de un solo archivo (#7). `validate_tool_paths_batch()` verifica cada ruta antes de consumir cualquier grant.
 
 ## Testing
-- `asyncio_mode = "auto"` — `async def` tests auto-run (no marker needed)
-- Tests import `_impl` directly (not through FastMCP) — this is the intended pattern
-- `conftest.py` provides: `temp_home` (tmp_path), `test_config`, `security`, `sample_file`, `sample_dir`
-- `tests/test_shell_resolver.py` — 8 tests for shell resolution, executable finding
-- Always create fresh `SecurityValidator` per test — `_resolved_allowed` caches stale
-- `ResourceWarning` about `_ProactorBasePipeTransport.__del__` is harmless Windows asyncio cleanup
+- `asyncio_mode = "auto"` — los tests `async def` se ejecutan automáticamente (no se necesita marcador)
+- Los tests importan `_impl` directamente (no a través de FastMCP) — este es el patrón esperado
+- `conftest.py` provee: `temp_home` (tmp_path), `test_config`, `security`, `sample_file`, `sample_dir`
+- `tests/test_shell_resolver.py` — 8 tests para resolución de shell, búsqueda de ejecutables
+- Siempre crear un `SecurityValidator` nuevo por test — `_resolved_allowed` cachea valores viejos
+- El `ResourceWarning` sobre `_ProactorBasePipeTransport.__del__` es limpieza inofensiva de asyncio en Windows
 
 ## Gotchas
 - **`config.json` en la raíz del repo es un espejo, no el config real** — editarlo no tiene efecto. El real está en `~/.personal-mcp/config.json`. Ver nota al inicio de este archivo y `CONFIG-GUIA.md`.
-- `Path.resolve()` on Windows normalizes casing (e.g. `Temp` → `temp`) — use `self._resolve()` helper in PermissionManager
-- FastMCP 3.x constructor only accepts `name`
-- **Intercepting every tool call (e.g. for auditing) requires subclassing FastMCP, not `app.call_tool = wrapper`**: `FastMCP._setup_handlers()` (called inside `FastMCP.__init__()`) does `self._mcp_server.call_tool(validate_input=False)(self.call_tool)` — this registers the bound method with the low-level MCP server via a closure at the moment `app = FastMCP(...)` runs, *before* any post-construction attribute reassignment could take effect. Reassigning `app.call_tool` afterwards is silently a no-op for real client invocations (confirmed bug in v1.4.3 and earlier: `mcp_audit_log` stayed empty and `audit.json` was never created despite real tool activity — fixed in v1.4.4). Correct pattern: subclass `FastMCP` and override `call_tool()` as a real instance method (see `AuditedFastMCP` in `server.py`) — Python resolves `self.call_tool` by the instance's class (MRO) at the moment `_setup_handlers()` runs, which is after `self` is already the subclass instance.
-- `config.data_dir` overridden at `server.py:32` to `~/.personal-mcp/data`
-- `sh_script` writes temp file with extension matching shell (`.ps1`/`.bat`/`.sh`) to `~/.personal-mcp/data/`
-- `sh_session_start` returns error if shell doesn't support interactive sessions (cmd, bash have `session_args=[]`)
-- **Shell switching**: `sh_exec`, `sh_script`, `sh_session_start` accept optional `shell` param — resolves at runtime via `ShellManager.resolve_shell()`
-- Shell output truncated at 1 MiB — message appended if truncated
-- Timeout cleanup uses `taskkill /pid /T /F` (recursive, Windows-only)
-- SSH layer is opt-in — `ssh.enabled: false` by default
-- `import sys; sys.path.insert(0, ...)` required at every entrypoint for `src.` imports
-- All `_impl` functions accept `security` as parameter — closures bind it at registration time
-- **v1.4.9 external audit (2026-07-04) — 3 more findings beyond the two already folded into rules #2 and #4 above:**
-  - **`ssh_exec` validates commands only on the local `personal-mcp` host, not on the remote host the SSH session connects to** (`INJ-03`, MEDIUM). A command passing the local `allow_prefix` check is forwarded verbatim and runs with whatever privileges the remote account has — no equivalent enforcement exists remotely. **Mitigado en v1.4.32**: se añadió `remote_allow_prefix` en `SSHConfig` (`config.py`) y validación por-segmento en `ssh_exec_impl` (`layer3_ssh.py:109-120`) contra esa lista blanca remota dedicada (default: `ls`, `cat`, `echo`, `pwd`, `git`, `uptime`, `whoami`, `uname`, `df`, `free`, `ps`, `top`). El warning explícito `[WARNING]` se mantiene como defensa en profundidad. La limitación fundamental persiste (no hay enforcement remoto real sin deployar wrapper en el host destino), pero el bypass sin validación local ya no existe. Actualmente inalcanzable en práctica: SSH está `enabled: false` por defecto y en este deployment.
-  - **Secret scanning didn't cover `journal_add`/`note_quick`** (`INJ-04`, MEDIUM). `scan_text()` was wired into `fs_read_impl` and the shell paths but not Layer 4 — a credential pasted into a journal entry or quick note was written to disk with zero warning. Fixed via `_scan_and_append()` in `layer4_personal.py` (deliberately not shared with `layer2_shell.py`'s equivalent helper — flagged as minor DRY debt, not worth a cross-layer import for ~6 lines yet).
-  - **Log injection via newline-containing arguments** (`INJ-05`, LOW). `layer2_shell.py`'s `logger.info("sh_exec command=%.200s ...", command, ...)` interpolated the raw command via `%s` with no escaping — a command containing `\n` could forge a fake log line. Fixed via `sanitize_log_value()` (`log.py`), applied at both `sh_exec`/`sh_script` logging call sites.
-  - Full detail and PoC-level reasoning for all 5 findings (including the two already merged above): `CHANGELOG.md` entry `[1.4.9]`.
+- `Path.resolve()` en Windows normaliza mayúsculas/minúsculas (ej. `Temp` → `temp`) — usar el helper `self._resolve()` en PermissionManager
+- El constructor de FastMCP 3.x solo acepta `name`
+- **Interceptar cada llamada de tool (ej. para auditoría) requiere hacer subclase de FastMCP, no `app.call_tool = wrapper`**: `FastMCP._setup_handlers()` (llamado dentro de `FastMCP.__init__()`) hace `self._mcp_server.call_tool(validate_input=False)(self.call_tool)` — esto registra el método bound con el servidor MCP de bajo nivel mediante un closure en el momento en que `app = FastMCP(...)` se ejecuta, *antes* de que cualquier reasignación de atributos post-construcción pudiera tener efecto. Reasignar `app.call_tool` después es silenciosamente un no-op para invocaciones reales de clientes (bug confirmado en v1.4.3 y anteriores: `mcp_audit_log` se quedaba vacío y `audit.json` nunca se creaba a pesar de actividad real de tools — corregido en v1.4.4). Patrón correcto: hacer subclase de `FastMCP` y sobrescribir `call_tool()` como un método de instancia real (ver `AuditedFastMCP` en `server.py`) — Python resuelve `self.call_tool` por la clase de la instancia (MRO) en el momento en que `_setup_handlers()` se ejecuta, que es después de que `self` ya es la instancia de la subclase.
+- `config.data_dir` sobrescrito en `server.py:32` a `~/.personal-mcp/data`
+- `sh_script` escribe archivo temporal con extensión según el shell (`.ps1`/`.bat`/`.sh`) en `~/.personal-mcp/data/`
+- `sh_session_start` devuelve error si el shell no soporta sesiones interactivas (cmd, bash tienen `session_args=[]`)
+- **Cambio de shell**: `sh_exec`, `sh_script`, `sh_session_start` aceptan el parámetro opcional `shell` — se resuelve en runtime vía `ShellManager.resolve_shell()`
+- La salida de shell se trunca a 1 MiB — se agrega un mensaje si fue truncada
+- La limpieza por timeout usa `taskkill /pid /T /F` (recursivo, solo Windows)
+- La capa SSH es opt-in — `ssh.enabled: false` por defecto
+- `import sys; sys.path.insert(0, ...)` requerido en cada punto de entrada para imports de `src.`
+- Todas las funciones `_impl` aceptan `security` como parámetro — los closures lo vinculan en el momento del registro
+- **Auditoría externa v1.4.9 (2026-07-04) — 3 hallazgos adicionales más allá de los dos ya incorporados en las reglas #2 y #4 arriba:**
+  - **`ssh_exec` valida comandos solo en el host local `personal-mcp`, no en el host remoto al que se conecta la sesión SSH** (`INJ-03`, MEDIO). Un comando que pasa la verificación local de `allow_prefix` se reenvía textualmente y se ejecuta con los privilegios que tenga la cuenta remota — no existe enforcement equivalente remotamente. **Mitigado en v1.4.32**: se añadió `remote_allow_prefix` en `SSHConfig` (`config.py`) y validación por-segmento en `ssh_exec_impl` (`layer3_ssh.py:109-120`) contra esa lista blanca remota dedicada (default: `ls`, `cat`, `echo`, `pwd`, `git`, `uptime`, `whoami`, `uname`, `df`, `free`, `ps`, `top`). El warning explícito `[WARNING]` se mantiene como defensa en profundidad. La limitación fundamental persiste (no hay enforcement remoto real sin deployar wrapper en el host destino), pero el bypass sin validación local ya no existe. Actualmente inalcanzable en práctica: SSH está `enabled: false` por defecto y en este deployment.
+  - **El escaneo de secretos no cubría `journal_add`/`note_quick`** (`INJ-04`, MEDIO). `scan_text()` estaba conectado en `fs_read_impl` y en las rutas de shell pero no en la Capa 4 — una credencial pegada en una entrada del diario o nota rápida se escribía a disco sin ninguna advertencia. Corregido vía `_scan_and_append()` en `layer4_personal.py` (deliberadamente no compartido con el helper equivalente de `layer2_shell.py` — marcado como deuda menor de DRY, no vale un import entre capas por ~6 líneas todavía).
+  - **Inyección de log vía argumentos con saltos de línea** (`INJ-05`, BAJO). `logger.info("sh_exec command=%.200s ...", command, ...)` de `layer2_shell.py` interpolaba el comando crudo vía `%s` sin escape — un comando con `\n` podía falsificar una línea de log. Corregido vía `sanitize_log_value()` (`log.py`), aplicado en ambos puntos de log de `sh_exec`/`sh_script`.
+  - Detalle completo y razonamiento a nivel PoC para los 5 hallazgos (incluyendo los dos ya incorporados arriba): entrada `[1.4.9]` en `CHANGELOG.md`.
 
 ## npm / pnpm run dev — flujo de ejecución y gate de aprobación
 

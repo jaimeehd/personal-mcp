@@ -1,129 +1,129 @@
 # personal-mcp
 
-Custom MCP server for Windows workstation orchestration. Allowlist-based security with HITL approval for writes, secret scanning, per-operation rate limiting, fully async I/O, persistent PowerShell sessions.
+Servidor MCP personalizado para orquestación de estaciones de trabajo Windows/Linux/macOS. Seguridad basada en listas blancas con aprobación HITL para escrituras, escaneo de secretos, rate limiting por operación, I/O completamente asíncrono, sesiones persistentes de shell.
 
-## Architecture
+## Arquitectura
 
 ```
-6 layers, hexagonal design:
-  Layer 1: Filesystem      — 20 tools (read, write, edit, delete, delete-batch, list, tree, search, find, info, diff, batch, snapshot, create-dir, move, read-multi, list-allowed, list-with-sizes, read-media, edit-advanced)
-Layer 2: Shell — 9 tools (exec, persistent sessions, script execution, history, configurable shell)
-  Layer 3: SSH             — 4 tools (list hosts, connect, exec, disconnect) [disabled by default]
-  Layer 4: Personal        — 8 tools (journal CRUD, quick notes, project scan, project find)
-  Layer 5: Health/Diagnostics — 9 tools (health check, disk, processes, config, diag, audit log, tool list, benchmark, log tail)
-  Layer 6: Permissions     — 6 tools (approve, deny, pre-authorize, list pending, revoke, stats)
+6 capas, diseño hexagonal:
+  Capa 1: Filesystem      — 20 tools (read, write, edit, delete, delete-batch, list, tree, search, find, info, diff, batch, snapshot, create-dir, move, read-multi, list-allowed, list-with-sizes, read-media, edit-advanced)
+  Capa 2: Shell           — 9 tools (exec, sesiones persistentes, ejecución de scripts, historial, shell configurable)
+  Capa 3: SSH             — 4 tools (listar hosts, conectar, ejecutar, desconectar) [deshabilitado por defecto]
+  Capa 4: Personal        — 8 tools (journal CRUD, notas rápidas, escaneo de proyectos, búsqueda en proyectos)
+  Capa 5: Health/Diagnóstico — 9 tools (health check, disco, procesos, configuración, diag, audit log, lista de tools, benchmark, log tail)
+  Capa 6: Permissions     — 6 tools (aprobar, denegar, pre-autorizar, listar pendientes, revocar, estadísticas)
 ```
 
-56 tools total, 52 active (SSH's 4 disabled by default).
+56 tools en total, 52 activas (las 4 de SSH deshabilitadas por defecto).
 
 ## Tools
 
-### Layer 1 — Filesystem (restricted to allowed_paths from config)
-| Tool | Description |
+### Capa 1 — Filesystem (restringido a allowed_paths del config)
+| Tool | Descripción |
 |------|-------------|
-| `fs_read` | Read file content (auto-detect binary) |
-| `fs_write` | Write file content |
-| `fs_edit` | Replace text in file with diff preview |
-| `fs_delete` | Delete a single file (no directories/recursion). `delete` tickets are always single-use — session/permanent grants are not possible, by design |
-| `fs_delete_batch` | Delete multiple explicitly-listed files under one ticket/one confirmation code, instead of one popup per file. Same `delete`-only-single-use rule as `fs_delete` |
-| `fs_list` | List directory with filters |
-| `fs_tree` | Directory tree with depth limit |
-| `fs_search` | Grep-like regex search across files (skips files >10MB) |
-| `fs_find` | Find files by name, size, age |
-| `fs_info` | File metadata including SHA256 hash |
-| `fs_diff` | Diff two files or file vs snapshot |
-| `fs_batch` | Batch copy/move/rename with dry-run |
-| `fs_snapshot` | Snapshot directory state to JSON |
-| `fs_create_directory` | Create a directory (and parents as needed) |
-| `fs_move` | Move/rename a file |
-| `fs_read_multi` | Read several files in one call |
-| `fs_list_allowed` | List the configured `paths_allow` directories |
-| `fs_list_with_sizes` | List directory entries with file sizes, sortable |
-| `fs_read_media` | Read an image/binary file as base64, with secret scanning on decoded content |
-| `fs_edit_advanced` | Multiple find/replace edits to a file in one call, with dry-run |
+| `fs_read` | Leer contenido de archivo (detección automática de binarios) |
+| `fs_write` | Escribir contenido en archivo |
+| `fs_edit` | Reemplazar texto en archivo con vista previa de diff |
+| `fs_delete` | Eliminar un solo archivo (sin directorios/recursión). Los tickets `delete` son siempre de un solo uso — no se permiten grants de sesión ni permanentes, por diseño |
+| `fs_delete_batch` | Eliminar múltiples archivos listados explícitamente bajo un solo ticket/código de confirmación, en vez de un popup por archivo. Misma regla de solo-uso-único que `fs_delete` |
+| `fs_list` | Listar directorio con filtros |
+| `fs_tree` | Árbol de directorio con límite de profundidad |
+| `fs_search` | Búsqueda tipo grep con regex en archivos (omite archivos >10MB) |
+| `fs_find` | Buscar archivos por nombre, tamaño, antigüedad |
+| `fs_info` | Metadatos de archivo incluyendo hash SHA256 |
+| `fs_diff` | Diff entre dos archivos o archivo vs snapshot |
+| `fs_batch` | Copiar/mover/renombrar en lote con dry-run |
+| `fs_snapshot` | Snapshot del estado de un directorio a JSON |
+| `fs_create_directory` | Crear un directorio (y padres si es necesario) |
+| `fs_move` | Mover/renombrar un archivo |
+| `fs_read_multi` | Leer varios archivos en una sola llamada |
+| `fs_list_allowed` | Listar los directorios configurados en `paths_allow` |
+| `fs_list_with_sizes` | Listar entradas de directorio con tamaños, ordenable |
+| `fs_read_media` | Leer una imagen/binario como base64, con escaneo de secretos en el contenido decodificado |
+| `fs_edit_advanced` | Múltiples reemplazos find/replace en un archivo en una sola llamada, con dry-run |
 
-### Layer 2 — Shell (multi-shell execution, runtime shell switching)
-| Tool | Description |
+### Capa 2 — Shell (ejecución multi-shell, cambio de shell en runtime)
+| Tool | Descripción |
 |------|-------------|
-| `sh_exec` | Execute one-shot command. Parameters: `command`, `timeout`, `working_dir?`, `shell?` (powershell/pwsh/cmd/bash) |
-| `sh_session_start` | Create persistent shell session (powershell/pwsh only). Parameters: `timeout?`, `shell?` |
-| `sh_session_list` | List active sessions |
-| `sh_session_send` | Send command to session |
-| `sh_session_read` | Read pending output from session |
-| `sh_session_interrupt` | Send Ctrl+C to session |
-| `sh_session_close` | Close session |
-| `sh_script` | Execute multi-line script from temp file. Parameters: `script`, `timeout`, `working_dir?`, `shell?` |
+| `sh_exec` | Ejecutar comando one-shot. Parámetros: `command`, `timeout`, `working_dir?`, `shell?` (powershell/pwsh/cmd/bash) |
+| `sh_session_start` | Crear sesión de shell persistente (solo powershell/pwsh). Parámetros: `timeout?`, `shell?` |
+| `sh_session_list` | Listar sesiones activas |
+| `sh_session_send` | Enviar comando a sesión |
+| `sh_session_read` | Leer salida pendiente de sesión |
+| `sh_session_interrupt` | Enviar Ctrl+C a sesión |
+| `sh_session_close` | Cerrar sesión |
+| `sh_script` | Ejecutar script multi-línea desde archivo temporal. Parámetros: `script`, `timeout`, `working_dir?`, `shell?` |
 
-### Layer 3 — SSH (conditional, off by default)
-| Tool | Description |
+### Capa 3 — SSH (condicional, deshabilitado por defecto)
+| Tool | Descripción |
 |------|-------------|
-| `ssh_list_hosts` | List hosts from ~/.ssh/config |
-| `ssh_connect` | Open SSH session |
-| `ssh_exec` | Execute command on remote host |
-| `ssh_disconnect` | Close SSH session |
+| `ssh_list_hosts` | Listar hosts desde ~/.ssh/config |
+| `ssh_connect` | Abrir sesión SSH |
+| `ssh_exec` | Ejecutar comando en host remoto |
+| `ssh_disconnect` | Cerrar sesión SSH |
 
-### Layer 4 — Personal
-| Tool | Description |
+### Capa 4 — Personal
+| Tool | Descripción |
 |------|-------------|
-| `journal_add` | Add journal entry with tags/category |
-| `journal_list` | List entries with filters |
-| `journal_search` | Full-text search in journal |
-| `journal_stats` | Entry statistics by tag/category |
-| `journal_export` | Export journal as JSON or Markdown |
-| `note_quick` | Quick note to inbox file |
-| `project_scan` | Scan repos: branch, uncommitted changes |
-| `project_find` | Find file across all allowed repos |
+| `journal_add` | Agregar entrada al diario con tags/categoría |
+| `journal_list` | Listar entradas con filtros |
+| `journal_search` | Búsqueda full-text en el diario |
+| `journal_stats` | Estadísticas de entradas por tag/categoría |
+| `journal_export` | Exportar diario como JSON o Markdown |
+| `note_quick` | Nota rápida a archivo inbox |
+| `project_scan` | Escanear repos: rama, cambios sin commit |
+| `project_find` | Buscar archivo en todos los repos permitidos |
 
-### Layer 5 — Health & Diagnostics
-| Tool | Description |
+### Capa 5 — Health y Diagnóstico
+| Tool | Descripción |
 |------|-------------|
-| `health_check` | Full system health overview |
-| `health_disk` | Disk usage for specified paths |
-| `health_processes` | Top processes by CPU |
-| `health_config` | Current config (validated) |
-| `mcp_diag` | Full diagnostic report |
-| `mcp_audit_log` | Recent operation audit trail |
-| `mcp_list_tools` | List all registered tools |
-| `mcp_benchmark` | Performance benchmarks |
-| `mcp_log` | Tail the server's own log file, filterable by level |
+| `health_check` | Resumen completo de salud del sistema |
+| `health_disk` | Uso de disco para rutas especificadas |
+| `health_processes` | Top procesos por CPU |
+| `health_config` | Configuración actual (validada) |
+| `mcp_diag` | Reporte completo de diagnóstico |
+| `mcp_audit_log` | Registro de auditoría de operaciones recientes |
+| `mcp_list_tools` | Listar todas las tools registradas |
+| `mcp_benchmark` | Benchmarks de rendimiento |
+| `mcp_log` | Leer el archivo de log del servidor, filtrable por nivel |
 
-### Layer 6 — Permissions
-| Tool | Description |
+### Capa 6 — Permissions
+| Tool | Descripción |
 |------|-------------|
-| `fs_approve` | Approve a pending permission ticket (single/session) |
-| `fs_deny` | Explicitly deny a ticket |
-| `fs_request_allow` | Create a pending permission ticket; use `fs_approve` to confirm |
-| `security_pending` | List all pending permission requests |
-| `security_revoke` | Revoke an active session/permanent grant |
-| `security_stats` | Permission system statistics |
+| `fs_approve` | Aprobar un ticket de permiso pendiente (single/session) |
+| `fs_deny` | Denegar explícitamente un ticket |
+| `fs_request_allow` | Crear un ticket de permiso pendiente; usar `fs_approve` para confirmar |
+| `security_pending` | Listar todas las solicitudes de permiso pendientes |
+| `security_revoke` | Revocar un grant activo de sesión/permanente |
+| `security_stats` | Estadísticas del sistema de permisos |
 
-## Security
+## Seguridad
 
-- **Human-in-the-Loop (HITL) with HMAC confirmation**: Write/delete operations and shell executions require explicit user approval via tickets. `fs_approve` requires a `confirm_code` — a 6-digit code shown *only* via a native Windows popup on the user's screen, never returned by any tool response. An agent has no channel to read or guess it (`hmac.compare_digest()` verification against an in-memory secret). Use `fs_request_allow` to create a pending ticket, then `fs_approve(ticket_id, confirm_code, level)` to confirm. Read operations within `paths_allow` pass directly (no ticket needed).
-- **Execute-approval gate for general-purpose interpreters**: `python`/`node`/`bash` are whitelisted for legitimate dev workflows, but running one is a black box once approved — an explicit `execute` ticket (same HMAC-confirmed flow) is required before the interpreter is allowed to start at all, on top of the command whitelist below.
-- **Batch operations use one ticket, not one per file**: `fs_delete_batch` binds a single ticket/confirmation code to an explicit list of paths.
-- **Strict Path Hard-Lock**: Only paths defined in `security.paths_allow` (and internal `data_dir`) are accessible for reads without a ticket; paths outside are denied. Write/delete still require an explicit grant regardless of `paths_allow`'s scope.
-- **Command Whitelist**: Shell execution is restricted to a strict whitelist of approved command prefixes (e.g., `git`, `npm`, `python`, `ls`). Commands not in the whitelist, or explicitly denied, are blocked.
-- **Recursive Session Grants**: Approving a directory for a session (`level='session'`) automatically grants access to all its sub-directories and files, reducing approval friction for complex projects.
-- **Path denylist**: Paths matching `security.paths_deny` patterns (e.g. `**\node_modules\**`, `**\.git\**`, `**\.ssh\**`, `**\.env*`, `**\*.pem`, credential files for git/npm/pip/docker/aws/azure/kube) are blocked even if they're under an allowed directory. A narrow, explicit, read-only exception exists for inspecting a project's own build artifacts (`.dll`/`.exe`/`.pdb` under `**\bin\**`/`**\obj\**`) without opening those folders in general — off by default, opt-in per project via `security.paths_deny_exceptions`.
-- **`validate_tool_path()`**: All layer 1 tools validate paths through this method. For write/delete operations without a grant, a `permission_required` JSON ticket is returned. Reads in `paths_allow` pass directly (no ticket).
-- **Rate limiting per-operation**: Sliding window rate limiter (`security.rate_limit_commands_per_minute`) applied independently per operation type (read/write) in `validate_tool_path()`. Disabled when set to 0.
-- **Secret scanning**: File and media contents scanned for credentials (GitHub tokens, AWS keys, private keys, DB connection strings, etc.) on `fs_read`/`fs_read_media`/shell output/journal entries — warns only, never blocks. Configurable via `security.secret_scanning_enabled`.
-- **Output truncation**: All shell output is capped at 1 MiB to prevent memory issues. Truncated output is flagged with a notice.
-- **Process tree cleanup**: Timed-out commands use `taskkill /T /F` to recursively terminate all child processes, followed by reaping the original process handle to avoid leaking OS-level async I/O resources on Windows.
-- **Audit trail**: Every operation logged (circular buffer, 10k entries) with sensitive data automatically scrubbed.
-- **Known limitation — the generic `Filesystem` MCP connector, if also enabled with write access to this repo's own folder, bypasses every protection above.** It writes directly to disk with no tickets, no `confirm_code`, no audit trail — this server's security model only covers the tools *this* server exposes, not the repository as a file on disk. There is no code fix possible from within this project; if you also use the official `Filesystem` connector in the same MCP client, either avoid granting it write access to this repo's path, or accept that it's a parallel, unprotected write path to your own security configuration.
+- **Human-in-the-Loop (HITL) con confirmación HMAC**: Las operaciones de escritura/borrado y ejecuciones de shell requieren aprobación explícita del usuario mediante tickets. `fs_approve` requiere un `confirm_code` — un código de 6 dígitos mostrado *solo* mediante un popup nativo en la pantalla del usuario, nunca devuelto en la respuesta de ninguna tool. Un agente no tiene ningún canal para leerlo o adivinarlo (verificación `hmac.compare_digest()` contra un secreto en memoria). Usar `fs_request_allow` para crear un ticket pendiente, luego `fs_approve(ticket_id, confirm_code, level)` para confirmar. Las lecturas dentro de `paths_allow` pasan directamente (sin ticket).
+- **Gate de aprobación `execute` para intérpretes de propósito general**: `python`/`node`/`bash` están en la whitelist para workflows legítimos de desarrollo, pero ejecutarlos es una caja negra una vez aprobados — se requiere un ticket explícito de `execute` (mismo flujo con confirmación HMAC) antes de permitir que el intérprete arranque, además de la whitelist de comandos.
+- **Operaciones batch usan un solo ticket, no uno por archivo**: `fs_delete_batch` vincula un solo ticket/código de confirmación a una lista explícita de rutas.
+- **Hard-Lock estricto de rutas**: Solo las rutas definidas en `security.paths_allow` (y el `data_dir` interno) son accesibles para lecturas sin ticket; las rutas fuera son denegadas. Escritura/borrado siempre requieren grant explícito sin importar el alcance de `paths_allow`.
+- **Whitelist de comandos**: La ejecución de shell está restringida a una whitelist estricta de prefijos de comandos aprobados (ej. `git`, `npm`, `python`, `ls`). Comandos no incluidos en la whitelist, o explícitamente denegados, son bloqueados.
+- **Grants de sesión recursivos**: Aprobar un directorio para una sesión (`level='session'`) automáticamente otorga acceso a todos sus subdirectorios y archivos, reduciendo la fricción de aprobación para proyectos complejos.
+- **Lista negra de rutas**: Las rutas que coinciden con patrones de `security.paths_deny` (ej. `**\node_modules\**`, `**\.git\**`, `**\.ssh\**`, `**\.env*`, `**\*.pem`, archivos de credenciales de git/npm/pip/docker/aws/azure/kube) son bloqueadas incluso si están bajo un directorio permitido. Existe una excepción limitada, explícita y de solo-lectura para inspeccionar los artefactos de build de un proyecto propio (`.dll`/`.exe`/`.pdb` bajo `**\bin\**`/`**\obj\**`) sin abrir esas carpetas en general — deshabilitada por defecto, opt-in por proyecto vía `security.paths_deny_exceptions`.
+- **`validate_tool_path()`**: Todas las tools de la capa 1 validan rutas mediante este método. Para operaciones de escritura/borrado sin grant, se devuelve un ticket JSON `permission_required`. Las lecturas en `paths_allow` pasan directamente (sin ticket).
+- **Rate limiting por operación**: Rate limiter de ventana deslizante (`security.rate_limit_commands_per_minute`) aplicado independientemente por tipo de operación (lectura/escritura) en `validate_tool_path()`. Deshabilitado cuando se configura en 0.
+- **Escaneo de secretos**: Contenido de archivos y medios escaneado en busca de credenciales (tokens de GitHub, claves AWS, claves privadas, cadenas de conexión de BD, etc.) en `fs_read`/`fs_read_media`/salida de shell/entradas del diario — solo advierte, nunca bloquea. Configurable vía `security.secret_scanning_enabled`.
+- **Truncado de salida**: Toda la salida de shell está limitada a 1 MiB para prevenir problemas de memoria. La salida truncada se marca con un aviso.
+- **Limpieza de árbol de procesos**: Los comandos que exceden el timeout usan `taskkill /T /F` para terminar recursivamente todos los procesos hijos, seguido de un reap del handle del proceso original para evitar fugas de recursos de I/O asíncrono a nivel OS.
+- **Registro de auditoría**: Cada operación se registra (buffer circular, 10k entradas) con datos sensibles automáticamente ofuscados.
+- **Limitación conocida — el conector MCP `Filesystem` genérico (oficial), si también está habilitado con acceso de escritura a la carpeta de este repo, evade todas las protecciones anteriores.** Escribe directamente al disco sin tickets, sin `confirm_code`, sin registro de auditoría — el modelo de seguridad de este servidor solo cubre las tools que *este* servidor expone, no el repositorio como archivo en disco. No hay fix de código posible desde este proyecto; si también usás el conector oficial `Filesystem` en el mismo cliente MCP, evitá darle acceso de escritura a la ruta de este repo, o aceptá que es un canal de escritura paralelo sin protección hacia tu propia configuración de seguridad.
 
-## Shell Configuration
+## Configuración de Shell
 
-The shell layer supports multiple shells configured via `~/.personal-mcp/config.json`:
+La capa de shell soporta múltiples shells configurados vía `~/.personal-mcp/config.json`:
 
-| Shell | Config value | Interactive sessions | Script execution | Auto-detected path |
-|-------|-------------|---------------------|-----------------|-------------------|
-| PowerShell (default) | `"powershell"` | Yes | Yes (`.ps1`) | `%PATH%` |
-| PowerShell Core | `"pwsh"` | Yes | Yes (`.ps1`) | `%PATH%` or custom path |
-| CMD | `"cmd"` | No | Yes (`.bat`) | `%COMSPEC%` |
-| Git Bash | `"bash"` | No | Yes (`.sh`) | `git --exec-path` or `OPENCODE_GIT_BASH_PATH` |
+| Shell | Valor de config | Sesiones interactivas | Ejecución de scripts | Ruta auto-detectada |
+|-------|-----------------|----------------------|---------------------|---------------------|
+| PowerShell (default) | `"powershell"` | Sí | Sí (`.ps1`) | `%PATH%` |
+| PowerShell Core | `"pwsh"` | Sí | Sí (`.ps1`) | `%PATH%` o ruta personalizada |
+| CMD | `"cmd"` | No | Sí (`.bat`) | `%COMSPEC%` |
+| Git Bash / bash | `"bash"` | No | Sí (`.sh`) | `git --exec-path` o `OPENCODE_GIT_BASH_PATH` |
 
 ```json
 {
@@ -137,17 +137,17 @@ The shell layer supports multiple shells configured via `~/.personal-mcp/config.
 }
 ```
 
-The agent can also switch shells at runtime per-command via the `shell` parameter on `sh_exec`, `sh_script`, and `sh_session_start`. Example:
+El agente también puede cambiar de shell en runtime por comando mediante el parámetro `shell` en `sh_exec`, `sh_script` y `sh_session_start`. Ejemplo:
 
 ```
-sh_exec("echo hello", shell="cmd")
-sh_script("echo hello", shell="cmd")
+sh_exec("echo hola", shell="cmd")
+sh_script("echo hola", shell="cmd")
 sh_session_start(shell="pwsh")
 ```
 
-When `shell` is omitted, the configured `default_shell` is used. Invalid shell names return a clear error message.
+Cuando se omite `shell`, se usa el `default_shell` configurado. Nombres de shell inválidos devuelven un mensaje de error claro.
 
-## Installation
+## Instalación
 
 ### Windows (PowerShell)
 ```powershell
@@ -160,60 +160,56 @@ chmod +x install.sh
 ./install.sh
 ```
 
-Both installers will:
-1. Verify Python 3.10+
-2. Create virtual environment (`.venv`)
-3. Create directory structure
-4. Install Python dependencies in the venv
-5. Generate default config with auto-detected workspace paths
-6. Register with Claude Desktop using the venv Python
+Ambos instaladores:
+1. Verifican Python 3.10+
+2. Crean entorno virtual (`.venv`)
+3. Crean estructura de directorios
+4. Instalan dependencias de Python en el venv
+5. Generan config por defecto con rutas de workspace auto-detectadas
+6. Registran con Claude Desktop usando el Python del venv
 
-### Manual Installation (all platforms)
+### Instalación manual (todas las plataformas)
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 # Windows: pip install pywin32
-python -m src.server  # test run
+python -m src.server  # prueba de ejecución
 ```
 
-Then configure Claude Desktop manually:
+Luego configurar Claude Desktop manualmente:
 - **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
 - **Linux:** `~/.config/Claude/claude_desktop_config.json`
 - **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
 
-Add to `mcpServers`:
+Agregar a `mcpServers`:
 ```json
 {
   "mcpServers": {
     "personal-mcp": {
-      "command": "/full/path/to/.venv/bin/python",
-      "args": ["/full/path/to/run_server.py"]
+      "command": "/ruta/completa/a/.venv/bin/python",
+      "args": ["/ruta/completa/a/run_server.py"]
     }
   }
 }
 ```
 
-## Configuration
+## Configuración
 
-Edit `~/.personal-mcp/config.json` to customize. A read-only mirror of this
-file is kept at the repo root (`config.json`) for convenience — run
-`sync-config.ps1` to refresh it from the official copy. See
-[`CONFIG-GUIA.md`](CONFIG-GUIA.md) for a plain-language, non-technical
-explanation of every field (in Spanish).
+Editá `~/.personal-mcp/config.json` para personalizar. Se mantiene un espejo de solo lectura de este archivo en la raíz del repo (`config.json`) por conveniencia — ejecutá `sync-config.ps1` para refrescarlo desde la copia oficial. Ver [`CONFIG-GUIA.md`](CONFIG-GUIA.md) para una explicación en lenguaje simple, no técnica, de cada campo.
 
-- **Interactive Setup**: Use `python configure_paths.py` to manage your allowed directories without editing the JSON manually.
-- **Example Config**: See `config.demo.json` for a secure, productivity-optimized template.
-- `security.paths_allow`: Accessible directories for reads without a ticket. In this deployment, deliberately set to `["C:\\"]` (whole drive) — write/delete still requires an explicit ticket regardless. Default for a fresh install remains scoped (e.g. `~/Repos`, `~/Desktop`, `~/OneDrive`, `~/.personal-mcp`); widen only if you understand `paths_deny` becomes your only real read control at that point.
-- `security.paths_deny`: Blocked path patterns (default: `**\node_modules\**`, `**\.git\**`, `**\bin\**`, `**\obj\**`, `~/AppData` (recursive), plus credential-focused patterns: `.ssh`, `.aws`, `.azure`, `.kube`, `.gnupg`, `.env*`, `*.pem`, `id_rsa*`, `id_ed25519*`, git/npm/pip/docker credential files)
-- `security.paths_deny_exceptions` / `paths_deny_exception_extensions`: narrow, read-only, opt-in exception to `paths_deny` for inspecting a project's own build artifacts (see Security section above). Empty by default.
-- `security.commands.allow_prefix`: Mandatory whitelist of permitted command prefixes (e.g. `git`, `npm`, `python`).
-- `security.rate_limit_commands_per_minute`: Max commands per minute (default: 60, 0 = disabled)
-- `security.secret_scanning_enabled`: Scan file contents for secrets on fs_read (default: true)
-- `shell.session_timeout_seconds`: Session idle timeout (default: 600)
-- `ssh.enabled`: Set `true` to enable SSH layer (requires ~/.ssh/config)
+- **Configuración interactiva**: Usá `python configure_paths.py` para gestionar tus directorios permitidos sin editar el JSON manualmente.
+- **Configuración de ejemplo**: Ver `config.demo.json` para una plantilla segura y optimizada para productividad.
+- `security.paths_allow`: Directorios accesibles para lecturas sin ticket. En este deployment, deliberadamente configurado como `["C:\\"]` (todo el disco) — escritura/borrado sigue requiriendo ticket explícito. El default para una instalación nueva es acotado (ej. `~/Repos`, `~/Desktop`, `~/OneDrive`, `~/.personal-mcp`); ampliá solamente si entendés que `paths_deny` se convierte en tu único control real de lectura.
+- `security.paths_deny`: Patrones de rutas bloqueadas (default: `**\node_modules\**`, `**\.git\**`, `**\bin\**`, `**\obj\**`, `**\AppData\**`, más patrones enfocados en credenciales: `.ssh`, `.aws`, `.azure`, `.kube`, `.gnupg`, `.env*`, `*.pem`, `id_rsa*`, `id_ed25519*`, archivos de credenciales de git/npm/pip/docker)
+- `security.paths_deny_exceptions` / `paths_deny_exception_extensions`: excepción limitada, de solo-lectura, opt-in a `paths_deny` para inspeccionar artefactos de build de un proyecto propio (ver sección Seguridad arriba). Vacío por defecto.
+- `security.commands.allow_prefix`: Whitelist obligatoria de prefijos de comandos permitidos (ej. `git`, `npm`, `python`).
+- `security.rate_limit_commands_per_minute`: Máximo de comandos por minuto (default: 60, 0 = deshabilitado)
+- `security.secret_scanning_enabled`: Escanear contenido de archivos en busca de secretos en fs_read (default: true)
+- `shell.session_timeout_seconds`: Timeout de inactividad de sesión (default: 600)
+- `ssh.enabled`: Configurar en `true` para habilitar la capa SSH (requiere ~/.ssh/config)
 
-## Development
+## Desarrollo
 
 ```bash
 # Windows
@@ -226,7 +222,7 @@ python -m pytest tests/ -v
 python -m src.server
 ```
 
-### Sync config mirror (repo copy → user config)
+### Sincronizar espejo del config (repo → config de usuario)
 ```bash
 # Windows
 .\sync-config.ps1

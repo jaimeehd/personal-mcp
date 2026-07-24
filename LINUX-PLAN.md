@@ -45,7 +45,7 @@ Cada archivo expone funciones con interfaz idéntica en ambos OS:
 
 ## CI
 
-GitHub Actions matrix: `ubuntu-latest` + `windows-latest`, Python 3.10–3.13, más un job
+Matriz de GitHub Actions: `ubuntu-latest` + `windows-latest`, Python 3.11–3.13, más un job
 de lint (`ruff`) y uno de security-audit.
 
 ## Notas para mantenimiento futuro

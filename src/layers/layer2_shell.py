@@ -293,10 +293,7 @@ async def sh_exec_impl(command: str, security: SecurityValidator, timeout: int =
                     return f"Command timed out after {timeout}s{memory_pressure_hint()}"
 
     # Fallback: shell execution
-    si = shell_info or ShellInfo(name="powershell", executable="powershell.exe",
-                                  command_args=["-NoProfile", "-Command"],
-                                  session_args=[], script_args=[],
-                                  workdir_prefix='Set-Location -LiteralPath "{wd}"; ')
+    si = shell_info or ShellManager._default_shell()
     cmd = command
     if working_dir:
         safe_wd = _escape_workdir(working_dir, si.name)

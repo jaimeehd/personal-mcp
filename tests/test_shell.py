@@ -61,6 +61,7 @@ async def test_sh_exec_custom_command(sec, manager):
     assert "test" in result
 
 
+@pytest.mark.usefixtures("skip_on_linux")
 @pytest.mark.asyncio
 async def test_sh_session_create_and_list(sec, manager):
     result = await sh_session_start_impl(manager)
@@ -71,6 +72,7 @@ async def test_sh_session_create_and_list(sec, manager):
     assert data["session_id"][:8] in listing
 
 
+@pytest.mark.usefixtures("skip_on_linux")
 @pytest.mark.asyncio
 async def test_sh_session_send(sec, manager):
     result = await sh_session_start_impl(manager)
@@ -80,6 +82,7 @@ async def test_sh_session_send(sec, manager):
     await sh_session_close_impl(sid, manager)
 
 
+@pytest.mark.usefixtures("skip_on_linux")
 @pytest.mark.asyncio
 async def test_sh_session_close(sec, manager):
     result = await sh_session_start_impl(manager)
@@ -89,6 +92,7 @@ async def test_sh_session_close(sec, manager):
     assert "closed" in close_result
 
 
+@pytest.mark.usefixtures("skip_on_linux")
 @pytest.mark.asyncio
 async def test_sh_session_expired(sec):
     manager = ShellManager(sec, default_timeout=0)

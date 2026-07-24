@@ -45,15 +45,7 @@ jobs:
           python -m pytest tests/ -v --tb=short
 
       - name: Verify server starts (smoke test)
-        run: |
-          python -c "
-import sys
-sys.path.insert(0, '.')
-from src.server import create_app
-app = create_app()
-print('Server created successfully')
-print(f'Tools registered: {len(app._tool_manager._tools)}')
-"
+        run: python -c "import sys; sys.path.insert(0, '.'); from src.server import create_app; app = create_app(); print('Server OK')"
 
   lint:
     runs-on: ubuntu-latest

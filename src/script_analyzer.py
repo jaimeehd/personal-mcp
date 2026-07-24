@@ -1,6 +1,5 @@
 import ast
 from dataclasses import dataclass
-from typing import List, Optional, Set
 
 
 @dataclass
@@ -12,14 +11,14 @@ class RiskFinding:
 
 class ScriptAnalyzer(ast.NodeVisitor):
     def __init__(self):
-        self.findings: List[RiskFinding] = []
-        self._network_modules: Set[str] = {
+        self.findings: list[RiskFinding] = []
+        self._network_modules: set[str] = {
             "requests", "urllib", "http", "httpx", "socket", "aiohttp", "ftplib", "smtplib"
         }
-        self._destructive_funcs: Set[str] = {
+        self._destructive_funcs: set[str] = {
             "remove", "unlink", "rmdir", "rmtree"
         }
-        self._subprocess_funcs: Set[str] = {
+        self._subprocess_funcs: set[str] = {
             "system", "popen", "spawn", "exec", "eval"
         }
 
@@ -71,7 +70,7 @@ class ScriptAnalyzer(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-def analyze_python_script(code: str) -> List[RiskFinding]:
+def analyze_python_script(code: str) -> list[RiskFinding]:
     """Parse Python code using AST and return risk findings (network, destructive IO, subprocess)."""
     if not code or not code.strip():
         return []
@@ -88,11 +87,11 @@ def analyze_python_script(code: str) -> List[RiskFinding]:
         )]
 
 
-def analyze_javascript_script(code: str) -> List[RiskFinding]:
+def analyze_javascript_script(code: str) -> list[RiskFinding]:
     """Scan JavaScript/Node.js code for network, subprocess, and destructive file operations."""
     if not code or not code.strip():
         return []
-    findings: List[RiskFinding] = []
+    findings: list[RiskFinding] = []
     lines = code.splitlines()
 
     import re
@@ -105,11 +104,11 @@ def analyze_javascript_script(code: str) -> List[RiskFinding]:
         if not line_clean or line_clean.startswith("//"):
             continue
         if net_pattern.search(line_clean):
-            findings.append(RiskFinding(category="NETWORK", description=f"JS/TS script includes network operation/import", line=i))
+            findings.append(RiskFinding(category="NETWORK", description="JS/TS script includes network operation/import", line=i))
         if subproc_pattern.search(line_clean):
-            findings.append(RiskFinding(category="SUBPROCESS", description=f"JS/TS script invokes child process/shell", line=i))
+            findings.append(RiskFinding(category="SUBPROCESS", description="JS/TS script invokes child process/shell", line=i))
         if io_pattern.search(line_clean):
-            findings.append(RiskFinding(category="DESTRUCTIVE_IO", description=f"JS/TS script includes destructive file system operation", line=i))
+            findings.append(RiskFinding(category="DESTRUCTIVE_IO", description="JS/TS script includes destructive file system operation", line=i))
 
     return findings
 

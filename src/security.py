@@ -6,12 +6,12 @@ import shutil
 import time
 from collections import deque
 from pathlib import Path
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from src.config import AppConfig
 
 if TYPE_CHECKING:
-    from src.permissions import PermissionManager, GrantLevel
+    from src.permissions import GrantLevel, PermissionManager
 
 
 class PathNotAllowedError(PermissionError):
@@ -36,9 +36,9 @@ class RateLimitError(Exception):
 class SecurityValidator:
     def __init__(self, config: AppConfig):
         self.config = config
-        self._resolved_allowed: Optional[List[Path]] = None
-        self.perm_manager: Optional["PermissionManager"] = None
-        self._rate_limiters: Dict[str, deque] = {}
+        self._resolved_allowed: list[Path] | None = None
+        self.perm_manager: PermissionManager | None = None
+        self._rate_limiters: dict[str, deque] = {}
 
     def _check_rate_limit(self, operation: str) -> None:
         limit = self.config.security.rate_limit_commands_per_minute
@@ -58,7 +58,7 @@ class SecurityValidator:
     def clear_cache(self) -> None:
         self._resolved_allowed = None
 
-    def _resolve_allowed(self) -> List[Path]:
+    def _resolve_allowed(self) -> list[Path]:
         if self._resolved_allowed is not None:
             return self._resolved_allowed
         self._resolved_allowed = [
@@ -66,7 +66,7 @@ class SecurityValidator:
         ]
         return self._resolved_allowed
 
-    def _matched_deny_pattern(self, resolved: Path) -> Optional[str]:
+    def _matched_deny_pattern(self, resolved: Path) -> str | None:
         """Return the first paths_deny pattern that matches, or None."""
         candidate = str(resolved).replace("\\", "/")
         for pattern in self.config.security.paths_deny:
@@ -160,7 +160,7 @@ class SecurityValidator:
             raise CommandNotAllowedError(reason)
         return command
 
-    def validate_shell_execution(self, command: str) -> Optional[str]:
+    def validate_shell_execution(self, command: str) -> str | None:
         """Gate general-purpose interpreters (config.security.commands.approval_required_prefix)
         behind an explicit execute ticket, on top of the existing allow_prefix whitelist.
         Also scans Python script targets using AST to warn against network/destructive IO risks.
@@ -172,8 +172,8 @@ class SecurityValidator:
         prefixes = self.config.security.commands.approval_required_prefix
         if not prefixes:
             return None
+        from src.script_analyzer import analyze_javascript_script, analyze_python_script
         from src.shell_resolver import split_command_segments
-        from src.script_analyzer import analyze_python_script, analyze_javascript_script
         prefixes_lower = {p.lower() for p in prefixes}
         for segment in (split_command_segments(command) or [command]):
             words = segment.strip().split()
@@ -230,7 +230,7 @@ class SecurityValidator:
         except PathNotAllowedError:
             return False
 
-    def validate_tool_path(self, raw_path: str, operation: str = "read") -> Optional[str]:
+    def validate_tool_path(self, raw_path: str, operation: str = "read") -> str | None:
         """Validate a path for a tool call.
 
         Returns None when access is allowed.
@@ -249,7 +249,7 @@ class SecurityValidator:
         except PathNotAllowedError as e:
             return f"Access denied: {e}"
 
-    def validate_tool_paths_batch(self, raw_paths: List[str], operation: str = "delete") -> Optional[str]:
+    def validate_tool_paths_batch(self, raw_paths: list[str], operation: str = "delete") -> str | None:
         """Batch counterpart to validate_tool_path (2026-07-19, for fs_delete_batch).
 
         Validates every path in one pass; if any of them still needs a grant,
@@ -270,7 +270,7 @@ class SecurityValidator:
         except RateLimitError as e:
             return str(e)
 
-        resolved_paths: List[str] = []
+        resolved_paths: list[str] = []
         for raw_path in raw_paths:
             try:
                 # operation="read" here on purpose: this call is only checking
@@ -358,7 +358,7 @@ class SecurityValidator:
     PATH_RE = re.compile(r'(?<![\\/])([A-Za-z]:[\\/](?:[^\\/:*?"<>\s|\r\n]+[\\/])*[^\\/:*?"<>\s|\r\n]*)')
 
     @classmethod
-    def extract_absolute_paths(cls, text: str) -> List[str]:
+    def extract_absolute_paths(cls, text: str) -> list[str]:
         return cls.PATH_RE.findall(text)
 
     @staticmethod

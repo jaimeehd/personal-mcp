@@ -5,9 +5,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.security import SecurityValidator, PathNotAllowedError, CommandNotAllowedError
-from src.config import AppConfig, SecurityConfig, CommandPolicy
+from src.config import AppConfig, CommandPolicy, SecurityConfig
 from src.permissions import GrantLevel, PermissionManager
+from src.security import CommandNotAllowedError, PathNotAllowedError, SecurityValidator
 
 
 @pytest.fixture

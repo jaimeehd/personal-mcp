@@ -1,14 +1,12 @@
-import json
 import sys
-import time
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.permissions import PermissionManager, GrantLevel, PermissionTicket
 from src.config import AppConfig, SecurityConfig
+from src.permissions import GrantLevel, PermissionManager
 from src.security import SecurityValidator
 
 
@@ -43,14 +41,14 @@ def test_ticket_create(perm):
 
 def test_approve_single(perm):
     ticket = perm.request("C:\\Windows\\system.ini", "read")
-    ok, msg = perm.approve(ticket.id, confirm_code=ticket.confirm_code)
+    ok, _msg = perm.approve(ticket.id, confirm_code=ticket.confirm_code)
     assert ok is True
     assert ticket.status == "approved"
 
 
 def test_approve_session(perm):
     ticket = perm.request("C:\\Windows\\system.ini", "read", GrantLevel.SESSION)
-    ok, msg = perm.approve(ticket.id, confirm_code=ticket.confirm_code)
+    ok, _msg = perm.approve(ticket.id, confirm_code=ticket.confirm_code)
     assert ok is True
     assert perm.check_granted("C:\\Windows\\system.ini", "read") is True
 
@@ -58,14 +56,14 @@ def test_approve_session(perm):
 def test_approve_permanent(perm, temp_home):
     rsrc = str(temp_home / "outside.txt")
     ticket = perm.request(rsrc, "read", GrantLevel.PERMANENT)
-    ok, msg = perm.approve(ticket.id, confirm_code=ticket.confirm_code)
+    ok, _msg = perm.approve(ticket.id, confirm_code=ticket.confirm_code)
     assert ok is True
     assert rsrc in perm.config.security.paths_allow
 
 
 def test_deny(perm):
     ticket = perm.request("C:\\Windows\\system.ini", "read")
-    ok, msg = perm.deny(ticket.id)
+    ok, _msg = perm.deny(ticket.id)
     assert ok is True
     assert ticket.status == "denied"
 
@@ -143,7 +141,7 @@ def test_ticket_to_dict(perm):
 def test_revoke_ticket(perm):
     t = perm.request("C:\\Windows\\system.ini", "read", GrantLevel.SESSION)
     perm.approve(t.id)
-    ok, msg = perm.revoke_ticket(t.id)
+    ok, _msg = perm.revoke_ticket(t.id)
     assert ok is True
     assert perm.check_granted("C:\\Windows\\system.ini", "read") is False
 

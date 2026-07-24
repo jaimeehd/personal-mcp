@@ -80,9 +80,8 @@ def test_timed_slow(log_dir):
 
 def test_timed_error(log_dir):
     configure(str(log_dir), level="DEBUG")
-    with pytest.raises(ValueError, match="boom"):
-        with timed("failing_op"):
-            raise ValueError("boom")
+    with pytest.raises(ValueError, match="boom"), timed("failing_op"):
+        raise ValueError("boom")
     log_file = log_dir / "server.log"
     content = log_file.read_text("utf-8")
     assert "FAIL" in content

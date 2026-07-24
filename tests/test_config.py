@@ -1,12 +1,9 @@
-import json
 import sys
 from pathlib import Path
 
-import pytest
-
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.config import AppConfig, SecurityConfig, ShellConfig, CommandPolicy
+from src.config import AppConfig, CommandPolicy, SecurityConfig, ShellConfig
 
 
 def test_default_config_creation(temp_home):

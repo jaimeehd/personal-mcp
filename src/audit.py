@@ -2,12 +2,12 @@ import json
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 
 class AuditEntry:
-    def __init__(self, tool: str, args: Dict[str, Any], success: bool,
-                 duration_ms: float, error: Optional[str] = None):
+    def __init__(self, tool: str, args: dict[str, Any], success: bool,
+                 duration_ms: float, error: str | None = None):
         self.timestamp = time.time()
         self.tool = tool
         self.args = self._sanitize(args)
@@ -16,7 +16,7 @@ class AuditEntry:
         self.error = error
 
     @staticmethod
-    def _sanitize(args: Dict[str, Any]) -> Dict[str, Any]:
+    def _sanitize(args: dict[str, Any]) -> dict[str, Any]:
         sanitized = dict(args)
         sensitive_keys = {"password", "secret", "token", "key", "passphrase", "private"}
         for k in list(sanitized.keys()):
@@ -24,7 +24,7 @@ class AuditEntry:
                 sanitized[k] = "***"
         return sanitized
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "timestamp": self.timestamp,
             "tool": self.tool,
@@ -36,13 +36,13 @@ class AuditEntry:
 
 
 class AuditLog:
-    def __init__(self, max_entries: int = 10000, persist_path: Optional[Path] = None):
+    def __init__(self, max_entries: int = 10000, persist_path: Path | None = None):
         self.max_entries = max_entries
         self.persist_path = persist_path
         self._entries: deque = deque(maxlen=max_entries)
 
-    def record(self, tool: str, args: Dict[str, Any], success: bool,
-               duration_ms: float, error: Optional[str] = None) -> AuditEntry:
+    def record(self, tool: str, args: dict[str, Any], success: bool,
+               duration_ms: float, error: str | None = None) -> AuditEntry:
         entry = AuditEntry(tool, args, success, duration_ms, error)
         self._entries.append(entry)
         if self.persist_path:
@@ -56,7 +56,7 @@ class AuditLog:
         total = len(self._entries)
         succeeded = sum(1 for e in self._entries if e.success)
         failed = total - succeeded
-        by_tool: Dict[str, int] = {}
+        by_tool: dict[str, int] = {}
         for e in self._entries:
             by_tool[e.tool] = by_tool.get(e.tool, 0) + 1
         return {
@@ -69,7 +69,6 @@ class AuditLog:
 
     def _flush(self) -> None:
         """Deprecated flush helper kept for test compatibility. Entries are now flushed instantly via _append_to_disk."""
-        pass
 
     def _append_to_disk(self, entry: AuditEntry) -> None:
         if not self.persist_path:
@@ -84,7 +83,7 @@ class AuditLog:
 
     @classmethod
     def load(cls, max_entries: int = 10000,
-             persist_path: Optional[Path] = None) -> "AuditLog":
+             persist_path: Path | None = None) -> "AuditLog":
         log = cls(max_entries=max_entries, persist_path=persist_path)
         if persist_path and persist_path.exists():
             try:

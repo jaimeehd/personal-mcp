@@ -16,7 +16,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 from pathlib import Path
 
 import pytest
@@ -91,7 +90,7 @@ class MCPClient:
     # Public API
     # ------------------------------------------------------------------
 
-    def request(self, method: str, params: dict = None,
+    def request(self, method: str, params: dict | None = None,
                 timeout: float = 30) -> dict:
         with self._lock:
             self._id += 1

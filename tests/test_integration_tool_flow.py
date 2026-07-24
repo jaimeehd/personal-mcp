@@ -7,21 +7,26 @@ No FastMCP, no _impl internals. No tool source modifications.
 import json
 import sys
 from pathlib import Path
-from typing import Optional
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.config import AppConfig, SecurityConfig, CommandPolicy, ShellConfig, SSHConfig, JournalConfig
-from src.security import SecurityValidator, CommandNotAllowedError
-from src.permissions import GrantLevel, PermissionManager
+from src.config import AppConfig, JournalConfig, SecurityConfig, ShellConfig, SSHConfig
 from src.layers.layer1_filesystem import (
-    fs_read_impl, fs_write_impl, fs_edit_impl, fs_list_impl, fs_tree_impl,
-    fs_search_impl, fs_find_impl, fs_info_impl, fs_diff_impl, fs_batch_impl, fs_snapshot_impl,
+    fs_batch_impl,
+    fs_diff_impl,
+    fs_edit_impl,
+    fs_find_impl,
+    fs_info_impl,
+    fs_list_impl,
+    fs_read_impl,
+    fs_search_impl,
+    fs_tree_impl,
+    fs_write_impl,
 )
-from src.layers.layer6_permissions import register_permission_tools
-
+from src.permissions import GrantLevel, PermissionManager
+from src.security import CommandNotAllowedError, SecurityValidator
 
 # ===================================================================
 # Fixtures
@@ -133,7 +138,7 @@ def _make_fs_search(security):
 
 
 def _make_fs_find(security):
-    async def fs_find(path: str, name: Optional[str] = None) -> str:
+    async def fs_find(path: str, name: str | None = None) -> str:
         err = security.validate_tool_path(path, "read")
         if err:
             return err
@@ -144,7 +149,7 @@ def _make_fs_find(security):
 
 
 def _make_fs_diff(security):
-    async def fs_diff(path_a: str, path_b: Optional[str] = None) -> str:
+    async def fs_diff(path_a: str, path_b: str | None = None) -> str:
         err = security.validate_tool_path(path_a, "read")
         if err:
             return err
@@ -158,7 +163,7 @@ def _make_fs_diff(security):
 
 def _make_fs_batch(security):
     async def fs_batch(path: str, operation: str, target: str,
-                       pattern: Optional[str] = None, dry_run: bool = True) -> str:
+                       pattern: str | None = None, dry_run: bool = True) -> str:
         err = security.validate_tool_path(path, "read")
         if err:
             return err
@@ -178,14 +183,14 @@ def _make_fs_approve(security, pm):
         if gl == GrantLevel.PERMANENT:
             return ("Permanent grants are disabled from tool calls. "
                     "Edit ~/.personal-mcp/config.json directly to add paths.")
-        ok, msg = pm.approve(ticket_id, gl, confirm_code)
+        _ok, msg = pm.approve(ticket_id, gl, confirm_code)
         return msg
     return fs_approve
 
 
 def _make_fs_deny(pm):
     async def fs_deny(ticket_id: str) -> str:
-        ok, msg = pm.deny(ticket_id)
+        _ok, msg = pm.deny(ticket_id)
         return msg
     return fs_deny
 
@@ -285,7 +290,7 @@ def _create_file(config, rel_path: str, content: str = "hello") -> dict:
 class TestToolCallSuccess:
 
     async def test_fs_read_returns_content(self, tools, wired_system):
-        config, sec, pm = wired_system
+        config, _sec, pm = wired_system
         f = _create_file(config, "read_ok.txt", "Hello Tool!")
         pm.grant_direct(f["path"], "read", GrantLevel.SESSION)
         result = await tools["fs_read"](f["path"])
@@ -302,14 +307,14 @@ class TestToolCallSuccess:
         assert Path(f["resolved"]).read_text() == "new content"
 
     async def test_fs_info_returns_metadata(self, tools, wired_system):
-        config, sec, pm = wired_system
+        config, _sec, pm = wired_system
         f = _create_file(config, "info_ok.txt", "data")
         pm.grant_direct(f["path"], "read", GrantLevel.SESSION)
         result = await tools["fs_info"](f["path"])
         assert "path:" in result and "size:" in result and "sha256:" in result
 
     async def test_fs_list_returns_entries(self, tools, wired_system):
-        config, sec, pm = wired_system
+        config, _sec, pm = wired_system
         d = Path(config.security.paths_allow[0]) / "list_dir"
         d.mkdir(parents=True, exist_ok=True)
         (d / "a.txt").write_text("a")
@@ -319,7 +324,7 @@ class TestToolCallSuccess:
         assert "a.txt" in result and "b.txt" in result
 
     async def test_fs_tree_returns_tree(self, tools, wired_system):
-        config, sec, pm = wired_system
+        config, _sec, pm = wired_system
         d = Path(config.security.paths_allow[0]) / "tree_dir"
         d.mkdir(parents=True, exist_ok=True)
         (d / "leaf.py").write_text("")
@@ -328,21 +333,21 @@ class TestToolCallSuccess:
         assert "leaf.py" in result and "tree_dir" in result
 
     async def test_fs_search_finds_pattern(self, tools, wired_system):
-        config, sec, pm = wired_system
+        config, _sec, pm = wired_system
         f = _create_file(config, "search_me.py", "def hello(): pass")
         pm.grant_direct(Path(f["path"]).parent.as_posix(), "read", GrantLevel.SESSION)
         result = await tools["fs_search"](str(Path(f["path"]).parent), "def hello")
         assert "hello" in result
 
     async def test_fs_find_finds_file_by_name(self, tools, wired_system):
-        config, sec, pm = wired_system
+        config, _sec, pm = wired_system
         f = _create_file(config, "find_target.txt", "find me")
         pm.grant_direct(Path(f["path"]).parent.as_posix(), "read", GrantLevel.SESSION)
         result = await tools["fs_find"](str(Path(f["path"]).parent), "find_target.txt")
         assert "find_target.txt" in result
 
     async def test_fs_diff_identical_files(self, tools, wired_system):
-        config, sec, pm = wired_system
+        config, _sec, pm = wired_system
         a = _create_file(config, "diff_a.txt", "same")
         b = _create_file(config, "diff_b.txt", "same")
         pm.grant_direct(a["path"], "read", GrantLevel.SESSION)
@@ -360,7 +365,7 @@ class TestToolCallSuccess:
         assert Path(f["resolved"]).read_text() == "new content here"
 
     async def test_multiple_tools_same_session_grant(self, tools, wired_system):
-        config, sec, pm = wired_system
+        config, _sec, pm = wired_system
         f = _create_file(config, "multi_tool.txt", "initial")
         pm.grant_direct(f["path"], "*", GrantLevel.SESSION)
         r1 = await tools["fs_read"](f["path"])
@@ -546,7 +551,7 @@ class TestPermissionTools:
         assert pm.check_granted(path, "*") is False
 
     async def test_fs_request_allow_permanent_rejected(self, tools, wired_system):
-        config, _, pm = wired_system
+        config, _, _pm = wired_system
         path = config.data_dir + "\\..\\pre_perm.txt"
         resolved = str(Path(path).resolve())
         result = await tools["fs_request_allow"](resolved, "permanent")

@@ -7,13 +7,12 @@ import subprocess
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from src.config import AppConfig
 from src.audit import AuditLog
+from src.config import AppConfig
 from src.oslayer.system import available_memory_info, uptime_seconds
 
 
@@ -23,8 +22,7 @@ def _get_version(cmd: str, flag: str) -> str:
             return "not found"
         r = subprocess.run([cmd, flag],
                            stdin=subprocess.DEVNULL,
-                           stdout=subprocess.PIPE,
-                           stderr=subprocess.PIPE,
+                           capture_output=True,
                            text=True, timeout=5)
         return (r.stdout or r.stderr).strip()[:100]
     except Exception:
@@ -76,9 +74,9 @@ def _fetch_processes_windows(top: int) -> str:
     env["_MCP_TOP"] = str(top)
     r = subprocess.run(
         ["powershell", "-NoProfile", "-Command",
-         "Get-Process | Sort-Object CPU -Descending | Select-Object -First $env:_MCP_TOP "
+         ("Get-Process | Sort-Object CPU -Descending | Select-Object -First $env:_MCP_TOP "
          "Name, Id, @{N='CPU(s)';E={$_.CPU.ToString('F1')}}, "
-         "@{N='MemMB';E={($_.WorkingSet/1MB).ToString('F0')}} | Format-Table -AutoSize"],
+         "@{N='MemMB';E={($_.WorkingSet/1MB).ToString('F0')}} | Format-Table -AutoSize")],
         capture_output=True, text=True, timeout=10, env=env,
     )
     return r.stdout or r.stderr
@@ -130,7 +128,7 @@ def register_health_tools(mcp: FastMCP, config: AppConfig,
         return json.dumps(checks, indent=2, ensure_ascii=False)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
-    async def health_disk(paths: Optional[str] = None) -> str:
+    async def health_disk(paths: str | None = None) -> str:
         check_paths = [Path(p.strip()) for p in (paths or str(Path.home())).split(";") if p.strip()]
         results = {}
         for p in check_paths:
@@ -211,12 +209,12 @@ def register_health_tools(mcp: FastMCP, config: AppConfig,
         try:
             # Use platform-appropriate shell for benchmark
             if platform.system() == "Windows":
-                r = subprocess.run(
+                subprocess.run(
                     ["powershell", "-NoProfile", "-Command", "echo test"],
                     capture_output=True, text=True, timeout=10
                 )
             else:
-                r = subprocess.run(
+                subprocess.run(
                     ["bash", "-c", "echo test"],
                     capture_output=True, text=True, timeout=10
                 )

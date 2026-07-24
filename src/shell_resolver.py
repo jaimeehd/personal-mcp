@@ -4,27 +4,26 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
 
 
 @dataclass
 class ShellInfo:
     name: str
     executable: str
-    command_args: List[str] = field(default_factory=list)
-    session_args: List[str] = field(default_factory=list)
-    script_args: List[str] = field(default_factory=list)
+    command_args: list[str] = field(default_factory=list)
+    session_args: list[str] = field(default_factory=list)
+    script_args: list[str] = field(default_factory=list)
     workdir_prefix: str = ""
 
 
 _SHELL_OPERATORS_RE = re.compile(r'[|;&<>`\n]|\$\(')
 
 
-def tokenize_command(command: str) -> List[str]:
+def tokenize_command(command: str) -> list[str]:
     """Split a command string into argv tokens, respecting single and double quotes."""
-    tokens: List[str] = []
-    current: List[str] = []
-    quote_char: Optional[str] = None
+    tokens: list[str] = []
+    current: list[str] = []
+    quote_char: str | None = None
     for c in command:
         if quote_char:
             if c == quote_char:
@@ -51,7 +50,7 @@ def has_shell_operators(command: str) -> bool:
     return bool(_SHELL_OPERATORS_RE.search(stripped))
 
 
-def split_command_segments(command: str) -> List[str]:
+def split_command_segments(command: str) -> list[str]:
     """Split a command string into segments on shell operators (| ; & < > ` $(), plus
     newlines, ignoring operators found inside single/double-quoted sections.
 
@@ -63,9 +62,9 @@ def split_command_segments(command: str) -> List[str]:
     them as statement separators just like ';', even though earlier versions of this
     function did not split on them (see AGENTS.md security fix log).
     """
-    segments: List[str] = []
-    current: List[str] = []
-    quote_char: Optional[str] = None
+    segments: list[str] = []
+    current: list[str] = []
+    quote_char: str | None = None
     i = 0
     while i < len(command):
         c = command[i]
@@ -97,7 +96,7 @@ def split_command_segments(command: str) -> List[str]:
 
 
 # Platform-specific shell registries
-_WINDOWS_SHELLS: Dict[str, ShellInfo] = {
+_WINDOWS_SHELLS: dict[str, ShellInfo] = {
     "powershell": ShellInfo(
         name="powershell",
         executable="powershell.exe",
@@ -132,7 +131,7 @@ _WINDOWS_SHELLS: Dict[str, ShellInfo] = {
     ),
 }
 
-_LINUX_SHELLS: Dict[str, ShellInfo] = {
+_LINUX_SHELLS: dict[str, ShellInfo] = {
     "bash": ShellInfo(
         name="bash",
         executable="bash",
@@ -181,7 +180,7 @@ def get_default_shell() -> str:
     return "bash"
 
 
-def _find_executable(name: str, shell_map: Optional[Dict[str, str]] = None) -> Optional[str]:
+def _find_executable(name: str, shell_map: dict[str, str] | None = None) -> str | None:
     if shell_map and name in shell_map:
         candidate = shell_map[name]
         if os.path.isfile(candidate):
@@ -191,7 +190,7 @@ def _find_executable(name: str, shell_map: Optional[Dict[str, str]] = None) -> O
     return shutil.which(name)
 
 
-def _find_git_bash() -> Optional[str]:
+def _find_git_bash() -> str | None:
     git_bash = os.environ.get("OPENCODE_GIT_BASH_PATH")
     if git_bash and os.path.isfile(git_bash):
         return git_bash
@@ -216,7 +215,7 @@ def _find_git_bash() -> Optional[str]:
     return None
 
 
-def resolve_shell(name: str, shell_map: Optional[Dict[str, str]] = None) -> ShellInfo:
+def resolve_shell(name: str, shell_map: dict[str, str] | None = None) -> ShellInfo:
     if name not in SHELL_REGISTRY:
         valid = list(SHELL_REGISTRY.keys())
         raise ValueError(f"Unknown shell '{name}'. Valid options: {valid}")

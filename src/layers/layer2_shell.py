@@ -5,16 +5,20 @@ import shutil
 import time
 import uuid
 from pathlib import Path
-from typing import Dict, List, Optional
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from src.security import SecurityValidator, CommandNotAllowedError
-from src.shell_resolver import ShellInfo, resolve_shell, tokenize_command, has_shell_operators
-from src.secretscanner import scan_text, format_findings
-from src.log import get_logger, sanitize_log_value, memory_pressure_hint
+from src.log import get_logger, memory_pressure_hint, sanitize_log_value
 from src.oslayer.process import kill_process_tree, reap_after_kill
+from src.secretscanner import format_findings, scan_text
+from src.security import CommandNotAllowedError, SecurityValidator
+from src.shell_resolver import (
+    ShellInfo,
+    has_shell_operators,
+    resolve_shell,
+    tokenize_command,
+)
 
 logger = get_logger("layer2_shell")
 
@@ -39,8 +43,8 @@ def _append_secret_scan(result: str, output_text: str, security: SecurityValidat
     return result
 
 
-def _scan_command_warnings(command: str, security: SecurityValidator) -> List[str]:
-    warnings: List[str] = []
+def _scan_command_warnings(command: str, security: SecurityValidator) -> list[str]:
+    warnings: list[str] = []
     for p in security.extract_absolute_paths(command):
         if not security.is_path_allowed(p):
             warnings.append(f"Command argument references external path: {p}")
@@ -74,9 +78,9 @@ class ShellSession:
         self.created_at = time.time()
         self.last_activity = time.time()
         self.command_count = 0
-        self._process: Optional[asyncio.subprocess.Process] = None
+        self._process: asyncio.subprocess.Process | None = None
         self._output_buffer: asyncio.Queue = asyncio.Queue()
-        self._reader_task: Optional[asyncio.Task] = None
+        self._reader_task: asyncio.Task | None = None
 
     @property
     def uptime_seconds(self) -> float:
@@ -103,7 +107,7 @@ class ShellSession:
                 )
                 if line:
                     await self._output_buffer.put(line)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break
@@ -114,8 +118,8 @@ class ShellSession:
         self.command_count += 1
         self.last_activity = time.time()
         logger.debug("session_send id=%s command=%.100s", self.session_id, sanitize_log_value(command))
-        lines: List[str] = []
-        self._process.stdin.write(f"{command}\n".encode("utf-8"))
+        lines: list[str] = []
+        self._process.stdin.write(f"{command}\n".encode())
         await self._process.stdin.drain()
         read_start = time.time()
         while (time.time() - read_start) < timeout:
@@ -124,12 +128,12 @@ class ShellSession:
                 decoded = line.decode("utf-8", errors="replace").rstrip()
                 if decoded:
                     lines.append(decoded)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 break
         return "\n".join(lines) if lines else "(no output)"
 
     async def read_output(self, timeout: float = 1.0) -> str:
-        lines: List[str] = []
+        lines: list[str] = []
         try:
             while True:
                 line = await asyncio.wait_for(self._output_buffer.get(), timeout=timeout)
@@ -137,14 +141,14 @@ class ShellSession:
                 if decoded:
                     lines.append(decoded)
                 timeout = 0.3
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
         return "\n".join(lines) if lines else "(no output)"
 
     async def interrupt(self) -> str:
         if self._process:
             try:
-                self._process.stdin.write("\x03".encode("utf-8"))
+                self._process.stdin.write(b"\x03")
                 await self._process.stdin.drain()
                 return "Interrupt sent"
             except Exception as e:
@@ -159,20 +163,20 @@ class ShellSession:
                 self._process.stdin.close()
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 await kill_process_tree(self._process.pid)
                 await reap_after_kill(self._process)
 
 
 class ShellManager:
     def __init__(self, security: SecurityValidator, default_timeout: int = 600,
-                 shell_info: Optional[ShellInfo] = None,
-                 shell_map: Optional[Dict[str, str]] = None):
+                 shell_info: ShellInfo | None = None,
+                 shell_map: dict[str, str] | None = None):
         self.security = security
         self.default_timeout = default_timeout
         self.shell_info = shell_info or self._default_shell()
         self.shell_map = shell_map or {}
-        self._sessions: Dict[str, ShellSession] = {}
+        self._sessions: dict[str, ShellSession] = {}
 
     def resolve_shell(self, name: str) -> ShellInfo:
         return resolve_shell(name, self.shell_map)
@@ -188,8 +192,8 @@ class ShellManager:
                              script_args=["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"],
                              workdir_prefix='Set-Location -LiteralPath "{wd}"; ')
 
-    async def create_session(self, timeout: Optional[int] = None,
-                             shell_info: Optional[ShellInfo] = None) -> Optional[ShellSession]:
+    async def create_session(self, timeout: int | None = None,
+                             shell_info: ShellInfo | None = None) -> ShellSession | None:
         si = shell_info or self.shell_info
         if not si.session_args:
             return None
@@ -204,17 +208,17 @@ class ShellManager:
             if sess.is_expired:
                 self._sessions.pop(sid, None)
 
-    def get_session(self, session_id: str) -> Optional[ShellSession]:
+    def get_session(self, session_id: str) -> ShellSession | None:
         session = self._sessions.get(session_id)
         if session and session.is_expired:
             self._sessions.pop(session_id, None)
             return None
         return session
 
-    def list_sessions(self) -> List[dict]:
+    def list_sessions(self) -> list[dict]:
         self._cleanup_expired()
         now = time.time()
-        active: List[dict] = []
+        active: list[dict] = []
         for sess in self._sessions.values():
             active.append({
                 "session_id": sess.session_id,
@@ -237,15 +241,15 @@ class ShellManager:
 
 
 async def sh_exec_impl(command: str, security: SecurityValidator, timeout: int = 30,
-                       working_dir: Optional[str] = None,
-                       shell_info: Optional[ShellInfo] = None) -> str:
+                       working_dir: str | None = None,
+                       shell_info: ShellInfo | None = None) -> str:
     security.validate_command(command)
     logger.info("sh_exec command=%.200s shell=%s timeout=%d", sanitize_log_value(command), shell_info.name if shell_info else "default", timeout)
-    proc_kwargs = dict(
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    proc_kwargs = {
+        "stdin": asyncio.subprocess.DEVNULL,
+        "stdout": asyncio.subprocess.PIPE,
+        "stderr": asyncio.subprocess.PIPE,
+    }
     if working_dir:
         proc_kwargs["cwd"] = working_dir
 
@@ -273,7 +277,7 @@ async def sh_exec_impl(command: str, security: SecurityValidator, timeout: int =
                         result += f"\n[output truncated at {MAX_CAPTURE_BYTES:,} bytes — use a more specific command to narrow results]"
                     result = _append_secret_scan(result, out + "\n" + err, security, "sh_exec")
                     return result
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     await kill_process_tree(process.pid)
                     await reap_after_kill(process)
                     return f"Command timed out after {timeout}s{memory_pressure_hint()}"
@@ -305,14 +309,14 @@ async def sh_exec_impl(command: str, security: SecurityValidator, timeout: int =
             result += f"\n[output truncated at {MAX_CAPTURE_BYTES:,} bytes — use a more specific command to narrow results]"
         result = _append_secret_scan(result, out + "\n" + err, security, "sh_exec")
         return result
-    except asyncio.TimeoutError:
+    except TimeoutError:
         await kill_process_tree(process.pid)
         await reap_after_kill(process)
         return f"Command timed out after {timeout}s{memory_pressure_hint()}"
 
 
-async def sh_session_start_impl(manager: ShellManager, timeout: Optional[int] = None,
-                                shell_info: Optional[ShellInfo] = None) -> str:
+async def sh_session_start_impl(manager: ShellManager, timeout: int | None = None,
+                                shell_info: ShellInfo | None = None) -> str:
     session = await manager.create_session(timeout=timeout, shell_info=shell_info)
     if session is None:
         name = shell_info.name if shell_info else (manager.shell_info.name if manager.shell_info else 'unknown')
@@ -362,8 +366,8 @@ async def sh_session_close_impl(session_id: str, manager: ShellManager) -> str:
 
 
 async def sh_script_impl(script: str, security: SecurityValidator, timeout: int = 60,
-                         working_dir: Optional[str] = None,
-                         shell_info: Optional[ShellInfo] = None) -> str:
+                         working_dir: str | None = None,
+                         shell_info: ShellInfo | None = None) -> str:
     readonly_ok, readonly_reason = security.config.security.commands.is_script_readonly(script)
     if not readonly_ok:
         raise CommandNotAllowedError(
@@ -404,7 +408,7 @@ async def sh_script_impl(script: str, security: SecurityValidator, timeout: int 
             result += f"\n[output truncated at {MAX_CAPTURE_BYTES:,} bytes — use a more specific command to narrow results]"
         result = _append_secret_scan(result, out + "\n" + err, security, "sh_script")
         return result
-    except asyncio.TimeoutError:
+    except TimeoutError:
         await kill_process_tree(process.pid)
         await reap_after_kill(process)
         return f"Script timed out after {timeout}s{memory_pressure_hint()}"
@@ -432,7 +436,7 @@ def _validate_command_paths(command: str, security: SecurityValidator) -> str:
     return ""
 
 
-def _format_warnings(warnings: List[str]) -> str:
+def _format_warnings(warnings: list[str]) -> str:
     if not warnings:
         return ""
     return "\n".join(f"[warning] {w}" for w in warnings) + "\n---"
@@ -443,8 +447,8 @@ def register_shell_tools(mcp: FastMCP, security: SecurityValidator,
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
     async def sh_exec(command: str, timeout: int = 30,
-                      working_dir: Optional[str] = None,
-                      shell: Optional[str] = None) -> str:
+                      working_dir: str | None = None,
+                      shell: str | None = None) -> str:
         if working_dir:
             err = security.validate_tool_path(working_dir)
             if err:
@@ -467,8 +471,8 @@ def register_shell_tools(mcp: FastMCP, security: SecurityValidator,
         return result
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
-    async def sh_session_start(timeout: Optional[int] = None,
-                                shell: Optional[str] = None) -> str:
+    async def sh_session_start(timeout: int | None = None,
+                                shell: str | None = None) -> str:
         if shell:
             try:
                 si = await asyncio.to_thread(manager.resolve_shell, shell)
@@ -511,8 +515,8 @@ def register_shell_tools(mcp: FastMCP, security: SecurityValidator,
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
     async def sh_script(script: str, timeout: int = 60,
-                        working_dir: Optional[str] = None,
-                        shell: Optional[str] = None) -> str:
+                        working_dir: str | None = None,
+                        shell: str | None = None) -> str:
         if working_dir:
             err = security.validate_tool_path(working_dir)
             if err:

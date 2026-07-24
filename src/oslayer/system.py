@@ -1,9 +1,7 @@
-import os
 import sys
-from typing import Optional
 
 
-def available_memory_info() -> Optional[dict]:
+def available_memory_info() -> dict | None:
     """Return dict with total_gb, free_gb, free_pct via OS-native call.
     Zero subprocesses spawned. Returns None if unavailable.
     """
@@ -12,7 +10,7 @@ def available_memory_info() -> Optional[dict]:
     return _linux_memory_info()
 
 
-def _windows_memory_info() -> Optional[dict]:
+def _windows_memory_info() -> dict | None:
     try:
         import ctypes
 
@@ -43,7 +41,7 @@ def _windows_memory_info() -> Optional[dict]:
     return None
 
 
-def _linux_memory_info() -> Optional[dict]:
+def _linux_memory_info() -> dict | None:
     try:
         with open("/proc/meminfo", "r") as f:
             lines = f.readlines()
@@ -65,14 +63,14 @@ def _linux_memory_info() -> Optional[dict]:
     return None
 
 
-def uptime_seconds() -> Optional[float]:
+def uptime_seconds() -> float | None:
     """Return seconds since boot. None if unavailable."""
     if sys.platform == "win32":
         return _windows_uptime()
     return _linux_uptime()
 
 
-def _windows_uptime() -> Optional[float]:
+def _windows_uptime() -> float | None:
     try:
         import ctypes
         uptime_ms = ctypes.windll.kernel32.GetTickCount64()
@@ -82,7 +80,7 @@ def _windows_uptime() -> Optional[float]:
     return None
 
 
-def _linux_uptime() -> Optional[float]:
+def _linux_uptime() -> float | None:
     try:
         with open("/proc/uptime", "r") as f:
             return float(f.read().split()[0])

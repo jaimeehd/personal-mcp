@@ -1,13 +1,12 @@
 import json
-import os
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+
 from pydantic import BaseModel, Field
 
 
-def _default_paths_allow() -> List[str]:
+def _default_paths_allow() -> list[str]:
     """Platform-aware default allowed paths."""
     home = Path.home()
     if sys.platform == "win32":
@@ -24,7 +23,7 @@ def _default_paths_allow() -> List[str]:
     return [str(home)]
 
 
-def _default_paths_deny() -> List[str]:
+def _default_paths_deny() -> list[str]:
     """Platform-aware default denied paths."""
     home = Path.home()
     base = [
@@ -55,8 +54,8 @@ def _default_shell() -> str:
 
 
 class CommandPolicy(BaseModel):
-    allow_prefix: List[str] = Field(default_factory=lambda: ["git", "npm", "python", "ls", "pytest", "echo"])
-    readonly_prefix: List[str] = Field(default_factory=lambda: [
+    allow_prefix: list[str] = Field(default_factory=lambda: ["git", "npm", "python", "ls", "pytest", "echo"])
+    readonly_prefix: list[str] = Field(default_factory=lambda: [
         "git status", "git log", "git diff", "git show", "git branch", "git remote -v",
         "ls", "dir", "cat", "type", "echo",
         "docker ps", "docker images", "docker version",
@@ -66,19 +65,19 @@ class CommandPolicy(BaseModel):
         "flutter --version", "flutter doctor",
         "python --version",
     ])
-    deny: List[str] = Field(default_factory=lambda: [
+    deny: list[str] = Field(default_factory=lambda: [
         "shutdown", "reboot", "restart-computer", "stop-computer",
         "format", "format-volume", "reg delete", "net user",
         "net localgroup administrators", "clear-eventlog",
         "remove-item -recurse -force", "rm -rf", "rm -r -f"
     ])
-    require_flag_approval: List[str] = Field(default_factory=lambda: [
+    require_flag_approval: list[str] = Field(default_factory=lambda: [
         "-force", "-f", "/f", "/q", "-recurse -force"
     ])
     # General-purpose interpreters require an explicit HITL execute-approval ticket
     # (session grant) before sh_exec/sh_session_send will run them, even though they
     # remain in allow_prefix. See security.validate_shell_execution() in security.py.
-    approval_required_prefix: List[str] = Field(default_factory=lambda: ["python", "node", "bash"])
+    approval_required_prefix: list[str] = Field(default_factory=lambda: ["python", "node", "bash"])
 
     def is_command_allowed(self, command: str) -> tuple[bool, str]:
         cmd_lower = command.strip().lower()
@@ -140,8 +139,8 @@ class CommandPolicy(BaseModel):
 
 
 class SecurityConfig(BaseModel):
-    paths_allow: List[str] = Field(default_factory=_default_paths_allow)
-    paths_deny: List[str] = Field(default_factory=_default_paths_deny)
+    paths_allow: list[str] = Field(default_factory=_default_paths_allow)
+    paths_deny: list[str] = Field(default_factory=_default_paths_deny)
     # Excepcion acotada a paths_deny, para necesidades legitimas como verificar
     # artefactos de build de un proyecto (.NET, etc.) sin abrir **\bin\**/**\obj\**
     # en general -- eso sigue bloqueado para todo lo demas (node_modules,
@@ -151,8 +150,8 @@ class SecurityConfig(BaseModel):
     # ejecucion -- ver SecurityValidator._deny_exception_applies() en security.py.
     # Vacio por defecto: no cambia el comportamiento existente hasta que se
     # agregue un patron explicitamente.
-    paths_deny_exceptions: List[str] = Field(default_factory=list)
-    paths_deny_exception_extensions: List[str] = Field(default_factory=lambda: [
+    paths_deny_exceptions: list[str] = Field(default_factory=list)
+    paths_deny_exception_extensions: list[str] = Field(default_factory=lambda: [
         ".dll", ".exe", ".pdb"
     ])
     commands: CommandPolicy = Field(default_factory=CommandPolicy)
@@ -164,14 +163,14 @@ class SecurityConfig(BaseModel):
 class ShellConfig(BaseModel):
     enabled: bool = True
     default_shell: str = Field(default_factory=_default_shell)
-    shell_map: Dict[str, str] = Field(default_factory=dict)
+    shell_map: dict[str, str] = Field(default_factory=dict)
     session_timeout_seconds: int = 600
     command_timeout_seconds: int = 120
 
 
 class SSHConfig(BaseModel):
     enabled: bool = False
-    remote_allow_prefix: List[str] = Field(default_factory=lambda: [
+    remote_allow_prefix: list[str] = Field(default_factory=lambda: [
         "ls", "cat", "echo", "pwd", "git", "uptime", "whoami", "uname", "df", "free", "ps", "top"
     ])
 
@@ -197,7 +196,7 @@ class AppConfig(BaseModel):
     audit_max_entries: int = 10000
     data_dir: str = Field(default_factory=lambda: str(Path.home() / ".personal-mcp" / "data"))
 
-    config_path: Optional[str] = None
+    config_path: str | None = None
 
     @classmethod
     def default_path(cls) -> Path:
@@ -209,7 +208,7 @@ class AppConfig(BaseModel):
         return self.default_path()
 
     @classmethod
-    def load(cls, path: Optional[Path] = None) -> "AppConfig":
+    def load(cls, path: Path | None = None) -> "AppConfig":
         path = path or cls.default_path()
         if path.exists():
             with open(path, encoding="utf-8") as f:
@@ -219,7 +218,7 @@ class AppConfig(BaseModel):
         cfg.save(path)
         return cfg
 
-    def save(self, path: Optional[Path] = None) -> None:
+    def save(self, path: Path | None = None) -> None:
         path = path or self.get_config_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:

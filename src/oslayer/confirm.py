@@ -7,7 +7,6 @@ It is NEVER returned in any MCP tool response.
 import os
 import sys
 import threading
-from typing import List
 
 # Threshold for preview in batch popups
 MAX_PREVIEW_FILES = 10
@@ -20,7 +19,7 @@ def _detect_display() -> bool:
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
-def _show_windows(resource: str, operation: str, code: str, batch: bool, files: List[str] | None = None) -> None:
+def _show_windows(resource: str, operation: str, code: str, batch: bool, files: list[str] | None = None) -> None:
     """Windows native MessageBoxW implementation."""
     import ctypes
 
@@ -66,7 +65,7 @@ def _show_windows(resource: str, operation: str, code: str, batch: bool, files: 
     threading.Thread(target=_show, daemon=True).start()
 
 
-def _show_linux(resource: str, operation: str, code: str, batch: bool, files: List[str] | None = None) -> None:
+def _show_linux(resource: str, operation: str, code: str, batch: bool, files: list[str] | None = None) -> None:
     """Linux implementation using zenity, kdialog, notify-send, or file fallback."""
     if batch and files:
         if len(files) <= MAX_PREVIEW_FILES:
@@ -163,7 +162,7 @@ def _show_linux(resource: str, operation: str, code: str, batch: bool, files: Li
     threading.Thread(target=_show, daemon=True).start()
 
 
-def _show_macos(resource: str, operation: str, code: str, batch: bool, files: List[str] | None = None) -> None:
+def _show_macos(resource: str, operation: str, code: str, batch: bool, files: list[str] | None = None) -> None:
     """macOS implementation using osascript."""
     if batch and files:
         if len(files) <= MAX_PREVIEW_FILES:
@@ -230,7 +229,7 @@ def show_confirmation_code(resource: str, operation: str, code: str) -> None:
         _show_linux(resource, operation, code, batch=False)
 
 
-def show_confirmation_code_batch(resources: List[str], operation: str, code: str) -> None:
+def show_confirmation_code_batch(resources: list[str], operation: str, code: str) -> None:
     """Show confirmation code for a batch of resources (fs_delete_batch)."""
     if "PYTEST_CURRENT_TEST" in os.environ:
         return

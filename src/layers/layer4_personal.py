@@ -5,14 +5,13 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from src.config import AppConfig
+from src.secretscanner import scan_and_warn
 from src.security import SecurityValidator
-from src.secretscanner import scan_text, format_findings, scan_and_warn
 
 
 def _scan_and_append(content: str, config: AppConfig, result: str) -> str:
@@ -27,7 +26,7 @@ class Journal:
         self.path.mkdir(parents=True, exist_ok=True)
         self._file = path / "journal.jsonl"
 
-    def add(self, content: str, tags: Optional[List[str]] = None,
+    def add(self, content: str, tags: list[str] | None = None,
             category: str = "general") -> dict:
         tags = tags or []
         entry = {
@@ -42,8 +41,8 @@ class Journal:
         return entry
 
     def list(self, limit: int = 20, offset: int = 0,
-             tag: Optional[str] = None,
-             category: Optional[str] = None) -> list:
+             tag: str | None = None,
+             category: str | None = None) -> list:
         entries = self._load_all()
         if tag:
             entries = [e for e in entries if tag in e.get("tags", [])]
@@ -101,7 +100,7 @@ class Journal:
         return entries
 
 
-def journal_add_impl(content: str, journal: Journal, config: AppConfig, tags: Optional[str] = None,
+def journal_add_impl(content: str, journal: Journal, config: AppConfig, tags: str | None = None,
                      category: str = "general") -> str:
     tag_list = [t.strip() for t in (tags or "").split(",") if t.strip()]
     entry = journal.add(content, tag_list or None, category)
@@ -110,8 +109,8 @@ def journal_add_impl(content: str, journal: Journal, config: AppConfig, tags: Op
 
 
 def journal_list_impl(journal: Journal, limit: int = 20, offset: int = 0,
-                      tag: Optional[str] = None,
-                      category: Optional[str] = None) -> str:
+                      tag: str | None = None,
+                      category: str | None = None) -> str:
     entries = journal.list(limit=limit, offset=offset, tag=tag, category=category)
     if not entries:
         return "No journal entries found"
@@ -205,7 +204,7 @@ _PROJECT_SCAN_CACHE: dict = {}
 _PROJECT_SCAN_CACHE_TTL: float = 30.0
 
 
-async def project_scan_impl(security: SecurityValidator, path: Optional[str] = None) -> str:
+async def project_scan_impl(security: SecurityValidator, path: str | None = None) -> str:
     resolved_path = str(security.resolve_and_validate(path or _default_project_root(security)))
     now = time.time()
     if resolved_path in _PROJECT_SCAN_CACHE:
@@ -226,7 +225,7 @@ async def project_scan_impl(security: SecurityValidator, path: Optional[str] = N
 
 
 
-def _find_files_sync(base: Path, filename: str) -> List[str]:
+def _find_files_sync(base: Path, filename: str) -> list[str]:
     """Walk base.rglob() for filename (blocking I/O) — must run via asyncio.to_thread(),
     same reasoning as _git_project_info: rglob() over C:\\Repos walks every file in
     every project (including node_modules) before the exclusion filter below applies,
@@ -243,7 +242,7 @@ def _find_files_sync(base: Path, filename: str) -> List[str]:
 
 
 async def project_find_impl(filename: str, security: SecurityValidator,
-                            path: Optional[str] = None) -> str:
+                            path: str | None = None) -> str:
     base = Path(security.resolve_and_validate(path or _default_project_root(security)))
     if not base.is_dir():
         return f"Directory not found: {base}"
@@ -259,14 +258,14 @@ def register_personal_tools(mcp: FastMCP, config: AppConfig,
     journal = Journal(Path(config.journal.path))
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
-    async def journal_add(content: str, tags: Optional[str] = None,
+    async def journal_add(content: str, tags: str | None = None,
                           category: str = "general") -> str:
         return journal_add_impl(content, journal, config, tags, category)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
     async def journal_list(limit: int = 20, offset: int = 0,
-                           tag: Optional[str] = None,
-                           category: Optional[str] = None) -> str:
+                           tag: str | None = None,
+                           category: str | None = None) -> str:
         return journal_list_impl(journal, limit, offset, tag, category)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
@@ -286,9 +285,9 @@ def register_personal_tools(mcp: FastMCP, config: AppConfig,
         return note_quick_impl(content, config)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
-    async def project_scan(path: Optional[str] = None) -> str:
+    async def project_scan(path: str | None = None) -> str:
         return await project_scan_impl(security, path)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
-    async def project_find(filename: str, path: Optional[str] = None) -> str:
+    async def project_find(filename: str, path: str | None = None) -> str:
         return await project_find_impl(filename, security, path)

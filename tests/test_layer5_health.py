@@ -6,8 +6,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.audit import AuditLog
-from src.config import AppConfig, SecurityConfig, ShellConfig, SSHConfig, JournalConfig
-from src.layers.layer5_health import _get_version, _get_uptime
+from src.config import AppConfig, JournalConfig, SecurityConfig, ShellConfig, SSHConfig
+from src.layers.layer5_health import _get_uptime, _get_version
 
 
 @pytest.fixture

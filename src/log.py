@@ -3,11 +3,11 @@ import logging.handlers
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Any
+from typing import Any
 
-from src.oslayer.system import available_memory_info, memory_pressure_hint
+from src.oslayer.system import memory_pressure_hint
 
-_logger: Optional[logging.Logger] = None
+_logger: logging.Logger | None = None
 
 
 # Below this = likely resource contention, not a genuine hang; worth saying so.

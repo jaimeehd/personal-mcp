@@ -3,25 +3,25 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import asyncio
+import json
 import os
 import time
-import json
 
 from mcp.server.fastmcp import FastMCP
 
-from src.config import AppConfig
-from src.security import SecurityValidator
 from src.audit import AuditLog
-from src.permissions import PermissionManager
-from src.log import configure as configure_logging, get_logger, memory_pressure_hint
+from src.config import AppConfig
 from src.layers.layer1_filesystem import register_filesystem_tools
 from src.layers.layer2_shell import ShellManager, register_shell_tools
 from src.layers.layer3_ssh import SSHManager, register_ssh_tools
-from src.shell_resolver import resolve_shell
 from src.layers.layer4_personal import register_personal_tools
 from src.layers.layer5_health import register_health_tools
 from src.layers.layer6_permissions import register_permission_tools
+from src.log import configure as configure_logging
+from src.log import get_logger, memory_pressure_hint
+from src.permissions import PermissionManager
+from src.security import SecurityValidator
+from src.shell_resolver import resolve_shell
 
 
 class AuditedFastMCP(FastMCP):

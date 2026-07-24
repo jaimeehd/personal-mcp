@@ -6,18 +6,29 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.layers.layer1_filesystem import (
-    fs_read_impl, fs_write_impl, fs_edit_impl, fs_list_impl,
-    fs_tree_impl, fs_search_impl, fs_find_impl, fs_info_impl,
-    fs_diff_impl, fs_batch_impl, fs_snapshot_impl,
-    fs_create_directory_impl, fs_move_impl, fs_read_multi_impl,
-    fs_list_allowed_impl, fs_list_with_sizes_impl, fs_read_media_impl,
-    fs_edit_advanced_impl,
-)
-from src.security import PathNotAllowedError
 from src.config import AppConfig, SecurityConfig
-from src.security import SecurityValidator
+from src.layers.layer1_filesystem import (
+    fs_batch_impl,
+    fs_create_directory_impl,
+    fs_diff_impl,
+    fs_edit_advanced_impl,
+    fs_edit_impl,
+    fs_find_impl,
+    fs_info_impl,
+    fs_list_allowed_impl,
+    fs_list_impl,
+    fs_list_with_sizes_impl,
+    fs_move_impl,
+    fs_read_impl,
+    fs_read_media_impl,
+    fs_read_multi_impl,
+    fs_search_impl,
+    fs_snapshot_impl,
+    fs_tree_impl,
+    fs_write_impl,
+)
 from src.permissions import GrantLevel, PermissionManager
+from src.security import PathNotAllowedError, SecurityValidator
 
 
 @pytest.fixture
@@ -111,8 +122,9 @@ async def test_search_timeout(monkeypatch, sample_dir, sec):
     # message instead of hanging the event loop when the search takes too long.
     # A mocked slow search is used instead of a real catastrophic-backtracking
     # pattern to keep the test fast and deterministic.
-    import src.layers.layer1_filesystem as layer1
     import time as time_module
+
+    import src.layers.layer1_filesystem as layer1
 
     monkeypatch.setattr(layer1, "_SEARCH_TIMEOUT_SECONDS", 0.05)
 

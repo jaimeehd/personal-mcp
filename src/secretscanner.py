@@ -1,7 +1,6 @@
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 
 @dataclass
@@ -13,10 +12,10 @@ class SecretFinding:
     column: int = 0
 
 
-_PATTERNS: List[Tuple[re.Pattern, str, str]] = []
+_PATTERNS: list[tuple[re.Pattern, str, str]] = []
 
 
-def _compile(patterns: List[Tuple[str, str, str]]) -> None:
+def _compile(patterns: list[tuple[str, str, str]]) -> None:
     for regex_str, type_name, severity in patterns:
         try:
             _PATTERNS.append((re.compile(regex_str), type_name, severity))
@@ -42,7 +41,7 @@ _SECRET_PATTERNS = [
 _compile(_SECRET_PATTERNS)
 
 
-def scan_text(content: str, filepath: Optional[str] = None) -> List[SecretFinding]:
+def scan_text(content: str, filepath: str | None = None) -> list[SecretFinding]:
     if not content:
         return []
     findings = []
@@ -64,7 +63,7 @@ def scan_text(content: str, filepath: Optional[str] = None) -> List[SecretFindin
     return findings
 
 
-def scan_file(path: Path) -> List[SecretFinding]:
+def scan_file(path: Path) -> list[SecretFinding]:
     try:
         content = path.read_text("utf-8", errors="replace")
         return scan_text(content, str(path))
@@ -72,7 +71,7 @@ def scan_file(path: Path) -> List[SecretFinding]:
         return []
 
 
-def format_findings(findings: List[SecretFinding]) -> str:
+def format_findings(findings: list[SecretFinding]) -> str:
     """Format findings into the standard warning block appended to tool output.
     Shared by fs_read (file content) and sh_exec/sh_script (command output) so the
     format stays consistent and isn't duplicated across call sites.

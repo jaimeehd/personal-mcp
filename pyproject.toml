@@ -29,3 +29,17 @@ testpaths = ["tests"]
 
 [tool.pytest-asyncio]
 default_async_timeout = 30
+
+[tool.ruff.lint]
+ignore = [
+    "BLE001",   # Intentional: defensive try-except in OS-specific code
+    "S110",     # Intentional: silent fail for OS calls, secret scanner, etc.
+    "DTZ005",   # Intentional: naive datetime for local timestamps in health check
+    "DTZ006",   # Intentional: naive datetime for file timestamps
+    "ASYNC230", # Intentional: file I/O in async functions wrapped in to_thread
+    "ASYNC221", # Intentional: subprocess in health tools run sync
+    "PLW1510",  # Intentional: subprocess.run() without explicit check= (default is False)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["RUF013"]  # Intentional: implicit Optional in test helpers

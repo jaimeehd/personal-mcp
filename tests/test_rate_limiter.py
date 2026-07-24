@@ -1,8 +1,6 @@
 from itertools import count
 from unittest.mock import patch
 
-import pytest
-
 from src.security import RateLimitError
 
 

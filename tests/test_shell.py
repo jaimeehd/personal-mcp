@@ -8,15 +8,21 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.config import AppConfig, SecurityConfig, ShellConfig
-from src.security import SecurityValidator, CommandNotAllowedError
-from src.shell_resolver import ShellInfo, resolve_shell
 from src.layers.layer2_shell import (
-    ShellManager, sh_exec_impl, sh_session_start_impl,
-    sh_session_list_impl, sh_session_send_impl, sh_session_close_impl,
-    sh_script_impl, sh_history_impl,
-    _truncate, _scan_command_warnings, MAX_CAPTURE_BYTES,
+    ShellManager,
+    _scan_command_warnings,
+    _truncate,
+    sh_exec_impl,
+    sh_history_impl,
+    sh_script_impl,
+    sh_session_close_impl,
+    sh_session_list_impl,
+    sh_session_send_impl,
+    sh_session_start_impl,
 )
 from src.oslayer import kill_process_tree
+from src.security import CommandNotAllowedError, SecurityValidator
+from src.shell_resolver import resolve_shell
 
 
 @pytest.fixture
@@ -70,7 +76,7 @@ async def test_sh_session_send(sec, manager):
     result = await sh_session_start_impl(manager)
     data = json.loads(result)
     sid = data["session_id"]
-    output = await sh_session_send_impl(sid, "echo test123", manager, sec)
+    await sh_session_send_impl(sid, "echo test123", manager, sec)
     await sh_session_close_impl(sid, manager)
 
 
@@ -88,7 +94,7 @@ async def test_sh_session_expired(sec):
     manager = ShellManager(sec, default_timeout=0)
     result = await sh_session_start_impl(manager)
     data = json.loads(result)
-    sid = data["session_id"]
+    data["session_id"]
     listing = await sh_session_list_impl(manager)
     assert "No active sessions" in listing
 
@@ -172,8 +178,8 @@ async def test_sh_exec_argv_fallback_shell(sec, manager):
 @pytest.mark.asyncio
 async def test_sh_exec_argv_with_working_dir(sec, manager):
     """argv execution with cwd parameter (cwd via create_subprocess_exec)."""
-    import tempfile
     import os
+    import tempfile
     tmpdir = tempfile.mkdtemp()
     result = await sh_exec_impl(
         'python -c "import os; print(os.getcwd())"',

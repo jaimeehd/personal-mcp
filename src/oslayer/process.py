@@ -1,7 +1,4 @@
 import asyncio
-import os
-import sys
-from typing import Optional
 
 import psutil
 
@@ -27,7 +24,7 @@ async def reap_after_kill(process: asyncio.subprocess.Process) -> None:
     """Wait for process to be reaped after kill to avoid handle leaks."""
     try:
         await asyncio.wait_for(process.wait(), timeout=10)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pass
     except Exception:
         pass

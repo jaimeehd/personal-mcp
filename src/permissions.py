@@ -1,13 +1,11 @@
+import fnmatch
 import hashlib
 import hmac
-import json
 import secrets
 import time
 import uuid
-import fnmatch
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Set
 
 from src.config import AppConfig
 from src.confirm_popup import show_confirmation_code, show_confirmation_code_batch
@@ -23,7 +21,7 @@ class PermissionTicket:
     def __init__(self, resource: str, operation: str,
                  level: GrantLevel = GrantLevel.SINGLE,
                  ttl_seconds: int = 300,
-                 resources: Optional[List[str]] = None):
+                 resources: list[str] | None = None):
         self.id = f"perm_{uuid.uuid4().hex[:8]}"
         self.resource = resource
         # Batch ticket: resources is the real, complete list this ticket is bound
@@ -36,10 +34,10 @@ class PermissionTicket:
         self.created_at = time.time()
         self.expires_at = time.time() + ttl_seconds
         self.status = "pending"
-        self.resolved_path: Optional[str] = None
+        self.resolved_path: str | None = None
         # Generado por PermissionManager al crear el ticket; nunca se expone
         # en to_dict() ni en ningun tool MCP. Ver src/confirm_popup.py.
-        self.confirm_code: Optional[str] = None
+        self.confirm_code: str | None = None
 
     @property
     def is_expired(self) -> bool:
@@ -64,9 +62,9 @@ class PermissionTicket:
 class PermissionManager:
     def __init__(self, config: AppConfig):
         self.config = config
-        self._tickets: Dict[str, PermissionTicket] = {}
-        self._session_grants: Dict[str, Set[str]] = {}
-        self._single_grants: Dict[str, Dict[str, int]] = {}
+        self._tickets: dict[str, PermissionTicket] = {}
+        self._session_grants: dict[str, set[str]] = {}
+        self._single_grants: dict[str, dict[str, int]] = {}
         # Clave HMAC en memoria, generada al arrancar el proceso. Nunca se
         # persiste a disco ni se expone via ningun tool: es lo que impide
         # que un agente adivine o derive el confirm_code de un ticket.
@@ -91,7 +89,7 @@ class PermissionManager:
         show_confirmation_code(ticket.resource, ticket.operation, ticket.confirm_code)
         return ticket
 
-    def request_batch(self, resources: List[str], operation: str,
+    def request_batch(self, resources: list[str], operation: str,
                        level: GrantLevel = GrantLevel.SINGLE) -> PermissionTicket:
         """Same contract as request(), for a call that needs to touch several
         enumerated resources under one ticket/one confirm_code - e.g. fs_delete_batch.
@@ -112,8 +110,8 @@ class PermissionManager:
         return ticket
 
     def approve(self, ticket_id: str,
-                level: Optional[GrantLevel] = None,
-                confirm_code: Optional[str] = None) -> tuple[bool, str]:
+                level: GrantLevel | None = None,
+                confirm_code: str | None = None) -> tuple[bool, str]:
         ticket = self._tickets.get(ticket_id)
         if not ticket:
             return False, f"Ticket not found: {ticket_id}"
@@ -219,8 +217,8 @@ class PermissionManager:
             pass
         return False
 
-    def pending(self) -> List[dict]:
-        now = time.time()
+    def pending(self) -> list[dict]:
+        time.time()
         valid = []
         for ticket in self._tickets.values():
             if ticket.status == "pending" and not ticket.is_expired:

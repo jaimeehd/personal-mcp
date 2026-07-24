@@ -5,7 +5,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.shell_resolver import ShellInfo, resolve_shell, _find_executable, tokenize_command, has_shell_operators
+from src.shell_resolver import (
+    _find_executable,
+    has_shell_operators,
+    resolve_shell,
+    tokenize_command,
+)
 
 
 def test_resolve_powershell_default():

@@ -1,6 +1,4 @@
 import json
-from pathlib import Path
-from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -21,12 +19,12 @@ def register_permission_tools(mcp: FastMCP, security: SecurityValidator,
         if gl == GrantLevel.PERMANENT:
             return ("Permanent grants are disabled from tool calls. "
                     "Edit ~/.personal-mcp/config.json directly to add paths.")
-        ok, msg = perm_manager.approve(ticket_id, gl, confirm_code)
+        _ok, msg = perm_manager.approve(ticket_id, gl, confirm_code)
         return msg
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True))
     async def fs_deny(ticket_id: str) -> str:
-        ok, msg = perm_manager.deny(ticket_id)
+        _ok, msg = perm_manager.deny(ticket_id)
         return msg
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))

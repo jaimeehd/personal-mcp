@@ -2,7 +2,6 @@ import asyncio
 import json
 import uuid
 from pathlib import Path
-from typing import Dict, Optional
 
 from mcp.server.fastmcp import FastMCP
 
@@ -13,7 +12,7 @@ class SSHSession:
     def __init__(self, session_id: str, host: str):
         self.session_id = session_id
         self.host = host
-        self._process: Optional[asyncio.subprocess.Process] = None
+        self._process: asyncio.subprocess.Process | None = None
 
     async def connect(self) -> str:
         self._process = await asyncio.create_subprocess_exec(
@@ -30,7 +29,7 @@ class SSHSession:
     async def execute(self, command: str, timeout: int = 30) -> str:
         if not self._process or not self._process.stdin:
             return "Not connected"
-        self._process.stdin.write(f"{command}\n".encode("utf-8"))
+        self._process.stdin.write(f"{command}\n".encode())
         await self._process.stdin.drain()
         lines = []
         try:
@@ -41,7 +40,7 @@ class SSHSession:
                 if not line:
                     break
                 lines.append(line.decode("utf-8", errors="replace").rstrip())
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
         return "\n".join(lines) if lines else "(no output)"
 
@@ -49,20 +48,20 @@ class SSHSession:
         if self._process:
             if self._process.stdin:
                 try:
-                    self._process.stdin.write("exit\n".encode("utf-8"))
+                    self._process.stdin.write(b"exit\n")
                     await self._process.stdin.drain()
                 except OSError:
                     pass
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._process.kill()
 
 
 class SSHManager:
     def __init__(self, config: AppConfig):
         self.config = config
-        self._sessions: Dict[str, SSHSession] = {}
+        self._sessions: dict[str, SSHSession] = {}
 
     def is_available(self) -> bool:
         if not self.config.ssh.enabled:

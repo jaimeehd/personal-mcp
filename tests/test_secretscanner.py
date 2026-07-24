@@ -1,6 +1,5 @@
-from pathlib import Path
 
-from src.secretscanner import scan_text, scan_file, SecretFinding
+from src.secretscanner import SecretFinding, scan_file, scan_text
 
 
 def test_finds_github_token():

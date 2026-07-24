@@ -13,6 +13,7 @@ from src.shell_resolver import (
 )
 
 
+@pytest.mark.usefixtures("skip_on_linux")
 def test_resolve_powershell_default():
     info = resolve_shell("powershell")
     assert info.name == "powershell"
@@ -32,6 +33,7 @@ def test_resolve_pwsh():
     assert "Set-Location" in info.workdir_prefix
 
 
+@pytest.mark.usefixtures("skip_on_linux")
 def test_resolve_cmd():
     info = resolve_shell("cmd")
     assert info.name == "cmd"
@@ -45,11 +47,13 @@ def test_resolve_unknown():
         resolve_shell("nonexistent_shell")
 
 
+@pytest.mark.usefixtures("skip_on_linux")
 def test_resolve_with_shell_map():
     info = resolve_shell("powershell", shell_map={"powershell": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"})
     assert info.executable.lower().endswith("powershell.exe")
 
 
+@pytest.mark.usefixtures("skip_on_linux")
 def test_find_executable_powershell():
     path = _find_executable("powershell")
     assert path is not None

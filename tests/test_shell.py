@@ -136,14 +136,16 @@ async def test_sh_exec_truncated(sec, manager):
 
 # --- Mejora 2: Shell detection ---
 
-@ pytest.mark.asyncio
+@ pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.asyncio
 async def test_sh_exec_cmd_shell(sec, manager):
     cmd_shell = resolve_shell("cmd")
     result = await sh_exec_impl("echo hello_cmd", sec, timeout=10, shell_info=cmd_shell)
     assert "hello_cmd" in result
 
 
-@ pytest.mark.asyncio
+@ pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.asyncio
 async def test_sh_session_cmd_rejected(sec):
     cmd_shell = resolve_shell("cmd")
     mgr = ShellManager(sec, default_timeout=300, shell_info=cmd_shell)
@@ -152,6 +154,7 @@ async def test_sh_session_cmd_rejected(sec):
     assert "error" in data
 
 
+@pytest.mark.usefixtures("skip_on_linux")
 @pytest.mark.asyncio
 async def test_sh_exec_cmd_basic(sec, manager):
     cmd_shell = resolve_shell("cmd")
@@ -212,7 +215,8 @@ def test_scan_command_warnings_external_path(sec, temp_home):
 
 # --- Mejora 4: Kill recursivo ---
 
-@ pytest.mark.asyncio
+@pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.asyncio
 async def test_kill_process_tree(sec):
     proc = await asyncio.create_subprocess_exec(
         "powershell.exe", "-NoProfile", "-Command",
@@ -228,6 +232,7 @@ async def test_kill_process_tree(sec):
 
 # --- Shell switching — parámetro shell en tools ---
 
+@pytest.mark.usefixtures("skip_on_linux")
 @pytest.mark.asyncio
 async def test_sh_script_with_cmd_shell(sec, manager):
     cmd_shell = resolve_shell("cmd")
@@ -235,6 +240,7 @@ async def test_sh_script_with_cmd_shell(sec, manager):
     assert "hello_script_cmd" in result
 
 
+@pytest.mark.usefixtures("skip_on_linux")
 @pytest.mark.asyncio
 async def test_manager_resolve_shell(sec):
     mgr = ShellManager(sec, default_timeout=300)
@@ -255,6 +261,7 @@ def test_resolve_shell_invalid_name():
         resolve_shell("nonexistent_shell")
 
 
+@pytest.mark.usefixtures("skip_on_linux")
 @pytest.mark.asyncio
 async def test_sh_session_start_with_shell_param(sec):
     si = resolve_shell("cmd")

@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import shutil
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -183,14 +184,23 @@ class ShellManager:
 
     @staticmethod
     def _default_shell() -> ShellInfo:
+        if sys.platform == "win32":
+            try:
+                return resolve_shell("powershell")
+            except ValueError:
+                return ShellInfo(name="powershell", executable="powershell.exe",
+                                 command_args=["-NoProfile", "-Command"],
+                                 session_args=["-NoExit", "-Command", "-"],
+                                 script_args=["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"],
+                                 workdir_prefix='Set-Location -LiteralPath "{wd}"; ')
         try:
-            return resolve_shell("powershell")
+            return resolve_shell("bash")
         except ValueError:
-            return ShellInfo(name="powershell", executable="powershell.exe",
-                             command_args=["-NoProfile", "-Command"],
-                             session_args=["-NoExit", "-Command", "-"],
-                             script_args=["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"],
-                             workdir_prefix='Set-Location -LiteralPath "{wd}"; ')
+            return ShellInfo(name="bash", executable="/bin/bash",
+                             command_args=["-c"],
+                             session_args=[],
+                             script_args=[],
+                             workdir_prefix='cd "{wd}"; ')
 
     async def create_session(self, timeout: int | None = None,
                              shell_info: ShellInfo | None = None) -> ShellSession | None:
@@ -375,10 +385,7 @@ async def sh_script_impl(script: str, security: SecurityValidator, timeout: int 
             f"{readonly_reason}. Use sh_exec for commands that modify state."
         )
     logger.info("sh_script script=%.100s shell=%s timeout=%d", sanitize_log_value(script), shell_info.name if shell_info else "default", timeout)
-    si = shell_info or ShellInfo(name="powershell", executable="powershell.exe",
-                                  command_args=[], session_args=[],
-                                  script_args=["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"],
-                                  workdir_prefix='Set-Location -LiteralPath "{wd}"; ')
+    si = shell_info or ShellManager._default_shell()
     full_script = script
     if working_dir:
         safe_wd = _escape_workdir(working_dir, si.name)

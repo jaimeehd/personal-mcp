@@ -157,7 +157,7 @@ def _default_project_root(security: SecurityValidator) -> str:
     Uses the first entry in paths_allow (the real source of truth for what this
     server can access) instead of a hardcoded Path.home()/"Repos" literal, which
     silently drifted from the live config once paths_allow was narrowed to a
-    single custom directory (e.g. C:\Repos). Falls back to Path.home()/"Repos"
+    single custom directory (e.g. C:\\Repos). Falls back to Path.home()/"Repos"
     only if paths_allow is empty — a misconfigured-server case where no default
     could be correct anyway; resolve_and_validate() will reject it with the same
     clear error it already produces today.

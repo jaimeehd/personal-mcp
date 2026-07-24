@@ -104,6 +104,31 @@ cd C:\Repos\.personal-mcp
   - **Log injection via newline-containing arguments** (`INJ-05`, LOW). `layer2_shell.py`'s `logger.info("sh_exec command=%.200s ...", command, ...)` interpolated the raw command via `%s` with no escaping — a command containing `\n` could forge a fake log line. Fixed via `sanitize_log_value()` (`log.py`), applied at both `sh_exec`/`sh_script` logging call sites.
   - Full detail and PoC-level reasoning for all 5 findings (including the two already merged above): `CHANGELOG.md` entry `[1.4.9]`.
 
+## npm / pnpm run dev — flujo de ejecución y gate de aprobación
+
+`npm` y `pnpm` están en `allow_prefix` — pasan la whitelist de comandos sin ticket.
+
+Sin embargo, ambos lanzan Node internamente al ejecutar scripts como `run dev`.
+`node` está en `approval_required_prefix` (default del código, no sobreescrito en el
+config actual) → `sh_exec`/`sh_session_send` generan un ticket de `execute` antes de
+que el proceso arranque.
+
+**Flujo recomendado (Opción A — sin cambio de config):**
+1. `sh_session_start(shell="powershell")` → obtén el `session_id`
+2. `sh_session_send(session_id, "cd C:\Repos\TuProyecto")`
+3. `sh_session_send(session_id, "npm run dev")` (o `pnpm run dev`)
+4. Cuando aparezca el ticket de `execute`, aprobarlo con `level="session"`
+   — válido para toda la sesión activa de Claude, sin nuevo popup por comando
+5. `sh_session_read(session_id)` para leer output cuando se necesite
+
+Usar `sh_exec` también funciona pero el proceso muere al cumplirse el timeout
+(`command_timeout_seconds: 120` en el config actual). Para dev servers de larga
+duración, `sh_session_start` es el canal correcto.
+
+**Opción B (cambio de config):** eliminar `node` de `approval_required_prefix` en
+`~/.personal-mcp/config.json` — elimina el gate para todo lo que arranque Node.
+No recomendado si se ejecutan scripts arbitrarios además de comandos conocidos.
+
 ## Regla obligatoria antes de eliminar cualquier símbolo
 Antes de eliminar una función, clase, método o constante:
 1. Busca el nombre exacto del símbolo en src/ Y tests/ (no solo donde ya se sabe que se usa)

@@ -1,3 +1,32 @@
+## [1.4.33] — 2026-07-24
+
+### Added — Cross-platform support (Linux/macOS) + documentation & licensing
+- **OS Abstraction Layer (`src/oslayer/`)**:
+  - `confirm.py`: Cross-platform confirmation code display — Windows (MessageBoxW), Linux (zenity/kdialog/notify-send/fallback), macOS (osascript). Runs in daemon thread, never returns code via MCP.
+  - `system.py`: Memory info (`GlobalMemoryStatusEx` / `/proc/meminfo`), uptime (`GetTickCount64` / `/proc/uptime`), memory pressure hint — zero subprocesses.
+  - `process.py`: Process tree kill + reap via `psutil` (cross-platform, replaces Windows-only `taskkill /T /F`).
+- **Shell Resolver Multiplataforma (`src/shell_resolver.py`)**:
+  - `SHELL_REGISTRY` now supports Linux shells (bash, zsh, fish, sh) alongside Windows (powershell, pwsh, cmd, Git Bash).
+  - `_find_executable()` generic via `shutil.which()`, platform-aware `get_default_shell()`.
+- **Health Tools Adaptados (`src/layers/layer5_health.py`)**:
+  - `health_processes` and `mcp_benchmark` use platform-appropriate commands.
+- **Instaladores**:
+  - `install.sh` — Linux/macOS installer (venv, config, Claude Desktop registration).
+  - `sync-config.sh` — Linux/macOS config mirror sync.
+- **CI matrix** (`.github/workflows/ci.yml`): Ubuntu + Windows, Python 3.10–3.13.
+- **Config defaults** (`src/config.py`): `shell.default_shell` auto-detects per platform (`bash` on Linux, `powershell` on Windows).
+- Tests: 285/285 passing.
+
+### Fixed — Process cleanup broken on timeout (regression from Phase 1)
+- Four call sites in `layer2_shell.py` (lines 163-164, 277-278, 309-310, 408-409) still referenced `_kill_process_tree`/`_reap_after_kill` (old names with underscore prefix) after the functions were moved from `layer2_shell.py` to `src/oslayer/process.py` and renamed to `kill_process_tree`/`reap_after_kill` (without underscore). The import was correct; the call sites were never updated.
+- **Impact**: Any timeout in `sh_exec` (both native-argv and shell-fallback paths), `sh_script`, or forced `ShellSession.close()` raised `NameError` instead of killing the process tree — leaving orphaned processes and unreleased async I/O handles, exactly the bug class fixed in v1.4.19/1.4.20.
+- Verified: `grep` confirms zero remaining references to the old names in `src/`.
+
+### Documentation
+- `LINUX-PLAN.md` rewritten to reflect completed implementation — now serves as architecture reference.
+- `LICENSE` added (MIT).
+- `CHANGELOG.md` updated with this entry.
+
 ## [1.4.32] — 2026-07-21
 
 ### Added — Performance & Security Hardening (Subprocess Elimination, AST Script Analyzer, Remote SSH Filtering)

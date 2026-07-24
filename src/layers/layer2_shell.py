@@ -160,8 +160,8 @@ class ShellSession:
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5)
             except asyncio.TimeoutError:
-                await _kill_process_tree(self._process.pid)
-                await _reap_after_kill(self._process)
+                await kill_process_tree(self._process.pid)
+                await reap_after_kill(self._process)
 
 
 class ShellManager:
@@ -274,8 +274,8 @@ async def sh_exec_impl(command: str, security: SecurityValidator, timeout: int =
                     result = _append_secret_scan(result, out + "\n" + err, security, "sh_exec")
                     return result
                 except asyncio.TimeoutError:
-                    await _kill_process_tree(process.pid)
-                    await _reap_after_kill(process)
+                    await kill_process_tree(process.pid)
+                    await reap_after_kill(process)
                     return f"Command timed out after {timeout}s{memory_pressure_hint()}"
 
     # Fallback: shell execution
@@ -306,8 +306,8 @@ async def sh_exec_impl(command: str, security: SecurityValidator, timeout: int =
         result = _append_secret_scan(result, out + "\n" + err, security, "sh_exec")
         return result
     except asyncio.TimeoutError:
-        await _kill_process_tree(process.pid)
-        await _reap_after_kill(process)
+        await kill_process_tree(process.pid)
+        await reap_after_kill(process)
         return f"Command timed out after {timeout}s{memory_pressure_hint()}"
 
 
@@ -405,8 +405,8 @@ async def sh_script_impl(script: str, security: SecurityValidator, timeout: int 
         result = _append_secret_scan(result, out + "\n" + err, security, "sh_script")
         return result
     except asyncio.TimeoutError:
-        await _kill_process_tree(process.pid)
-        await _reap_after_kill(process)
+        await kill_process_tree(process.pid)
+        await reap_after_kill(process)
         return f"Script timed out after {timeout}s{memory_pressure_hint()}"
     finally:
         exists = await asyncio.to_thread(temp_file.exists)

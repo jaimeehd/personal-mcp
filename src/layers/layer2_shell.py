@@ -345,11 +345,15 @@ async def sh_session_list_impl(manager: ShellManager) -> str:
 
 
 async def sh_session_send_impl(session_id: str, command: str, manager: ShellManager,
-                               security: SecurityValidator, timeout: int = 30) -> str:
+                               security: SecurityValidator, timeout: int = 30,
+                               working_dir: str | None = None) -> str:
     security.validate_command(command)
     session = manager.get_session(session_id)
     if not session:
         return f"Session not found or expired: {session_id[:8]}..."
+    if working_dir:
+        safe_wd = _escape_workdir(working_dir, session.shell_info.name)
+        command = session.shell_info.workdir_prefix.replace("{wd}", safe_wd) + command
     return await session.execute(command, timeout=timeout)
 
 
@@ -491,7 +495,12 @@ def register_shell_tools(mcp: FastMCP, security: SecurityValidator,
         return await sh_session_list_impl(manager)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
-    async def sh_session_send(session_id: str, command: str, timeout: int = 30) -> str:
+    async def sh_session_send(session_id: str, command: str, timeout: int = 30,
+                              working_dir: str | None = None) -> str:
+        if working_dir:
+            err = security.validate_tool_path(working_dir)
+            if err:
+                return err
         err = _validate_command_paths(command, security)
         if err:
             return err
@@ -499,7 +508,7 @@ def register_shell_tools(mcp: FastMCP, security: SecurityValidator,
         if err:
             return err
         warnings = _scan_command_warnings(command, security)
-        result = await sh_session_send_impl(session_id, command, manager, security, timeout)
+        result = await sh_session_send_impl(session_id, command, manager, security, timeout, working_dir)
         wtext = _format_warnings(warnings)
         if wtext:
             result = wtext + "\n" + result

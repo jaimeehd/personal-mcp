@@ -1,3 +1,12 @@
+## [1.4.34] — 2026-07-25
+
+### Added — `working_dir` en `sh_session_send`
+- **`sh_session_send` ahora acepta `working_dir: str | None = None`** — paridad con `sh_exec` y `sh_script`.
+- El parámetro es validado por `security.validate_tool_path()` antes de ejecutar — misma superficie de seguridad que los otros tools.
+- El cambio de directorio se implementa prepending `workdir_prefix` al comando (reutiliza `_escape_workdir` con el fix INJ-02 ya aplicado) — por-comando, no persistente en la sesión.
+- **Motivación:** `sh_session_send` sin `working_dir` ejecutaba en el directorio del servidor MCP; no había forma de correr `npm run dev` / `pnpm run dev` en un proyecto específico sin agregar `Set-Location` a `allow_prefix` (lo que abriría evasión de `paths_allow` en sesiones interactivas).
+- Cambios: `sh_session_send_impl` (parámetro + lógica), wrapper `sh_session_send` (parámetro + validación).
+
 ## [1.4.33] — 2026-07-24
 
 ### Added — Cross-platform support (Linux/macOS) + documentation & licensing

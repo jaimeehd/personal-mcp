@@ -129,6 +129,38 @@ duración, `sh_session_start` es el canal correcto.
 `~/.personal-mcp/config.json` — elimina el gate para todo lo que arranque Node.
 No recomendado si se ejecutan scripts arbitrarios además de comandos conocidos.
 
+## sh_spawn — idea diferida (no implementada)
+
+**Problema que resolvería:** arrancar procesos de larga duración (dev servers, watchers)
+desde el MCP y leer su output en llamadas posteriores sin que el proceso muera al
+cumplirse el timeout de `sh_exec`.
+
+**Por qué no se implementó (2026-07-25):** el caso de uso principal es arrancar
+`pnpm run dev` / `npm run dev`, lo que el usuario ya hace en dos segundos desde su
+terminal. El coste de implementación y mantenimiento no justifica el beneficio para
+ese caso.
+
+**Diseño acordado si se retoma:**
+- Tres tools: `sh_spawn(command, working_dir)` → `spawn_id`, `sh_spawn_read(spawn_id)`,
+  `sh_spawn_kill(spawn_id)`. Cuarto tool `sh_spawn_list` para recuperar spawn_ids perdidos
+  en contextos largos.
+- Clase `SpawnedProcess` análoga a `ShellSession` pero sin stdin — proceso independiente
+  con reader task y output buffer.
+- `SpawnManager` integrado en `ShellManager` con dict `_spawned`.
+
+**Requisitos de seguridad antes de implementar:**
+1. Registro de PIDs activos en `data_dir` + cleanup al arrancar el servidor — sin esto
+   los procesos quedan huérfanos si el servidor MCP se reinicia.
+2. Ring buffer con tamaño máximo en el output queue — un proceso verboso llena memoria
+   indefinidamente con un Queue sin límite.
+3. `sh_spawn` excluido del wildcard `"*"` en grants de sesión — igual que `fs_delete`
+   y `execute`. Un proceso de background pre-aprobado para toda la sesión es superficie
+   de abuso.
+
+**Caso de uso que justificaría retomar:** Claude necesita arrancar un servidor,
+ejecutar tests de integración contra él, y apagarlo — todo en una sola operación
+sin intervención del usuario.
+
 ## Regla obligatoria antes de eliminar cualquier símbolo
 Antes de eliminar una función, clase, método o constante:
 1. Busca el nombre exacto del símbolo en src/ Y tests/ (no solo donde ya se sabe que se usa)

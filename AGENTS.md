@@ -17,11 +17,11 @@ cd C:\Repos\.personal-mcp
 .\sync-config.ps1                                 # refrescar el espejo de solo lectura config.json desde ~/.personal-mcp/config.json
 ```
 
-## Arquitectura — 6 capas hexagonales, 56 tools (52 activas — las 4 de SSH deshabilitadas por defecto)
+## Arquitectura — 6 capas hexagonales, 57 tools (53 activas — las 4 de SSH deshabilitadas por defecto)
 | Capa | Archivo | Tools | Frontera de seguridad |
 |------|---------|-------|------------------------|
 | 1 Filesystem | `layer1_filesystem.py` | 20 | `resolve_and_validate()` en cada ruta |
-| 2 Shell | `layer2_shell.py` + `shell_resolver.py` | 9 | lista de denegación de comandos + escaneo de rutas + multi-shell (powershell/pwsh/cmd/bash) |
+| 2 Shell | `layer2_shell.py` + `shell_resolver.py` | 10 | lista de denegación de comandos + escaneo de rutas + multi-shell (powershell/pwsh/cmd/bash) |
 | 3 SSH | `layer3_ssh.py` | 4 | deshabilitado por defecto (`ssh.enabled: false`) |
 | 4 Personal | `layer4_personal.py` | 8 | diario, notas, escaneo de proyectos |
 | 5 Health | `layer5_health.py` | 9 | diagnóstico, auditoría, benchmark, log tail (`mcp_log`) |
@@ -63,7 +63,7 @@ cd C:\Repos\.personal-mcp
 - `src/shell_resolver.py` — dataclass `ShellInfo`, `SHELL_REGISTRY` (4 shells), `resolve_shell()`, `_find_executable()`, `_find_git_bash()`. `_find_git_bash()` ejecuta un `subprocess.run(timeout=5)` **síncrono** — cualquier llamador debe envolver `resolve_shell()` en `asyncio.to_thread()` al llamar desde un `async def` (regresión corregida en v1.4.28 en `sh_exec`/`sh_script`/`sh_session_start`; si se agrega un nuevo punto de llamada, verificar esto primero).
 - `src/config.py:LogConfig` — `level`, `max_bytes`, `backup_count` para logging estructurado
 - `src/config.py:ShellConfig` — `default_shell` (string), `shell_map` (dict para rutas personalizadas)
-- `src/layers/layer2_shell.py` — `MAX_CAPTURE_BYTES=1MiB`, `_truncate()`, `_kill_process_tree()` (taskkill /T /F, `stdin=DEVNULL` desde v1.4.19), `_reap_after_kill()` (desde v1.4.20 — debe llamarse después de cada `_kill_process_tree()`, o los handles de subprocesos se fugan en Windows hasta que el servidor entero se cuelga; ver CHANGELOG 1.4.19/1.4.20), `_scan_command_warnings()`
+- `src/layers/layer2_shell.py` — `MAX_CAPTURE_BYTES=1MiB`, `_truncate()`, `_scan_command_warnings()`. Limpieza de procesos delegada a `src/oslayer/process.py` desde v1.4.33 (`kill_process_tree` vía psutil, `reap_after_kill` — debe llamarse después de cada `kill_process_tree()` o los handles se fugan; ver CHANGELOG 1.4.19/1.4.20/1.4.33)
 
 ## Peculiaridades de PermissionManager
 - `GrantLevel`: `SINGLE`, `SESSION`, `PERMANENT`
@@ -115,15 +115,18 @@ que el proceso arranque.
 
 **Flujo recomendado (Opción A — sin cambio de config):**
 1. `sh_session_start(shell="powershell")` → obtén el `session_id`
-2. `sh_session_send(session_id, "cd C:\Repos\TuProyecto")`
-3. `sh_session_send(session_id, "npm run dev")` (o `pnpm run dev`)
-4. Cuando aparezca el ticket de `execute`, aprobarlo con `level="session"`
+2. `sh_session_send(session_id, "npm run dev", working_dir="C:\\Repos\\TuProyecto")` (o `pnpm run dev`)
+   — `cd` NO está en `allow_prefix` y sería bloqueado; usar `working_dir` es el único canal correcto
+3. Cuando aparezca el ticket de `execute`, aprobarlo con `level="session"`
    — válido para toda la sesión activa de Claude, sin nuevo popup por comando
-5. `sh_session_read(session_id)` para leer output cuando se necesite
+4. `sh_session_read(session_id)` para leer output cuando se necesite
 
-Usar `sh_exec` también funciona pero el proceso muere al cumplirse el timeout
-(`command_timeout_seconds: 120` en el config actual). Para dev servers de larga
-duración, `sh_session_start` es el canal correcto.
+⚠️ **Limitación conocida (verificada 2026-07-25):** PowerShell en modo sesión interactiva
+(`-NoExit -Command -`) bufferiza stdout internamente y no lo flushea al pipe línea a línea.
+`sh_session_read` devuelve `(no output)` aunque el proceso esté corriendo. El log del servidor
+confirma que el comando se entrega (`OK 315ms`) pero el reader nunca recibe líneas.
+Para dev servers de larga duración, arrancar desde la terminal propia es más confiable
+que depender de `sh_session_read`. Ver idea diferida `sh_spawn` más abajo.
 
 **Opción B (cambio de config):** eliminar `node` de `approval_required_prefix` en
 `~/.personal-mcp/config.json` — elimina el gate para todo lo que arranque Node.

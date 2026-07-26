@@ -1,3 +1,22 @@
+## [1.4.35] — 2026-07-25
+
+### Fixed — event loop bloqueante en `mcp_benchmark` y `mcp_log`
+- **`mcp_benchmark`**: `subprocess.run()` y las operaciones de filesystem (`write_text`, `unlink`) se ejecutaban de forma bloqueante en el event loop de asyncio. Envueltos en `asyncio.to_thread()` — consistente con el resto de tools de `layer5_health.py`.
+- **`mcp_log`**: `log_path.read_text()` bloqueante sobre archivos de hasta 10MB (el máximo configurado). Envuelto en `asyncio.to_thread()`.
+
+### Fixed — `fs_batch` consumía grant de escritura en dry run
+- El wrapper `fs_batch` validaba `validate_tool_path(target, "write")` antes de ejecutar, incluso con `dry_run=True`. Un grant `SINGLE` se quemaba aunque el usuario solo estuviera inspeccionando el resultado sin escribir nada. La validación de escritura ahora se omite cuando `dry_run=True`.
+
+### Fixed — `security_revoke` / `PermissionManager.revoke()` revocaba todos los grants de un recurso
+- `revoke(resource)` eliminaba el dict completo de operaciones para una ruta — un grant de `read` y uno de `write` sobre la misma ruta quedaban ambos revocados aunque el llamador solo quisiera revocar `write`.
+- `revoke()` acepta ahora `operation: str | None = None`. Sin `operation`, el comportamiento previo (revocar todo) se mantiene. Con `operation`, solo se revoca esa operación.
+- `security_revoke` tool actualizado: acepta `operation` opcional y lo pasa a `revoke()`.
+
+### Fixed — documentación AGENTS.md vs código real
+- Gate de `execute` para `npm`/`pnpm`: documentado incorrectamente como activo. El código no lo dispara — `validate_shell_execution()` revisa el primer token (`pnpm`/`npm`), no el intérprete interno. Corregido en la sección npm/pnpm.
+- Layer 4 condicional a `journal.enabled`: `project_scan` y `project_find` también desaparecen si el journal está deshabilitado. Documentado en la tabla de arquitectura.
+- `security_revoke` semántica de `operation` documentada en sección Peculiaridades de PermissionManager.
+
 ## [1.4.34] — 2026-07-25
 
 ### Added — `working_dir` en `sh_session_send`

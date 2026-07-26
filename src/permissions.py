@@ -225,19 +225,43 @@ class PermissionManager:
                 valid.append(ticket.to_dict())
         return valid
 
-    def revoke(self, resource: str) -> bool:
+    def revoke(self, resource: str, operation: str | None = None) -> bool:
+        """Revoke grants for a resource.
+
+        If operation is specified, only that operation is revoked (e.g. "write").
+        If operation is None, ALL operations for the resource are revoked.
+        security_revoke tool passes the operation from the ticket so a revoke
+        call never silently drops unrelated grants on the same path.
+        """
         resolved = self._resolve(resource)
         found = False
         if resolved in self._session_grants:
-            del self._session_grants[resolved]
-            found = True
+            if operation:
+                ops = self._session_grants[resolved]
+                if operation in ops:
+                    ops.discard(operation)
+                    if not ops:
+                        del self._session_grants[resolved]
+                    found = True
+            else:
+                del self._session_grants[resolved]
+                found = True
         if resolved in self._single_grants:
-            del self._single_grants[resolved]
-            found = True
+            if operation:
+                ops = self._single_grants[resolved]
+                if operation in ops:
+                    del ops[operation]
+                    if not ops:
+                        del self._single_grants[resolved]
+                    found = True
+            else:
+                del self._single_grants[resolved]
+                found = True
         if found:
             for ticket in self._tickets.values():
                 if ticket.resource == resource and ticket.status == "approved":
-                    ticket.status = "revoked"
+                    if not operation or ticket.operation == operation:
+                        ticket.status = "revoked"
             return True
         return False
 

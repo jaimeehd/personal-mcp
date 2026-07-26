@@ -50,10 +50,18 @@ def register_permission_tools(mcp: FastMCP, security: SecurityValidator,
         return json.dumps(pending, indent=2, ensure_ascii=False)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True))
-    async def security_revoke(resource: str) -> str:
-        ok = perm_manager.revoke(resource)
+    async def security_revoke(resource: str, operation: str | None = None) -> str:
+        """Revoke grants for a resource.
+
+        If operation is specified (e.g. "write", "delete", "execute"), only that
+        operation's grant is revoked. If omitted, ALL grants for the resource are
+        revoked. Prefer passing operation when possible to avoid silently dropping
+        unrelated grants on the same path.
+        """
+        ok = perm_manager.revoke(resource, operation)
         if ok:
-            return f"Revoked grants for: {resource}"
+            op_str = f" [{operation}]" if operation else ""
+            return f"Revoked grants{op_str} for: {resource}"
         return f"No active grants found for: {resource}"
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))

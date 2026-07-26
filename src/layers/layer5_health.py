@@ -200,21 +200,25 @@ def register_health_tools(mcp: FastMCP, config: AppConfig,
         results = {}
         start = time.time()
         try:
-            (Path(config.data_dir) / ".benchmark").write_text("ok")
-            (Path(config.data_dir) / ".benchmark").unlink()
+            bench_path = Path(config.data_dir) / ".benchmark"
+            await asyncio.to_thread(bench_path.write_text, "ok")
+            await asyncio.to_thread(bench_path.unlink)
             results["fs_write_delete"] = round((time.time() - start) * 1000, 1)
         except Exception as e:
             results["fs_write_delete"] = f"error: {e}"
         start = time.time()
         try:
-            # Use platform-appropriate shell for benchmark
+            # Use platform-appropriate shell for benchmark — wrapped in to_thread
+            # to avoid blocking the asyncio event loop during subprocess execution.
             if platform.system() == "Windows":
-                subprocess.run(
+                await asyncio.to_thread(
+                    subprocess.run,
                     ["powershell", "-NoProfile", "-Command", "echo test"],
                     capture_output=True, text=True, timeout=10
                 )
             else:
-                subprocess.run(
+                await asyncio.to_thread(
+                    subprocess.run,
                     ["bash", "-c", "echo test"],
                     capture_output=True, text=True, timeout=10
                 )
@@ -232,9 +236,12 @@ def register_health_tools(mcp: FastMCP, config: AppConfig,
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     async def mcp_log(lines: int = 50, level: str = "INFO") -> str:
         log_path = Path(config.data_dir) / "server.log"
-        if not log_path.exists():
+        exists = await asyncio.to_thread(log_path.exists)
+        if not exists:
             return "No log file found"
-        content = log_path.read_text(encoding="utf-8", errors="replace")
+        # read_text is blocking I/O — wrap in to_thread to avoid stalling the event loop
+        # on large log files (up to max_bytes=10MB per LogConfig default).
+        content = await asyncio.to_thread(log_path.read_text, encoding="utf-8", errors="replace")
         level_prefix = level[0]
         filtered = [l for l in content.splitlines() if f"[{level_prefix}" in l]
         return "\n".join(filtered[-lines:])

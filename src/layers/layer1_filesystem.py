@@ -657,9 +657,13 @@ def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None
         err = security.validate_tool_path(path, "read")
         if err:
             return err
-        err = security.validate_tool_path(target, "write")
-        if err:
-            return err
+        # Only validate write permission on target when not a dry run — a dry run
+        # never touches the filesystem, so consuming a SINGLE grant for it would
+        # silently burn the token before the real operation runs.
+        if not dry_run:
+            err = security.validate_tool_path(target, "write")
+            if err:
+                return err
         return await fs_batch_impl(path, operation, target, security, pattern, dry_run)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True, destructiveHint=False))

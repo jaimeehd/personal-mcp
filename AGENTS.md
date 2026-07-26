@@ -30,6 +30,7 @@ cd C:\Repos\.personal-mcp
 - Cada tool tiene una función `_impl` async independiente (testeable sin FastMCP)
 - Los closures en `register_*()` envuelven `_impl` con verificaciones de seguridad/permisos
 - `sys.path.insert(0, ...)` al inicio de `server.py` y `conftest.py` — ejecutar siempre desde la raíz del repo
+- **Layer 4 completa es condicional a `config.journal.enabled`**: si es `false`, `register_personal_tools()` retorna inmediatamente y las 8 tools del layer — incluyendo `project_scan` y `project_find` — no se registran. El acoplamiento es total por diseño actual; no hay forma de tener `project_scan` sin el journal habilitado.
 
 ## Reglas de seguridad (no violar)
 1. **Todas las rutas** pasan por `security.resolve_and_validate()`. Las operaciones de lectura en `paths_allow` o `data_dir` pasan directamente. Las operaciones de escritura en `paths_allow` requieren grant explícito (session/single/permanent) vía `check_granted()`. Las rutas fuera de ambos lanzan `PathNotAllowedError`.
@@ -72,7 +73,7 @@ cd C:\Repos\.personal-mcp
 - `check_granted(resource, operation)` verifica que la operación coincida (o "*"); auto-otorga solo rutas en `data_dir` (no `paths_allow` — las lecturas son manejadas por `resolve_and_validate()` directamente)
 - Los grants permanentes se agregan a `paths_allow`, lo que auto-permite lecturas; las escrituras siguen necesitando grant de sesión/single
 - Los tickets expiran después de 300s
-- `grant_direct()` crea un ticket aprobado pero `fs_request_allow_impl` ya no lo usa — pasa por el flujo pendiente→aprobar
+- **`security_revoke(resource, operation=None)`**: si `operation` se omite, revoca TODOS los grants del recurso. Pasar `operation` (ej. `"write"`) revoca solo esa operación sin afectar otras grants sobre la misma ruta. Preferir siempre pasar `operation` cuando se conoce.
 - `config.save()` escribe en config_path — los tests configuran `config_path` en una ruta temporal
 - **Tickets batch (desde v1.4.16)**: `PermissionTicket` tiene un campo opcional `resources: List[str]`; `request_batch()`/`approve()` vinculan un ticket/un `confirm_code` a una lista enumerada de rutas (`fs_delete_batch`). Forzado a `SINGLE` para delete, misma regla que delete de un solo archivo (#7). `validate_tool_paths_batch()` verifica cada ruta antes de consumir cualquier grant.
 
@@ -117,8 +118,9 @@ que el proceso arranque.
 1. `sh_session_start(shell="powershell")` → obtén el `session_id`
 2. `sh_session_send(session_id, "npm run dev", working_dir="C:\\Repos\\TuProyecto")` (o `pnpm run dev`)
    — `cd` NO está en `allow_prefix` y sería bloqueado; usar `working_dir` es el único canal correcto
-3. Cuando aparezca el ticket de `execute`, aprobarlo con `level="session"`
-   — válido para toda la sesión activa de Claude, sin nuevo popup por comando
+3. **No hay ticket de `execute`** — `npm`/`pnpm` no están en `approval_required_prefix` (solo `python`, `node`, `bash`);
+   el gate no dispara porque el validador revisa el primer token del comando (`pnpm`/`npm`), no el intérprete
+   que estos invocan internamente. Si se quiere cubrir este caso, agregar `npm` y `pnpm` a `approval_required_prefix`.
 4. `sh_session_read(session_id)` para leer output cuando se necesite
 
 ⚠️ **Limitación conocida (verificada 2026-07-25):** PowerShell en modo sesión interactiva

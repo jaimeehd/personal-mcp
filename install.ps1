@@ -64,12 +64,28 @@ try {
 # Step 4: Create default config if not exists
 Write-Host "[4/6] Configuring..." -ForegroundColor Yellow
 if (-not (Test-Path $ConfigPath)) {
-    # Auto-detect common workspace directories
-    $allowedPaths = @(
-        "C:\Repos",
-        "$env:USERPROFILE\Desktop",
-        "$env:USERPROFILE\.personal-mcp"
+    # Auto-detect common workspace directories (VS, GitHub Desktop defaults)
+    $defaultPaths = @(
+        "$env:USERPROFILE\source\repos",
+        "$env:USERPROFILE\Documents\GitHub",
+        "$env:USERPROFILE\repos"
     )
+    $allowedPaths = @()
+    foreach ($p in $defaultPaths) {
+        if (Test-Path $p) {
+            $allowedPaths += $p
+        }
+    }
+    # Fallback: create the first one if none exist
+    if ($allowedPaths.Count -eq 0) {
+        $first = $defaultPaths[0]
+        $null = New-Item -ItemType Directory -Force -Path $first
+        $allowedPaths += $first
+        Write-Host "  Created default workspace: $first" -ForegroundColor Cyan
+    }
+    # Also add Desktop and personal-mcp for convenience
+    $allowedPaths += "$env:USERPROFILE\Desktop"
+    $allowedPaths += "$McpDir"
     if (Test-Path "$env:USERPROFILE\OneDrive") {
         $allowedPaths += "$env:USERPROFILE\OneDrive"
     }
@@ -82,15 +98,26 @@ if (-not (Test-Path $ConfigPath)) {
                 "**\.git\**",
                 "**\bin\**",
                 "**\obj\**",
-                "$env:USERPROFILE\AppData"
+                "**\AppData\**",
+                "**\.ssh\**",
+                "**\.aws\**",
+                "**\.azure\**",
+                "**\.kube\**",
+                "**\.gnupg\**",
+                "**\.env*",
+                "**\*.pem",
+                "**\id_rsa*",
+                "**\id_ed25519*",
+                "**\.git-credentials",
+                "**\.npmrc",
+                "**\.pypirc",
+                "**\.docker\config.json"
             )
             commands = @{
                 allow_prefix = @(
                     "git", "npm", "dotnet", "python", "node", "dir", "ls",
                     "cd", "cat", "type", "find", "select-string", "echo",
-                    "mkdir", "ni", "new-item", "copy", "cp", "move", "mv",
-                    "remove-item", "ri", "del", "clear", "cls", "pwd",
-                    "get-location", "get-childitem", "gci", "set-location",
+                    "pwd", "get-location", "get-childitem", "gci", "set-location",
                     "sl", "write-output", "ping", "tracert", "ipconfig",
                     "systeminfo", "tasklist", "get-process", "get-service",
                     "where", "help", "man", "more"

@@ -1,29 +1,43 @@
 {
   "security": {
     "paths_allow": [
-      "C:\\Users\\User\\Documents\\Projects",
-      "C:\\Repos\\my-project"
+      "%USERPROFILE%\\source\\repos",
+      "%USERPROFILE%\\Documents\\GitHub",
+      "%USERPROFILE%\\repos"
     ],
     "paths_deny": [
       "**\\node_modules\\**",
       "**\\.git\\**",
       "**\\bin\\**",
       "**\\obj\\**",
-      "C:\\Users\\User\\AppData"
+      "**\\AppData\\**",
+      "**\\.ssh\\**",
+      "**\\.aws\\**",
+      "**\\.azure\\**",
+      "**\\.kube\\**",
+      "**\\.gnupg\\**",
+      "**\\.env*",
+      "**\\*.pem",
+      "**\\id_rsa*",
+      "**\\id_ed25519*",
+      "**\\.git-credentials",
+      "**\\.npmrc",
+      "**\\.pypirc",
+      "**\\.docker\\config.json"
     ],
     "commands": {
       "allow_prefix": [
         "git",
         "npm",
+        "dotnet",
         "python",
+        "node",
         "ls",
         "pytest",
         "echo",
         "uv",
         "make",
         "docker",
-        "mkdir",
-        "rmdir",
         "cat",
         "type"
       ],

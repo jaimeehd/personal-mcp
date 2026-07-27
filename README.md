@@ -114,6 +114,21 @@ Servidor MCP personalizado para orquestación de estaciones de trabajo Windows/L
 - **Registro de auditoría**: Cada operación se registra (buffer circular, 10k entradas) con datos sensibles automáticamente ofuscados.
 - **Limitación conocida — el conector MCP `Filesystem` genérico (oficial), si también está habilitado con acceso de escritura a la carpeta de este repo, evade todas las protecciones anteriores.** Escribe directamente al disco sin tickets, sin `confirm_code`, sin registro de auditoría — el modelo de seguridad de este servidor solo cubre las tools que *este* servidor expone, no el repositorio como archivo en disco. No hay fix de código posible desde este proyecto; si también usás el conector oficial `Filesystem` en el mismo cliente MCP, evitá darle acceso de escritura a la ruta de este repo, o aceptá que es un canal de escritura paralelo sin protección hacia tu propia configuración de seguridad.
 
+## ⚠️ Para qué NO está listo (sin trabajo extra)
+
+| Caso de uso | Qué falta / Limitación |
+|-------------|------------------------|
+| **Multi-usuario / Multi-tenant** | Sin autenticación, sin aislamiento de datos, config single-user. Cada usuario necesitaría su propia instancia. |
+| **Deployment remoto / Contenedor / Kubernetes** | Solo transporte **stdio local**. Sin HTTP, SSE, ni WebSocket. No hay health endpoint HTTP para probes. |
+| **SSH en producción** | Capa deshabilitada por defecto (`ssh.enabled: false`). Requiere hardening remoto, auditoría de `remote_allow_prefix`, y deploy de wrapper en host destino para enforcement real. |
+| **Compliance estricto (SOC2, ISO27001, HIPAA, etc.)** | Sin cifrado en reposo, sin RBAC, sin audit trail inmutable (logs rotativos, sobrescribibles), sin tamper-evidence. |
+| **High Availability / Escalado horizontal** | Proceso único, sin clustering, sin leader election, sin shared state. Reinicio = downtime. |
+| **Entorno no Windows (Linux/macOS) — Limitaciones** | `sh_session` solo soporta `powershell`/`pwsh` (sin sesiones interactivas en `cmd`/`bash`). Limpieza de procesos usa `taskkill` (Windows-only). `confirm_code` popup usa `MessageBoxW` (solo Windows — desactivado en pytest, pero no hay equivalente nativo en Linux/macOS). |
+| **Protección contra conector MCP Filesystem oficial paralelo** | Si el cliente MCP tiene *también* el conector oficial `Filesystem` habilitado con acceso de escritura a la misma ruta, **este escribe directo al disco sin tickets, sin confirm_code, sin auditoría**. Es una decisión de configuración del usuario, no un bug de este servidor. Ver "Limitación conocida" en sección Seguridad. |
+| **Gestión de secretos / Vault integrado** | No hay integración con HashiCorp Vault, AWS Secrets Manager, Azure Key Vault, etc. Los secretos en config.json están en texto plano. |
+| **API programática / SDK** | Solo interfaz MCP (stdio). No hay REST/gRPC/GraphQL para integrar desde otros servicios. |
+| **Migración de config / Versionado de esquema** | `config.json` no tiene versión de esquema ni migración automática. Cambios breaking en config requieren edición manual. |
+
 ## Configuración de Shell
 
 La capa de shell soporta múltiples shells configurados vía `~/.personal-mcp/config.json`:

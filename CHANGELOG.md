@@ -1,3 +1,18 @@
+## [1.4.37] — 2026-07-27
+
+### Security — `install.ps1` defaults endurecidos (paths_allow/deny + allow_prefix)
+- **`paths_allow`**: reemplazados los defaults previos por rutas convencionales de un install fresco: `%USERPROFILE%\source\repos` (default de Visual Studio, creada si no existe), `%USERPROFILE%\Documents\GitHub` (default de GitHub Desktop), `%USERPROFILE%\repos` (convención común).
+- **`paths_deny`**: el instalador ahora incluye desde el default los mismos patrones de credenciales ya aplicados manualmente en la config real en uso (`**\AppData\**`, `**\.ssh\**`, `**\.aws\**`, `**\.azure\**`, `**\.kube\**`, `**\.gnupg\**`, `**\.env*`, `**\*.pem`, `**\id_rsa*`, `**\id_ed25519*`, `**\.git-credentials`, `**\.npmrc`, `**\.pypirc`, `**\.docker\config.json`). Antes solo estaban en el config real de esta instancia (ver 1.4.27); un install nuevo no los recibía.
+- **`allow_prefix`**: eliminados los 10 verbos de mutación de archivos ya señalados como gap en la regla #13 de `AGENTS.md` desde v1.4.18 (`mkdir`, `ni`, `new-item`, `copy`, `cp`, `move`, `mv`, `remove-item`, `ri`, `del`) — un install fresco ahora también requiere ticket para estas operaciones, cerrando la brecha que hasta ahora solo se corregía manualmente config por config.
+- `config.demo.json` sincronizado con los nuevos defaults.
+- Sin cambios en `src/` — este release es exclusivamente del instalador y su plantilla de config de referencia.
+
+## [1.4.36] — 2026-07-27
+
+### Docs — sección "Para qué NO está listo" en README.md
+- Nueva tabla con 11 limitaciones conocidas del proyecto, documentadas para que un lector humano (no solo AGENTS.md, dirigido a agentes) las vea sin tener que inferirlas: multi-usuario/multi-tenant, deployment remoto/contenedores/Kubernetes, SSH en producción, compliance estricto (SOC2/ISO27001/HIPAA), alta disponibilidad/escalado horizontal, limitaciones específicas de Linux/macOS (sesiones interactivas, `taskkill`, `MessageBoxW`), el bypass del conector MCP Filesystem oficial (ya documentado en AGENTS.md regla #12, ahora también visible para un usuario humano), gestión de secretos/Vault no integrada, ausencia de API programática/SDK propio, y falta de migración de config/versionado de esquema.
+- Sin cambios de código.
+
 ## [1.4.35] — 2026-07-25
 
 ### Fixed — event loop bloqueante en `mcp_benchmark` y `mcp_log`

@@ -63,3 +63,26 @@ def test_register_health_tools_produces_sync_tools(test_config):
     assert "mcp_audit_log" in tool_names
     assert "mcp_benchmark" in tool_names
     assert "mcp_log" in tool_names
+
+
+async def test_health_processes_tool_executes_without_recursion(test_config):
+    """Regression test for a name-shadowing bug.
+
+    The @mcp.tool-decorated `health_processes` closure previously shared its
+    name with the module-level `_dispatch_processes` (formerly also named
+    `health_processes`). Python's scoping resolved the call inside the closure
+    to itself instead of the module-level implementation, so every invocation
+    raised RecursionError — even though `test_register_health_tools_produces_sync_tools`
+    passed, because it only checks that the name is registered and never calls
+    the tool. This test calls it for real, the way an MCP client would.
+    """
+    from mcp.server.fastmcp import FastMCP
+
+    audit_log = AuditLog(max_entries=100)
+    app = FastMCP("test")
+    from src.layers.layer5_health import register_health_tools
+
+    register_health_tools(app, test_config, audit_log)
+
+    result = await app._tool_manager.call_tool("health_processes", {"top": 3})
+    assert isinstance(result, str)

@@ -82,7 +82,7 @@ def _fetch_processes_windows(top: int) -> str:
     return r.stdout or r.stderr
 
 
-async def health_processes(top: int = 10) -> str:
+async def _dispatch_processes(top: int = 10) -> str:
     """Cross-platform top processes."""
     if platform.system() == "Windows":
         return await asyncio.to_thread(_fetch_processes_windows, top)
@@ -146,7 +146,7 @@ def register_health_tools(mcp: FastMCP, config: AppConfig,
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     async def health_processes(top: int = 10) -> str:
-        return await health_processes(top)
+        return await _dispatch_processes(top)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     async def health_config() -> str:

@@ -259,9 +259,9 @@ class PermissionManager:
                 found = True
         if found:
             for ticket in self._tickets.values():
-                if ticket.resource == resource and ticket.status == "approved":
-                    if not operation or ticket.operation == operation:
-                        ticket.status = "revoked"
+                if (ticket.resource == resource and ticket.status == "approved"
+                        and (not operation or ticket.operation == operation)):
+                    ticket.status = "revoked"
             return True
         return False
 

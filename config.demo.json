@@ -39,7 +39,8 @@
         "make",
         "docker",
         "cat",
-        "type"
+        "type",
+        "gh"
       ],
       "deny": [
         "shutdown",

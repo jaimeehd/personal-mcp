@@ -1,3 +1,29 @@
+## [1.4.40] — 2026-07-30
+
+### Added — `gh` (GitHub CLI) agregado a `allow_prefix`/`readonly_prefix`
+- La whitelist de comandos (`config.security.commands.allow_prefix`) no incluía `gh` — no por una decisión de seguridad activa, sino porque nunca se agregó al definir el conjunto original de comandos. Ausencia por omisión, no restricción deliberada.
+- Agregado `gh` a `allow_prefix` (config oficial `~/.personal-mcp/config.json`, espejo del repo, y `config.demo.json`).
+- Agregado `gh run list`, `gh pr view`, `gh repo view` a `readonly_prefix` (config oficial y espejo) para que también sean invocables desde `sh_script` sin ticket de escritura.
+- Motivado por: no había forma de consultar el estado de GitHub Actions CI para verificar un push sin depender de capturas de pantalla del usuario.
+- **Error de proceso durante esta sesión (documentado, no un bug de código)**: la edición inicial se aplicó por error al espejo de solo lectura del repo (`C:\Repos\.personal-mcp\config.json`) en vez de al config oficial (`~/.personal-mcp/config.json`) — el mismo error de proceso ya documentado en la entrada `1.4.30`. `AGENTS.md` ya tenía la advertencia en las primeras líneas del archivo; no se leyó antes de actuar. Corregido aplicando el cambio directamente al config oficial y verificando que el espejo quedara consistente.
+- ⚠️ El servidor MCP en ejecución no recarga `config.json` en caliente — requiere reinicio para que `gh` esté disponible en `sh_exec`.
+
+## [1.4.39] — 2026-07-30
+
+### Fixed — recursión infinita en `health_processes` por shadowing de nombre
+- La tool `@mcp.tool` `health_processes` (dentro de `register_health_tools()`) y la función standalone de nivel de módulo compartían el mismo nombre exacto (`health_processes`). Por las reglas de scope de Python (LEGB), la llamada dentro del closure de la tool se resolvía hacia sí misma en vez de hacia la implementación real de nivel de módulo — cada invocación lanzaba `RecursionError: maximum recursion depth exceeded`.
+- **Por qué pasó inadvertido con 285 tests pasando**: `test_register_health_tools_produces_sync_tools` solo verificaba que el nombre `"health_processes"` estuviera en la lista de tools registradas — nunca invocaba la tool.
+- **Fix**: función standalone renombrada a `_dispatch_processes` (consistente con la convención de prefijo `_` ya usada por `_fetch_processes_windows`/`_linux`/`_macos`, que la función original rompía). La tool ahora llama a `_dispatch_processes(top)`.
+- **Test de regresión agregado**: `test_health_processes_tool_executes_without_recursion` invoca la tool real vía `app._tool_manager.call_tool("health_processes", {"top": 3})`, cerrando el hueco de cobertura que dejó pasar el bug original.
+- Verificado: ruff limpio, 286/286 tests (285 + el nuevo), y confirmado en runtime real tras reiniciar el servidor MCP.
+
+## [1.4.38] — 2026-07-29
+
+### Fixed — lint SIM102 en `PermissionManager.revoke()`
+- `ruff` (regla SIM102, "Use a single `if` statement instead of nested `if` statements") fallaba en CI sobre `src/permissions.py:262` — un `if` anidado dentro de otro, combinable con `and`.
+- Combinados en una sola condición: `if (ticket.resource == resource and ticket.status == "approved" and (not operation or ticket.operation == operation))`. Sin cambio de comportamiento — mismo resultado lógico, solo estructura simplificada.
+- Verificado en la sesión que llevó este cambio a `origin/main`: `ruff check src/ tests/` limpio, 285/285 tests.
+
 ## [1.4.37] — 2026-07-27
 
 ### Security — `install.ps1` defaults endurecidos (paths_allow/deny + allow_prefix)

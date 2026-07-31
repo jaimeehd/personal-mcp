@@ -4,7 +4,7 @@ build-backend = "setuptools.backends._legacy:_Backend"
 
 [project]
 name = "personal-mcp"
-version = "1.4.37"
+version = "1.4.40"
 description = "Custom MCP server for Windows/Linux/macOS workstation orchestration"
 
 requires-python = ">=3.11"

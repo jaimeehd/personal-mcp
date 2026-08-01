@@ -69,6 +69,23 @@ Salida (ejemplo):
 ```
 Solo encuentra — no borra. Para limpiar, pasar las rutas marcadas como `duplicate` a `fs_delete_batch`.
 
+**Prompt sugerido para flujo buscar → confirmar → borrar:**
+```
+Busca archivos duplicados exactos en [RUTA], usando fs_find_duplicates.
+[Opcional: recursivo=true / extensions=[".pdf", ".docx"]]
+
+Cuando tengas el resultado:
+1. Muéstrame un resumen legible: cuántos grupos, cuánto espacio se
+   recuperaría en total, y para cada grupo el archivo ORIGINAL vs
+   los duplicados.
+2. NO uses fs_delete_batch todavía. Pregúntame explícitamente si
+   quiero borrar los duplicados antes de tocar cualquier archivo.
+3. Si confirmo, borra únicamente los archivos marcados como
+   "duplicate" en cada grupo — nunca el ORIGINAL — usando
+   fs_delete_batch, y sigue el flujo normal de ticket/confirm_code.
+```
+El paso 2 es la línea que realmente importa: sin ella, un agente proactivo podría encadenar búsqueda y borrado en el mismo turno. El sistema de tickets igual exigiría confirmación por popup antes de cualquier borrado real, pero esta instrucción evita que el agente *intente* hacerlo sin pedirlo primero — es una capa de intención, no solo de permiso técnico.
+
 ### Capa 2 — Shell (ejecución multi-shell, cambio de shell en runtime)
 | Tool | Descripción |
 |------|-------------|

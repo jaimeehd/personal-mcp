@@ -13,6 +13,7 @@ from src.layers.layer1_filesystem import (
     fs_diff_impl,
     fs_edit_advanced_impl,
     fs_edit_impl,
+    fs_find_duplicates_impl,
     fs_find_impl,
     fs_info_impl,
     fs_list_allowed_impl,
@@ -42,6 +43,8 @@ def sec(temp_home):
             ],
             paths_deny=["**\\.git\\**"],
         ),
+        data_dir=str(temp_home / ".personal-mcp" / "data"),
+        config_path=str(temp_home / ".personal-mcp" / "config.json"),
     )
     validator = SecurityValidator(config)
     validator.perm_manager = PermissionManager(config)
@@ -387,6 +390,106 @@ async def test_edit_advanced_dry_run(sample_file, sec):
     )
     assert "Dry run" in result
     assert sample_file.read_text() == original
+
+
+# --- fs_find_duplicates ---
+
+@pytest.mark.asyncio
+async def test_find_duplicates_basic(temp_home, sec):
+    base = temp_home / "Repos" / "dupes"
+    base.mkdir()
+    (base / "a.txt").write_text("identical content")
+    (base / "b_copy.txt").write_text("identical content")
+    (base / "unique.txt").write_text("something else entirely")
+    result = await fs_find_duplicates_impl(str(base), sec)
+    assert "1 duplicate group" in result
+    assert "a.txt" in result
+    assert "b_copy.txt" in result
+    assert "unique.txt" not in result
+
+
+@pytest.mark.asyncio
+async def test_find_duplicates_none(temp_home, sec):
+    base = temp_home / "Repos" / "no_dupes"
+    base.mkdir()
+    (base / "a.txt").write_text("aaa")
+    (base / "b.txt").write_text("bbb")
+    result = await fs_find_duplicates_impl(str(base), sec)
+    assert "No exact duplicates found" in result
+
+
+@pytest.mark.asyncio
+async def test_find_duplicates_same_size_different_content(temp_home, sec):
+    # Regression test for the size pre-filter: two files of identical size
+    # but different bytes must NOT be reported as duplicates. This is the
+    # exact case the exact-size grouping phase must hand off correctly to
+    # the hash phase rather than treating "same size" as "same content".
+    base = temp_home / "Repos" / "same_size"
+    base.mkdir()
+    (base / "a.txt").write_text("aaaa")
+    (base / "b.txt").write_text("bbbb")
+    result = await fs_find_duplicates_impl(str(base), sec)
+    assert "No exact duplicates found" in result
+
+
+@pytest.mark.asyncio
+async def test_find_duplicates_extension_filter_with_dot(temp_home, sec):
+    base = temp_home / "Repos" / "ext_dot"
+    base.mkdir()
+    (base / "a.pdf").write_text("same")
+    (base / "b.pdf").write_text("same")
+    (base / "c.txt").write_text("same")
+    result = await fs_find_duplicates_impl(str(base), sec, extensions=[".pdf"])
+    assert "a.pdf" in result
+    assert "b.pdf" in result
+    assert "c.txt" not in result
+
+
+@pytest.mark.asyncio
+async def test_find_duplicates_extension_filter_without_dot(temp_home, sec):
+    # Same as above but the caller passes "pdf" instead of ".pdf" — both
+    # forms must be accepted per the normalization design.
+    base = temp_home / "Repos" / "ext_nodot"
+    base.mkdir()
+    (base / "a.pdf").write_text("same")
+    (base / "b.pdf").write_text("same")
+    (base / "c.txt").write_text("same")
+    result = await fs_find_duplicates_impl(str(base), sec, extensions=["pdf"])
+    assert "a.pdf" in result
+    assert "b.pdf" in result
+    assert "c.txt" not in result
+
+
+@pytest.mark.asyncio
+async def test_find_duplicates_extension_filter_case_insensitive(temp_home, sec):
+    base = temp_home / "Repos" / "ext_case"
+    base.mkdir()
+    (base / "a.PDF").write_text("same")
+    (base / "b.pdf").write_text("same")
+    result = await fs_find_duplicates_impl(str(base), sec, extensions=[".pdf"])
+    assert "a.PDF" in result
+    assert "b.pdf" in result
+
+
+@pytest.mark.asyncio
+async def test_find_duplicates_recursive(temp_home, sec):
+    base = temp_home / "Repos" / "dupes_recursive"
+    base.mkdir()
+    (base / "sub").mkdir()
+    (base / "top.txt").write_text("same content")
+    (base / "sub" / "nested.txt").write_text("same content")
+    result_flat = await fs_find_duplicates_impl(str(base), sec, recursive=False)
+    assert "No exact duplicates found" in result_flat
+    result_recursive = await fs_find_duplicates_impl(str(base), sec, recursive=True)
+    assert "top.txt" in result_recursive
+    assert "nested.txt" in result_recursive
+
+
+@pytest.mark.asyncio
+async def test_find_duplicates_not_a_directory(sample_file, sec):
+    result = await fs_find_duplicates_impl(str(sample_file), sec)
+    assert "Error" in result
+    assert "not a directory" in result
 
 
 

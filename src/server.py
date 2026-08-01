@@ -47,6 +47,58 @@ class AuditedFastMCP(FastMCP):
         self._audit_logger = logger
         super().__init__(*args, **kwargs)
 
+    # Resultados que son fallas SEMANTICAS aunque no lancen excepcion.
+    # fs_approve/fs_deny reportan fallas como strings planos ("Ticket not
+    # found", "Invalid or missing confirmation code"): registrarlos como "OK"
+    # fue exactamente lo que oculto el incidente de tickets perdidos por
+    # reinicio (v1.4.41). Solo se inspeccionan las tools de permisos - otras
+    # tools devuelven "Error: path does not exist" como resultado normal.
+    _SEMANTIC_FAILURE_TOOLS = ("fs_approve", "fs_deny")
+    _SEMANTIC_FAILURE_PREFIXES = (
+        "Ticket not found",
+        "Ticket expired",
+        "Ticket already",
+        "Invalid or missing confirmation code",
+        "Invalid level",
+        "Permanent grants are disabled",
+    )
+
+    def _result_text(self, result: object) -> str | None:
+        """Extrae el texto plano del retorno de `super().call_tool()`.
+
+        En esta version de FastMCP (3.4.x), `convert_result` devuelve para
+        tools con anotacion `-> str` un tuple `(content_blocks, dict)` (el
+        dict con la salida estructurada `{"result": ...}`). Otras formas
+        posibles: un str plano, una lista de ContentBlock o un objeto con
+        `.text`. Se recorre de forma defensiva para no perder nunca una
+        falla semantica por un cambio en el contenedor del resultado.
+        """
+        if isinstance(result, str):
+            return result
+        if isinstance(result, tuple):
+            for item in result:
+                text = self._result_text(item)
+                if text is not None:
+                    return text
+            return None
+        if isinstance(result, list):
+            parts = []
+            for item in result:
+                text = self._result_text(item)
+                if text is not None:
+                    parts.append(text)
+            return "\n".join(parts) if parts else None
+        text = getattr(result, "text", None)
+        return text if isinstance(text, str) else None
+
+    def _is_semantic_failure(self, name: str, result: object) -> bool:
+        if name not in self._SEMANTIC_FAILURE_TOOLS:
+            return False
+        text = self._result_text(result)
+        if text is None:
+            return False
+        return text.startswith(self._SEMANTIC_FAILURE_PREFIXES)
+
     async def call_tool(self, name: str, arguments: dict):
         from src.log import scrub_sensitive_data
         sanitized_args = scrub_sensitive_data(arguments)
@@ -57,11 +109,15 @@ class AuditedFastMCP(FastMCP):
         try:
             result = await super().call_tool(name, arguments)
             elapsed = (time.time() - start) * 1000
+            semantic_failed = self._is_semantic_failure(name, result)
             if elapsed > 30_000:
                 self._audit_logger.warning("SLOW %s %.0fms%s", name, elapsed, memory_pressure_hint())
+            elif semantic_failed:
+                failure_text = self._result_text(result)
+                self._audit_logger.warning("FAILED %s %.0fms %s", name, elapsed, failure_text)
             else:
                 self._audit_logger.info("OK   %s %.0fms", name, elapsed)
-            self._audit_log.record(name, arguments, True, elapsed)
+            self._audit_log.record(name, arguments, not semantic_failed, elapsed)
             return result
         except Exception as e:
             elapsed = (time.time() - start) * 1000

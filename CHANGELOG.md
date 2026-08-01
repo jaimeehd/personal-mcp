@@ -1,3 +1,31 @@
+## [1.4.41] — 2026-07-31
+
+### Fixed — tickets de `fs_delete_batch` perdidos silenciosamente tras reinicio del servidor
+- **Incidente**: un lote de 40 archivos (`fs_delete_batch`, 09:09:41) creó su ticket en el proceso pid=10792. El servidor se reinició 4 veces (09:12:08, 10:09:37, 16:05:39, 16:06:28) y el ticket murió con el proceso. Tras el último reinicio el agente intentó `fs_deny(perm_b404cd7f)` (16:06:49) y `fs_approve(perm_7ec4b13a)` (16:07:18) — tickets que **jamás existieron en ningún proceso** según server.log. Ambos se registraron como `OK 0ms`/`OK 1ms`: el fallo fue 100% silencioso.
+- **Causa raíz (observabilidad)**: `AuditedFastMCP.call_tool` registraba éxito para cualquier retorno que no lanzara excepción. `fs_approve`/`fs_deny` reportan fallas ("Ticket not found", "Invalid or missing confirmation code", etc.) como strings planos — invisibles para el log y el audit log.
+- **Causa raíz (vida del ticket)**: los tickets vivían solo en memoria del proceso. Cualquier reinicio los destruía, y nada en el servidor los re-creaba ni advertía al agente.
+- **Fix 1 — Logging del ciclo de vida de tickets**: `PermissionManager` ahora loguea `PENDING` (request/request_batch, incluyendo "(reused)" en dedup), `GRANTED`, `APPROVE_FAIL` (con razón: not_found/expired/status/invalid_code), `DENIED`, `DENY_FAIL`, `GRANT_DIRECT`, `EXPIRED`, `REVOKED` y `RESTORED`.
+- **Fix 2 — Detección de fallo semántico**: `AuditedFastMCP._is_semantic_failure()` inspecciona el retorno de `fs_approve`/`fs_deny` (extrayendo el texto plano del contenedor que devuelve FastMCP 3.4.x, `(content_blocks, structured_dict)`) y, si coincide con prefijos de falla conocidos, loguea `WARNING FAILED <tool> <ms> <mensaje>` y registra el audit con `success=False` en vez de `OK`/`success=True`. Otras tools no se inspeccionan ("Error: path does not exist" es un resultado normal de `fs_info`).
+- **Fix 3 — Dedup en `request_batch`**: reutiliza un ticket pending con la misma operación y el mismo conjunto de rutas (orden-insensible), igual que ya hacía `request()`. Post-reinicio, re-emitir el mismo `fs_delete_batch` reutiliza el ticket restaurado en vez de crear duplicados.
+- **Fix 4 — Persistencia de tickets pending**: los tickets `pending` se persisten como metadatos en `tickets.jsonl` (dentro de `data_dir`). Al reiniciar, `_load_pending_tickets()` restaura los no expirados con `restored=True` y su `confirm_code` **regenerado con el secreto fresco del proceso** — nunca se lee del disco. El `confirm_code` y el secreto HMAC nunca se persisten ni se exponen por ninguna tool (el gate de v1.4.14 se mantiene intacto). Al aprobar un ticket restaurado con un código viejo pre-reinicio, se re-muestra el popup (`MessageBoxW`) con el código nuevo. Estado del ticket persistido en cada transición (approved/denied/expired/revoked) para que la restauración solo recree tickets realmente pendientes.
+- **HITL preservado**: un ticket restaurado exige igualmente el `confirm_code` regenerado mostrado por el popup; el agente no puede aprobarlo solo.
+- **Tests de regresión**: `tests/test_ticket_persistence.py` (17 tests) cubriendo logging del ciclo de vida, dedup de `request_batch`, persistencia/restauración tras reinicio, regeneración de código, no-persistencia de secretos, `fs_delete_batch` forzado a SINGLE, y detección de fallo semántico en el wrapper.
+- Verificado: `ruff check src/ tests/` limpio, 303/303 tests (286 previos + 17 nuevos).
+
+### Security — sin cambio de superficie
+- La persistencia es de solo-metadatos; el `confirm_code` y `_confirm_secret` siguen siendo exclusivamente en memoria. `paths_allow=["C:\"]` permite lectura libre del disco, por lo que persistir códigos o el secreto reabriría el gap que v1.4.14 cerró deliberadamente.
+
+## [1.4.42] — 2026-07-31
+
+### Added — `fs_find_duplicates`, búsqueda de duplicados exactos por hash
+- Nueva tool de solo lectura en Layer 1: dado un `path`, encuentra archivos con contenido byte-idéntico aunque el nombre difiera — a diferencia de una búsqueda por patrón de nombre (`archivo (1).ext`), que solo atrapa duplicados generados por descargas repetidas con el mismo nombre base.
+- **Diseño de dos fases, sin límites de cantidad ni tamaño de archivo** (decisión explícita, 2026-07-31): fase 1 agrupa por tamaño exacto en bytes (case gratis, solo `stat()` — medido en 240ms para 232 archivos reales); fase 2 solo calcula SHA256 dentro de los grupos que ya comparten tamaño exacto con al menos otro archivo. Un archivo de tamaño único, por grande que sea, nunca se hashea. Se descartó un límite de `max_file_size_mb` y uno de `max_files` en el diseño porque ambos habrían excluido casos de uso reales (una carpeta Downloads real de este mismo equipo tiene 2,917 archivos en su raíz) sin ahorrar tiempo significativo, dado que el recorrido y el filtro por tamaño ya son baratos.
+- Parámetro `extensions` acepta tanto `".pdf"` como `"pdf"` (normalización case-insensitive) — evita que el formato exacto del argumento sea una fuente de error silencioso.
+- Parámetro `recursive` (default `False`) para incluir subcarpetas.
+- No borra nada — deliberadamente separado de `fs_delete_batch`, que ya tiene su propio flujo de tickets. Mezclar "encontrar" y "borrar" en una sola tool habría complicado el modelo de permisos sin necesidad real.
+- 8 tests nuevos en `test_filesystem.py`, incluyendo un caso de regresión específico para el pre-filtro de tamaño (dos archivos del mismo tamaño exacto pero contenido distinto no deben reportarse como duplicados).
+- Verificado: ruff limpio, 311/311 tests.
+
 ## [1.4.40] — 2026-07-30
 
 ### Added — `gh` (GitHub CLI) agregado a `allow_prefix`/`readonly_prefix`

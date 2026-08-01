@@ -17,6 +17,7 @@ def strict_config(temp_home):
             paths_allow=[str(temp_home / "Repos")],
             paths_deny=["**/node_modules/**", "**/.git/**"],
         ),
+        data_dir=str(temp_home / ".personal-mcp" / "data"),
         config_path=str(temp_home / ".personal-mcp" / "config.json"),
     )
     return config
@@ -72,6 +73,7 @@ def exception_config(temp_home):
             ],
             paths_deny_exception_extensions=[".dll", ".exe", ".pdb"],
         ),
+        data_dir=str(temp_home / ".personal-mcp" / "data"),
         config_path=str(temp_home / ".personal-mcp" / "config.json"),
     )
     return config
@@ -235,6 +237,7 @@ def test_multiple_allowed_paths(temp_home):
                 str(temp_home / "Desktop"),
             ],
         ),
+        data_dir=str(temp_home / ".personal-mcp" / "data"),
     )
     security = SecurityValidator(config)
     security.perm_manager = PermissionManager(config)

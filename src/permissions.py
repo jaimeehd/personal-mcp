@@ -1,6 +1,7 @@
 import fnmatch
 import hashlib
 import hmac
+import json
 import secrets
 import time
 import uuid
@@ -9,6 +10,9 @@ from pathlib import Path
 
 from src.config import AppConfig
 from src.confirm_popup import show_confirmation_code, show_confirmation_code_batch
+from src.log import get_logger
+
+logger = get_logger("permissions")
 
 
 class GrantLevel(str, Enum):
@@ -21,7 +25,8 @@ class PermissionTicket:
     def __init__(self, resource: str, operation: str,
                  level: GrantLevel = GrantLevel.SINGLE,
                  ttl_seconds: int = 300,
-                 resources: list[str] | None = None):
+                 resources: list[str] | None = None,
+                 restored: bool = False):
         self.id = f"perm_{uuid.uuid4().hex[:8]}"
         self.resource = resource
         # Batch ticket: resources is the real, complete list this ticket is bound
@@ -38,6 +43,11 @@ class PermissionTicket:
         # Generado por PermissionManager al crear el ticket; nunca se expone
         # en to_dict() ni en ningun tool MCP. Ver src/confirm_popup.py.
         self.confirm_code: str | None = None
+        # True cuando el ticket fue reconstruido desde tickets.jsonl tras un
+        # reinicio (v1.4.41). Su confirm_code fue regenerado con un secret HMAC
+        # nuevo, distinto del proceso anterior: approve() re-muestra el popup si
+        # recibe el codigo viejo pre-reinicio, en vez de dejar el ticket muerto.
+        self.restored = restored
 
     @property
     def is_expired(self) -> bool:
@@ -60,6 +70,12 @@ class PermissionTicket:
 
 
 class PermissionManager:
+    # Nombre del journal de persistencia de tickets pendientes (en data_dir).
+    # Solo metadatos no sensibles: id, resources, operation, level, expiracion.
+    # NUNCA confirm_code ni el secret HMAC - ambos son locales al proceso (ver
+    # _load_pending_tickets). Append-only JSONL, como audit.json.
+    TICKETS_FILE = "tickets.jsonl"
+
     def __init__(self, config: AppConfig):
         self.config = config
         self._tickets: dict[str, PermissionTicket] = {}
@@ -69,6 +85,108 @@ class PermissionManager:
         # persiste a disco ni se expone via ningun tool: es lo que impide
         # que un agente adivine o derive el confirm_code de un ticket.
         self._confirm_secret: bytes = secrets.token_bytes(32)
+        self._load_pending_tickets()
+
+    def _tickets_path(self) -> Path:
+        return Path(self.config.data_dir) / self.TICKETS_FILE
+
+    def _persist_ticket(self, ticket: PermissionTicket, status: str | None = None) -> None:
+        """Append ticket metadata to tickets.jsonl (append-only JSONL).
+
+        Never writes confirm_code or the HMAC secret. The loader keeps the LAST
+        line per ticket id, so a later resolution line (approved/denied/expired/
+        revoked) supersedes the creation line. A write failure is tolerated:
+        persistence is best-effort and must never break the in-memory flow.
+        """
+        try:
+            path = self._tickets_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "id": ticket.id,
+                    "resource": ticket.resource,
+                    "resources": ticket.resources,
+                    "operation": ticket.operation,
+                    "level": ticket.level.value,
+                    "created_at": ticket.created_at,
+                    "expires_at": ticket.expires_at,
+                    "status": status or ticket.status,
+                }, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    def _load_pending_tickets(self) -> None:
+        """Restore still-valid pending tickets from the previous process.
+
+        Only tickets whose last recorded status is "pending" and that are not yet
+        expired are restored. Each restored ticket gets a confirm_code regenerated
+        from the FRESH process-local HMAC secret - so its code differs from the
+        pre-restart one, and the human must read it from a re-shown popup (HITL
+        preserved: codes never leave the process). The ticket is marked restored
+        so approve() re-shows the popup when given the stale pre-restart code
+        instead of dead-ending the ticket (v1.4.41).
+        """
+        path = self._tickets_path()
+        if not path.exists():
+            return
+        latest: dict[str, dict] = {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        item = json.loads(line)
+                    except ValueError:
+                        continue
+                    if item.get("id"):
+                        latest[item["id"]] = item
+        except Exception:
+            return
+        now = time.time()
+        for item in latest.values():
+            if item.get("status") != "pending":
+                continue
+            expires_at = float(item.get("expires_at") or 0)
+            if now > expires_at:
+                continue
+            ticket = self._restore_ticket(item, now, expires_at)
+            if ticket is None:
+                continue
+            self._tickets[ticket.id] = ticket
+            logger.warning(
+                "RESTORED pending ticket=%s op=%s resources=%s (confirm code regenerated; popup re-shown on next use)",
+                ticket.id, ticket.operation, len(ticket.resources) if ticket.resources else 0,
+            )
+
+    def _restore_ticket(self, item: dict, now: float,
+                        expires_at: float) -> PermissionTicket | None:
+        """Reconstruye un ticket pending desde un registro persistido.
+
+        Devuelve None si el registro no es valido (p.ej. nivel desconocido,
+        recursos corruptos): un registro basura no debe tumbar el arranque
+        ni re-crear un ticket erroneo. El `confirm_code` se regenera con el
+        secreto fresco de este proceso y NUNCA se lee del disco.
+        """
+        try:
+            resources = item.get("resources")
+            level = GrantLevel(item.get("level", "single"))
+            ticket = PermissionTicket(
+                resource=item.get("resource", f"{len(resources or [])} files"),
+                operation=item.get("operation", "read"),
+                level=level,
+                ttl_seconds=max(1, int(expires_at - now)),
+                resources=resources,
+                restored=True,
+            )
+        except Exception:
+            return None
+        ticket.id = item["id"]
+        ticket.created_at = float(item.get("created_at") or now)
+        ticket.expires_at = expires_at
+        ticket.confirm_code = self._generate_confirm_code(ticket.id)
+        return ticket
 
     def _generate_confirm_code(self, ticket_id: str) -> str:
         digest = hmac.new(self._confirm_secret, ticket_id.encode(), hashlib.sha256).hexdigest()
@@ -82,11 +200,14 @@ class PermissionManager:
                     and existing.status == "pending"
                     and not existing.is_expired):
                 show_confirmation_code(existing.resource, existing.operation, existing.confirm_code)
+                logger.info("PENDING ticket=%s op=%s resource=%s (reused)", existing.id, operation, resource)
                 return existing
         ticket = PermissionTicket(resource, operation, level)
         ticket.confirm_code = self._generate_confirm_code(ticket.id)
         self._tickets[ticket.id] = ticket
+        self._persist_ticket(ticket)
         show_confirmation_code(ticket.resource, ticket.operation, ticket.confirm_code)
+        logger.info("PENDING ticket=%s op=%s resource=%s", ticket.id, operation, resource)
         return ticket
 
     def request_batch(self, resources: list[str], operation: str,
@@ -101,12 +222,28 @@ class PermissionManager:
         growing unreadable with N, which show_confirmation_code_batch already
         solves independently of N (bounded preview). So there is nothing left for
         a file-count cap to protect here - it would just be friction.
+
+        Reuses an existing pending ticket for the SAME operation + same exact
+        resource list (order-insensitive), mirroring request()'s dedup (v1.4.41).
+        This also recovers a ticket restored from tickets.jsonl after a restart:
+        re-issuing the same batch re-shows the popup with the regenerated code.
         """
+        for existing in self._tickets.values():
+            if (existing.operation == operation
+                    and existing.status == "pending"
+                    and not existing.is_expired
+                    and existing.resources is not None
+                    and sorted(existing.resources) == sorted(resources)):
+                show_confirmation_code_batch(existing.resources, operation, existing.confirm_code)
+                logger.info("PENDING ticket=%s op=%s resources=%d (reused)", existing.id, operation, len(resources))
+                return existing
         summary = f"{len(resources)} files"
         ticket = PermissionTicket(summary, operation, level, resources=resources)
         ticket.confirm_code = self._generate_confirm_code(ticket.id)
         self._tickets[ticket.id] = ticket
+        self._persist_ticket(ticket)
         show_confirmation_code_batch(resources, operation, ticket.confirm_code)
+        logger.info("PENDING ticket=%s op=%s resources=%d", ticket.id, operation, len(resources))
         return ticket
 
     def approve(self, ticket_id: str,
@@ -114,13 +251,27 @@ class PermissionManager:
                 confirm_code: str | None = None) -> tuple[bool, str]:
         ticket = self._tickets.get(ticket_id)
         if not ticket:
+            logger.warning("APPROVE_FAIL ticket=%s reason=not_found", ticket_id)
             return False, f"Ticket not found: {ticket_id}"
         if ticket.is_expired:
             ticket.status = "expired"
+            self._persist_ticket(ticket, status="expired")
+            logger.warning("APPROVE_FAIL ticket=%s reason=expired", ticket_id)
             return False, f"Ticket expired: {ticket_id}"
         if ticket.status != "pending":
+            logger.warning("APPROVE_FAIL ticket=%s reason=status_%s", ticket_id, ticket.status)
             return False, f"Ticket already {ticket.status}: {ticket_id}"
         if not confirm_code or not hmac.compare_digest(confirm_code, ticket.confirm_code):
+            if ticket.restored:
+                # Un reinicio regenera el secret HMAC, asi que un ticket restaurado
+                # tiene un confirm_code nuevo. Re-mostrar el popup para que el humano
+                # lea el codigo actual en vez del viejo pre-reinicio (v1.4.41).
+                if ticket.resources is not None:
+                    show_confirmation_code_batch(ticket.resources, ticket.operation, ticket.confirm_code)
+                else:
+                    show_confirmation_code(ticket.resource, ticket.operation, ticket.confirm_code)
+            logger.warning("APPROVE_FAIL ticket=%s reason=invalid_code%s",
+                           ticket_id, " (restored; popup re-shown)" if ticket.restored else "")
             return False, "Invalid or missing confirmation code."
 
         ticket.status = "approved"
@@ -142,16 +293,21 @@ class PermissionManager:
             elif grant_level == GrantLevel.PERMANENT:
                 self._add_permanent_grant(self._resolve(target))
 
+        self._persist_ticket(ticket, status="approved")
         msg = f"Granted {grant_level.value} access to {ticket.resource}"
         if forced_single:
             msg += " (delete is always single-use; session/permanent not allowed)"
+        logger.info("GRANTED ticket=%s level=%s resource=%s", ticket_id, grant_level.value, ticket.resource)
         return True, msg
 
     def deny(self, ticket_id: str) -> tuple[bool, str]:
         ticket = self._tickets.get(ticket_id)
         if not ticket:
+            logger.warning("DENY_FAIL ticket=%s reason=not_found", ticket_id)
             return False, f"Ticket not found: {ticket_id}"
         ticket.status = "denied"
+        self._persist_ticket(ticket, status="denied")
+        logger.info("DENIED ticket=%s resource=%s", ticket_id, ticket.resource)
         return True, f"Denied access to {ticket.resource}"
 
     def _resolve(self, resource: str) -> str:
@@ -162,6 +318,7 @@ class PermissionManager:
         ticket = PermissionTicket(resource, operation, level, ttl_seconds=86400)
         ticket.status = "approved"
         self._tickets[ticket.id] = ticket
+        self._persist_ticket(ticket, status="approved")
         resolved = self._resolve(resource)
         if level == GrantLevel.SESSION:
             ops = self._session_grants.setdefault(resolved, set())
@@ -171,6 +328,7 @@ class PermissionManager:
             ops[operation] = 1
         elif level == GrantLevel.PERMANENT:
             self._add_permanent_grant(resolved)
+        logger.info("GRANT_DIRECT resource=%s op=%s level=%s", resource, operation, level.value)
         return ticket
 
     def check_granted(self, resource: str, operation: str, consume: bool = True) -> bool:
@@ -218,7 +376,7 @@ class PermissionManager:
         return False
 
     def pending(self) -> list[dict]:
-        time.time()
+        self._cleanup_expired()
         valid = []
         for ticket in self._tickets.values():
             if ticket.status == "pending" and not ticket.is_expired:
@@ -262,14 +420,17 @@ class PermissionManager:
                 if (ticket.resource == resource and ticket.status == "approved"
                         and (not operation or ticket.operation == operation)):
                     ticket.status = "revoked"
+                    self._persist_ticket(ticket, status="revoked")
             return True
         return False
 
     def revoke_ticket(self, ticket_id: str) -> tuple[bool, str]:
         ticket = self._tickets.get(ticket_id)
         if not ticket:
+            logger.warning("DENY_FAIL ticket=%s reason=not_found", ticket_id)
             return False, f"Ticket not found: {ticket_id}"
         ticket.status = "revoked"
+        self._persist_ticket(ticket, status="revoked")
         resolved = self._resolve(ticket.resource)
         self._session_grants.pop(resolved, None)
         self._single_grants.pop(resolved, None)
@@ -285,6 +446,9 @@ class PermissionManager:
         expired = [tid for tid, t in self._tickets.items() if t.is_expired and t.status == "pending"]
         for tid in expired:
             self._tickets[tid].status = "expired"
+            self._persist_ticket(self._tickets[tid], status="expired")
+        if expired:
+            logger.info("EXPIRED %d tickets", len(expired))
 
     def stats(self) -> dict:
         total = len(self._tickets)

@@ -11,7 +11,7 @@
 ## Arranque rápido
 ```powershell
 cd C:\Repos\.personal-mcp
-.\.venv\Scripts\python -m pytest tests/ -v       # 286 tests, verificado 2026-07-30 (0 fallidos). El CHANGELOG 1.4.23 decía 331 -- investigado (1.4.29): comparado contra dos backups independientes del repo, ninguno tiene más tests que este árbol. 331 nunca fue exacto, no es una pérdida.
+.\.venv\Scripts\python -m pytest tests/ -v       # 303 tests, verificado 2026-07-31 (0 fallidos). El CHANGELOG 1.4.23 decía 331 -- investigado (1.4.29): comparado contra dos backups independientes del repo, ninguno tiene más tests que este árbol. 331 nunca fue exacto, no es una pérdida.
 .\.venv\Scripts\python -m src.server              # modo stdio para Claude Desktop
 .\install.ps1                                     # registrar con Claude Desktop (crea el venv automáticamente)
 .\sync-config.ps1                                 # refrescar el espejo de solo lectura config.json desde ~/.personal-mcp/config.json
@@ -76,6 +76,7 @@ cd C:\Repos\.personal-mcp
 - **`security_revoke(resource, operation=None)`**: si `operation` se omite, revoca TODOS los grants del recurso. Pasar `operation` (ej. `"write"`) revoca solo esa operación sin afectar otras grants sobre la misma ruta. Preferir siempre pasar `operation` cuando se conoce.
 - `config.save()` escribe en config_path — los tests configuran `config_path` en una ruta temporal
 - **Tickets batch (desde v1.4.16)**: `PermissionTicket` tiene un campo opcional `resources: List[str]`; `request_batch()`/`approve()` vinculan un ticket/un `confirm_code` a una lista enumerada de rutas (`fs_delete_batch`). Forzado a `SINGLE` para delete, misma regla que delete de un solo archivo (#7). `validate_tool_paths_batch()` verifica cada ruta antes de consumir cualquier grant.
+- **Persistencia de tickets pending (v1.4.41)**: los tickets `pending` se persisten como **metadatos** en `tickets.jsonl` (en `data_dir`) y se restauran al reiniciar el servidor con `restored=True`. El `confirm_code` se **regenera** con el secreto del proceso al restaurar — nunca se lee del disco; el secreto HMAC tampoco se persiste (regla #9 intacta). Si el agente aprueba un ticket restaurado con un código viejo pre-reinicio, `approve()` re-muestra el popup con el código nuevo. `request_batch()` hace dedup orden-insensible por operación+rutas, así que re-emitir el mismo `fs_delete_batch` tras un reinicio reutiliza el ticket restaurado en vez de crear duplicados. Antes de v1.4.41 un reinicio destruía los tickets y `fs_approve`/`fs_deny` sobre ids muertos se registraban como `OK` en el log (fallo silencioso); desde v1.4.41 el wrapper de `AuditedFastMCP` detecta esas fallas semánticas y las registra como `FAILED` con `success=False` en el audit log.
 
 ## Testing
 - `asyncio_mode = "auto"` — los tests `async def` se ejecutan automáticamente (no se necesita marcador)

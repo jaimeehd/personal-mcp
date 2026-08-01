@@ -516,6 +516,108 @@ async def fs_read_media_impl(path: str, security: SecurityValidator) -> str:
     return result
 
 
+def _normalize_extensions(extensions: list[str] | None) -> set[str] | None:
+    """Accept both '.pdf' and 'pdf' — dot-optional matching is the convention
+    users expect (matches pathlib.Path.suffix semantics loosely, but tolerant
+    of the form most people actually type). Case-insensitive since Windows
+    filesystems are case-insensitive by default and '.PDF' vs '.pdf' should
+    not be treated as different types."""
+    if not extensions:
+        return None
+    normalized = set()
+    for ext in extensions:
+        ext = ext.strip().lower()
+        if not ext:
+            continue
+        if not ext.startswith("."):
+            ext = "." + ext
+        normalized.add(ext)
+    return normalized or None
+
+
+def _find_duplicates_sync(rpath: Path, recursive: bool, extensions: set[str] | None) -> list[dict]:
+    """Two-phase exact-duplicate search, deliberately with no file-count or
+    file-size cap (2026-07-31 design discussion): walking + stat() is cheap
+    even over thousands of files (measured: 232 files in 240ms on this
+    machine), so a max_files limit would only exclude legitimate large
+    directories like a real Downloads folder without saving meaningful time.
+    A max_file_size limit would defeat the actual use case (finding files
+    that waste the most disk space), so instead of size caps, cost is
+    controlled by only hashing when it can possibly matter: two files can
+    only be byte-identical if they are already the same size, so phase 1
+    groups by exact size (near-free, no file content read) and phase 2 only
+    hashes files that already share a size with at least one other file.
+    A unique-sized file, however large, is never hashed.
+    """
+    size_groups: dict[int, list[Path]] = {}
+    iterator = rpath.rglob("*") if recursive else rpath.iterdir()
+    for entry in iterator:
+        try:
+            if not entry.is_file():
+                continue
+            if extensions and entry.suffix.lower() not in extensions:
+                continue
+            size = entry.stat().st_size
+            size_groups.setdefault(size, []).append(entry)
+        except (PermissionError, OSError):
+            continue
+
+    hash_groups: dict[str, list[tuple[Path, int]]] = {}
+    for size, files in size_groups.items():
+        if len(files) < 2:
+            continue
+        for f in files:
+            try:
+                h = hashlib.sha256()
+                with open(f, "rb") as fh:
+                    while chunk := fh.read(1024 * 1024):
+                        h.update(chunk)
+                hash_groups.setdefault(h.hexdigest(), []).append((f, size))
+            except (PermissionError, OSError):
+                continue
+
+    duplicates = []
+    for digest, entries in hash_groups.items():
+        if len(entries) < 2:
+            continue
+        entries_sorted = sorted(entries, key=lambda pair: pair[0].stat().st_ctime)
+        size = entries_sorted[0][1]
+        duplicates.append({
+            "hash": digest,
+            "size": size,
+            "count": len(entries_sorted),
+            "files": [str(f) for f, _ in entries_sorted],
+        })
+    duplicates.sort(key=lambda d: -(d["size"] * (d["count"] - 1)))
+    return duplicates
+
+
+async def fs_find_duplicates_impl(path: str, security: SecurityValidator,
+                                   recursive: bool = False,
+                                   extensions: list[str] | None = None) -> str:
+    rpath = security.resolve_and_validate(path)
+    if not rpath.is_dir():
+        return f"Error: not a directory: {rpath}"
+    ext_set = _normalize_extensions(extensions)
+    duplicates = await asyncio.to_thread(_find_duplicates_sync, rpath, recursive, ext_set)
+    logger.info("fs_find_duplicates path=%s recursive=%s groups=%d", path, recursive, len(duplicates))
+    if not duplicates:
+        return "No exact duplicates found"
+    total_wasted = sum(d["size"] * (d["count"] - 1) for d in duplicates)
+    lines = [
+        (f"{len(duplicates)} duplicate group(s) found. "
+         f"Recoverable space: {total_wasted:,} bytes ({total_wasted / 1024 / 1024:.1f} MB)"),
+        "",
+    ]
+    for d in duplicates:
+        lines.append(f"[{d['count']} copies, {d['size']:,}B each, sha256 {d['hash'][:12]}...]")
+        lines.append(f"    ORIGINAL (oldest): {d['files'][0]}")
+        for f in d["files"][1:]:
+            lines.append(f"    duplicate: {f}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
 async def fs_edit_advanced_impl(path: str, edits: list[dict[str, str]],
                                  security: SecurityValidator, dry_run: bool = False) -> str:
     content = await fs_read_impl(path, security)
@@ -732,6 +834,14 @@ def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None
         if err:
             return err
         return await fs_read_media_impl(path, security)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    async def fs_find_duplicates(path: str, recursive: bool = False,
+                                  extensions: list[str] | None = None) -> str:
+        err = security.validate_tool_path(path, "read")
+        if err:
+            return err
+        return await fs_find_duplicates_impl(path, security, recursive, extensions)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False, destructiveHint=True))
     async def fs_edit_advanced(path: str, edits: list[dict[str, str]],

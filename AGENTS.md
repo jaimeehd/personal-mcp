@@ -17,11 +17,11 @@ cd C:\Repos\.personal-mcp
 .\sync-config.ps1                                 # refrescar el espejo de solo lectura config.json desde ~/.personal-mcp/config.json
 ```
 
-## Arquitectura — 6 capas hexagonales, 58 tools (54 activas — las 4 de SSH deshabilitadas por defecto)
+## Arquitectura — 6 capas hexagonales, 57 tools (53 activas — las 4 de SSH deshabilitadas por defecto)
 | Capa | Archivo | Tools | Frontera de seguridad |
 |------|---------|-------|------------------------|
 | 1 Filesystem | `layer1_filesystem.py` | 21 | `resolve_and_validate()` en cada ruta |
-| 2 Shell | `layer2_shell.py` + `shell_resolver.py` | 10 | lista de denegación de comandos + escaneo de rutas + multi-shell (powershell/pwsh/cmd/bash) |
+| 2 Shell | `layer2_shell.py` + `shell_resolver.py` | 9 | lista de denegación de comandos + escaneo de rutas + multi-shell (powershell/pwsh/cmd/bash) |
 | 3 SSH | `layer3_ssh.py` | 4 | deshabilitado por defecto (`ssh.enabled: false`) |
 | 4 Personal | `layer4_personal.py` | 8 | diario, notas, escaneo de proyectos |
 | 5 Health | `layer5_health.py` | 9 | diagnóstico, auditoría, benchmark, log tail (`mcp_log`) |
@@ -32,6 +32,7 @@ cd C:\Repos\.personal-mcp
 - `sys.path.insert(0, ...)` al inicio de `server.py` y `conftest.py` — ejecutar siempre desde la raíz del repo
 - **Layer 4 completa es condicional a `config.journal.enabled`**: si es `false`, `register_personal_tools()` retorna inmediatamente y las 8 tools del layer — incluyendo `project_scan` y `project_find` — no se registran. El acoplamiento es total por diseño actual; no hay forma de tener `project_scan` sin el journal habilitado.
 - **`fs_find_duplicates` (Layer 1, v1.4.42)**: búsqueda de duplicados exactos por contenido (SHA256) dentro de un `path`, a diferencia de buscar por patrón de nombre. Diseño de dos fases sin límite de cantidad ni tamaño de archivo (decisión explícita, 2026-07-31): fase 1 agrupa por tamaño exacto en bytes (`stat()`, prácticamente gratis — medido en 240ms para 232 archivos reales); fase 2 solo calcula hash dentro de los grupos que ya comparten tamaño con al menos otro archivo. Un archivo de tamaño único, por grande que sea, nunca se hashea — así se evita tanto el coste de hashear innecesariamente como el error de excluir archivos grandes que es justamente lo que se busca auditar. Parámetro `extensions` acepta `".pdf"` o `"pdf"` indistintamente (normalización case-insensitive). Solo lectura, no borra nada — deliberadamente separada de `fs_delete_batch`.
+- **Layer 2 nunca tuvo 10 tools — la tabla decía 10 por un error de doc introducido en 2026-07-25** (commit `2784539`, la sesión anterior de "corregir discrepancias AGENTS.md vs código"): esa sesión subió Layer 2 de 9→10 al mismo tiempo que corregía el total general (56→57), pero el código en ese mismo commit ya tenía 9 tools — las mismas de siempre (`sh_exec`, `sh_session_start/list/send/read/interrupt/close`, `sh_script`, `sh_history`). Nunca existió una décima tool ni se eliminó ninguna; fue un desliz aritmético al mover dos números a la vez. Verificado el 2026-08-01 contando `@mcp.tool` tanto en el código actual como en el código histórico de ese commit — 9 en ambos casos. Lección: al corregir un total agregado, verificar cada fila por separado, no solo que la suma final "se vea bien".
 
 ## Reglas de seguridad (no violar)
 1. **Todas las rutas** pasan por `security.resolve_and_validate()`. Las operaciones de lectura en `paths_allow` o `data_dir` pasan directamente. Las operaciones de escritura en `paths_allow` requieren grant explícito (session/single/permanent) vía `check_granted()`. Las rutas fuera de ambos lanzan `PathNotAllowedError`.

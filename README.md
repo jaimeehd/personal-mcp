@@ -6,7 +6,7 @@ Servidor MCP personalizado para orquestación de estaciones de trabajo Windows/L
 
 ```
 6 capas, diseño hexagonal:
-  Capa 1: Filesystem      — 20 tools (read, write, edit, delete, delete-batch, list, tree, search, find, info, diff, batch, snapshot, create-dir, move, read-multi, list-allowed, list-with-sizes, read-media, edit-advanced)
+  Capa 1: Filesystem      — 21 tools (read, write, edit, delete, delete-batch, list, tree, search, find, find-duplicates, info, diff, batch, snapshot, create-dir, move, read-multi, list-allowed, list-with-sizes, read-media, edit-advanced)
   Capa 2: Shell           — 9 tools (exec, sesiones persistentes, ejecución de scripts, historial, shell configurable)
   Capa 3: SSH             — 4 tools (listar hosts, conectar, ejecutar, desconectar) [deshabilitado por defecto]
   Capa 4: Personal        — 8 tools (journal CRUD, notas rápidas, escaneo de proyectos, búsqueda en proyectos)
@@ -14,7 +14,7 @@ Servidor MCP personalizado para orquestación de estaciones de trabajo Windows/L
   Capa 6: Permissions     — 6 tools (aprobar, denegar, pre-autorizar, listar pendientes, revocar, estadísticas)
 ```
 
-56 tools en total, 52 activas (las 4 de SSH deshabilitadas por defecto).
+57 tools en total, 53 activas (las 4 de SSH deshabilitadas por defecto).
 
 ## Tools
 
@@ -41,6 +41,33 @@ Servidor MCP personalizado para orquestación de estaciones de trabajo Windows/L
 | `fs_list_with_sizes` | Listar entradas de directorio con tamaños, ordenable |
 | `fs_read_media` | Leer una imagen/binario como base64, con escaneo de secretos en el contenido decodificado |
 | `fs_edit_advanced` | Múltiples reemplazos find/replace en un archivo en una sola llamada, con dry-run |
+| `fs_find_duplicates` | Buscar archivos con contenido idéntico (SHA256) dentro de una carpeta, aunque el nombre difiera — a diferencia de `fs_find`, que busca por nombre/tamaño/antigüedad. Sin límite de cantidad ni tamaño de archivo: agrupa primero por tamaño exacto (gratis, sin leer contenido) y solo calcula hash dentro de esos grupos. Parámetros: `path`, `recursive?` (default `false`), `extensions?` (acepta `".pdf"` o `"pdf"` indistintamente). Solo lectura — no borra nada. |
+
+**Ejemplo de uso — `fs_find_duplicates`:**
+```
+fs_find_duplicates(path="C:\\Users\\usuario\\Downloads")
+```
+Busca duplicados exactos en la raíz de esa carpeta (no entra a subcarpetas por defecto).
+
+```
+fs_find_duplicates(
+    path="C:\\Users\\usuario\\Downloads",
+    recursive=True,
+    extensions=["pdf", "docx"]
+)
+```
+Igual, pero recorriendo subcarpetas y limitado a `.pdf`/`.docx`.
+
+Salida (ejemplo):
+```
+2 duplicate group(s) found. Recoverable space: 5,632,000 bytes (5.4 MB)
+
+[3 copies, 2,492,300B each, sha256 a1b2c3d4e5f6...]
+    ORIGINAL (oldest): C:\Users\usuario\Downloads\informe.docx
+    duplicate: C:\Users\usuario\Downloads\informe (1).docx
+    duplicate: C:\Users\usuario\Downloads\informe_copia.docx
+```
+Solo encuentra — no borra. Para limpiar, pasar las rutas marcadas como `duplicate` a `fs_delete_batch`.
 
 ### Capa 2 — Shell (ejecución multi-shell, cambio de shell en runtime)
 | Tool | Descripción |

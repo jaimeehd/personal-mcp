@@ -11,16 +11,16 @@
 ## Arranque rápido
 ```powershell
 cd C:\Repos\.personal-mcp
-.\.venv\Scripts\python -m pytest tests/ -v       # 303 tests, verificado 2026-07-31 (0 fallidos). El CHANGELOG 1.4.23 decía 331 -- investigado (1.4.29): comparado contra dos backups independientes del repo, ninguno tiene más tests que este árbol. 331 nunca fue exacto, no es una pérdida.
+.\.venv\Scripts\python -m pytest tests/ -v       # 311 tests, verificado 2026-08-01 (0 fallidos). El CHANGELOG 1.4.23 decía 331 -- investigado (1.4.29): comparado contra dos backups independientes del repo, ninguno tiene más tests que este árbol. 331 nunca fue exacto, no es una pérdida.
 .\.venv\Scripts\python -m src.server              # modo stdio para Claude Desktop
 .\install.ps1                                     # registrar con Claude Desktop (crea el venv automáticamente)
 .\sync-config.ps1                                 # refrescar el espejo de solo lectura config.json desde ~/.personal-mcp/config.json
 ```
 
-## Arquitectura — 6 capas hexagonales, 57 tools (53 activas — las 4 de SSH deshabilitadas por defecto)
+## Arquitectura — 6 capas hexagonales, 58 tools (54 activas — las 4 de SSH deshabilitadas por defecto)
 | Capa | Archivo | Tools | Frontera de seguridad |
 |------|---------|-------|------------------------|
-| 1 Filesystem | `layer1_filesystem.py` | 20 | `resolve_and_validate()` en cada ruta |
+| 1 Filesystem | `layer1_filesystem.py` | 21 | `resolve_and_validate()` en cada ruta |
 | 2 Shell | `layer2_shell.py` + `shell_resolver.py` | 10 | lista de denegación de comandos + escaneo de rutas + multi-shell (powershell/pwsh/cmd/bash) |
 | 3 SSH | `layer3_ssh.py` | 4 | deshabilitado por defecto (`ssh.enabled: false`) |
 | 4 Personal | `layer4_personal.py` | 8 | diario, notas, escaneo de proyectos |
@@ -31,6 +31,7 @@ cd C:\Repos\.personal-mcp
 - Los closures en `register_*()` envuelven `_impl` con verificaciones de seguridad/permisos
 - `sys.path.insert(0, ...)` al inicio de `server.py` y `conftest.py` — ejecutar siempre desde la raíz del repo
 - **Layer 4 completa es condicional a `config.journal.enabled`**: si es `false`, `register_personal_tools()` retorna inmediatamente y las 8 tools del layer — incluyendo `project_scan` y `project_find` — no se registran. El acoplamiento es total por diseño actual; no hay forma de tener `project_scan` sin el journal habilitado.
+- **`fs_find_duplicates` (Layer 1, v1.4.42)**: búsqueda de duplicados exactos por contenido (SHA256) dentro de un `path`, a diferencia de buscar por patrón de nombre. Diseño de dos fases sin límite de cantidad ni tamaño de archivo (decisión explícita, 2026-07-31): fase 1 agrupa por tamaño exacto en bytes (`stat()`, prácticamente gratis — medido en 240ms para 232 archivos reales); fase 2 solo calcula hash dentro de los grupos que ya comparten tamaño con al menos otro archivo. Un archivo de tamaño único, por grande que sea, nunca se hashea — así se evita tanto el coste de hashear innecesariamente como el error de excluir archivos grandes que es justamente lo que se busca auditar. Parámetro `extensions` acepta `".pdf"` o `"pdf"` indistintamente (normalización case-insensitive). Solo lectura, no borra nada — deliberadamente separada de `fs_delete_batch`.
 
 ## Reglas de seguridad (no violar)
 1. **Todas las rutas** pasan por `security.resolve_and_validate()`. Las operaciones de lectura en `paths_allow` o `data_dir` pasan directamente. Las operaciones de escritura en `paths_allow` requieren grant explícito (session/single/permanent) vía `check_granted()`. Las rutas fuera de ambos lanzan `PathNotAllowedError`.
@@ -65,6 +66,7 @@ cd C:\Repos\.personal-mcp
 - `src/config.py:LogConfig` — `level`, `max_bytes`, `backup_count` para logging estructurado
 - `src/config.py:ShellConfig` — `default_shell` (string), `shell_map` (dict para rutas personalizadas)
 - `src/layers/layer2_shell.py` — `MAX_CAPTURE_BYTES=1MiB`, `_truncate()`, `_scan_command_warnings()`. Limpieza de procesos delegada a `src/oslayer/process.py` desde v1.4.33 (`kill_process_tree` vía psutil, `reap_after_kill` — debe llamarse después de cada `kill_process_tree()` o los handles se fugan; ver CHANGELOG 1.4.19/1.4.20/1.4.33)
+- **`src/oslayer/system.py:uptime_seconds()`**: devuelve `GetTickCount64()` en Windows — el uptime del **sistema operativo desde el último boot**, NO el tiempo de vida del proceso `personal-mcp`. El campo `uptime` que reporta `health_check` refleja esto. No sirve para verificar si el servidor MCP fue reiniciado — solo si la máquina lo fue. Para eso, comparar el timestamp de la línea `Server starting pid=...` más reciente en `server.log`, o verificar directamente si una tool agregada en el código nuevo aparece en el tool-list (ver siguiente punto sobre `server.log` compartido).
 
 ## Peculiaridades de PermissionManager
 - `GrantLevel`: `SINGLE`, `SESSION`, `PERMANENT`
@@ -98,6 +100,7 @@ cd C:\Repos\.personal-mcp
 - La salida de shell se trunca a 1 MiB — se agrega un mensaje si fue truncada
 - La limpieza por timeout usa `taskkill /pid /T /F` (recursivo, solo Windows)
 - La capa SSH es opt-in — `ssh.enabled: false` por defecto
+- **`server.log` es compartido entre TODOS los procesos `personal-mcp` que corran en la máquina, incluyendo instancias efímeras** (ej. una suite de `pytest`/smoke-test arranca y cierra un proceso nuevo por test, cada uno con su propio PID) — no solo el proceso interactivo de Claude Desktop. Verificado el 2026-07-31: se observaron líneas `Server starting pid=...` con PIDs distintos intercaladas cada 1-2 segundos en el mismo archivo. Implicación real: **los tickets y grants viven en memoria por-proceso** (ver "Peculiaridades de PermissionManager" arriba) — un ticket aprobado en un proceso NO es consumible desde otro, aunque ambos escriban al mismo log y parezca, por cercanía temporal en las líneas, que pertenecen a la misma sesión. Para reconstruir qué pasó a partir de `mcp_log`, hay que anclar cada entrada al `Server starting pid=...` más reciente que la precede, no asumir que el log completo pertenece a un único proceso lineal.
 - `import sys; sys.path.insert(0, ...)` requerido en cada punto de entrada para imports de `src.`
 - Todas las funciones `_impl` aceptan `security` como parámetro — los closures lo vinculan en el momento del registro
 - **Auditoría externa v1.4.9 (2026-07-04) — 3 hallazgos adicionales más allá de los dos ya incorporados en las reglas #2 y #4 arriba:**

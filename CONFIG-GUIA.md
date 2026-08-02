@@ -38,13 +38,18 @@ Carpetas donde el asistente sí puede leer, escribir o modificar archivos. Si un
 carpeta no está en esta lista, el asistente no puede tocarla, sin importar qué
 se le pida.
 
-**Windows (valor por defecto):**
+**Windows (valor por defecto para una instalación nueva):**
 | Ruta | Qué es |
 |---|---|
-| `C:\Repos` | Tu carpeta de repositorios/proyectos. **Todo** lo que esté dentro — cualquier subcarpeta, sin importar cuántos niveles — queda accesible automáticamente. No hace falta listar cada proyecto por separado. |
+| `%USERPROFILE%\source\repos`, `\Documents\GitHub`, `\repos` | Rutas convencionales de proyectos (VS/GitHub Desktop), las que existan en el equipo |
 | `C:\Users\TuUsuario\Desktop` | Tu Escritorio (si existe) |
 | `C:\Users\TuUsuario\OneDrive` | Tu OneDrive (si existe) |
 | `C:\Users\TuUsuario\.personal-mcp` | Carpeta interna del asistente |
+
+> ⚠️ Esto es el valor por defecto que recibe una instalación **nueva**. La config oficial
+> de este equipo en particular puede ser distinta (más amplia o más restringida) si alguien
+> la editó manualmente después de instalar — revisa siempre `~/.personal-mcp/config.json`
+> para saber qué está realmente permitido, esta tabla no lo reemplaza.
 
 **Linux/macOS (valor por defecto):**
 | Ruta | Qué es |
@@ -111,20 +116,21 @@ uno de estos patrones, queda bloqueada igual. Es una segunda capa de seguridad.
   reiniciar, formatear discos, borrar todo de forma forzada, y modificar
   cuentas de usuario/administradores.
 
-  💡 **Recomendación (agregada 2026-07-05):** si usás `python` o `node`, vale
-  la pena sumar patrones específicos de operaciones peligrosas que esos
-  programas pueden ejecutar por dentro — por ejemplo `os.system`,
+  💡 **Ya aplicado en la config oficial (agregado 2026-07-05):** si usás `python` o `node`, patrones específicos de operaciones peligrosas que esos programas pueden ejecutar por dentro ya están sumados al `deny` — por ejemplo `os.system`,
   `subprocess.run`, `shutil.rmtree`, `child_process`. La idea, tomada del
   mismo enfoque que usa Desktop Commander (otro asistente similar): no es una
   protección perfecta — alguien decidido a evadirla puede reescribir el código
   de otra forma — pero es gratis (solo texto en una lista) y frena el error
-  honesto, que es el riesgo más probable en el uso diario. Ejemplo de lista
-  ampliada, agregable a `deny`:
+  honesto, que es el riesgo más probable en el uso diario. Estos son los patrones
+  que ya están en el `deny` real de este equipo:
   ```json
   "os.system", "subprocess.run", "subprocess.Popen", "subprocess.call",
   "shutil.rmtree", "child_process", "require('fs').unlink", "curl * | ",
   "wget * | ", "iex (", "Invoke-Expression"
   ```
+  Si estás configurando una instalación **nueva** desde `install.ps1`, revisa si estos
+  patrones ya están en tu `deny` — el instalador no los agrega automáticamente todavía,
+  así que en un equipo recién instalado sí tendrías que sumarlos a mano.
 
 - **require_flag_approval:** banderas de comandos (como `-force` o `/f`) que obligan
   a una confirmación extra porque suelen ser destructivas.
@@ -160,7 +166,14 @@ separado para operaciones de lectura y escritura (no se mezclan los contadores).
 
 ### rate_limit_files_per_operation — Límite de archivos por operación
 
-Actualmente: 100. Ninguna operación puede tocar más de 100 archivos a la vez.
+Actualmente: 100. La mayoría de las operaciones que tocan varios archivos a la
+vez no pueden pasar de 100 en una sola llamada.
+
+⚠️ **Excepción:** `fs_delete_batch` (borrado múltiple) **no tiene este límite**
+desde el 2026-07-19 — puede procesar cualquier cantidad de archivos en una
+sola llamada. Cada borrado sigue exigiendo su propio código de confirmación
+igual que siempre; lo único que cambió es que no se trocea automáticamente
+en grupos de 100.
 
 ### secret_scanning_enabled — Detección automática de secretos
 

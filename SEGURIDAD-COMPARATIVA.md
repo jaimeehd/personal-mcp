@@ -18,7 +18,7 @@ servidores MCP analizados. Es el único con:
 - Escaneo de secretos en archivos leídos
 - Protección contra symlinks/junctions
 - Capa SSH deshabilitada por defecto (opt-in)
-- 6 capas hexagonales de seguridad con 56 herramientas (52 activas)
+- 6 capas hexagonales de seguridad con 57 herramientas (53 activas)
 
 Mientras que servidores populares como Desktop Commander tienen **3+ CVEs
 activos** por path traversal y command injection, personal-mcp no tiene CVEs

@@ -115,12 +115,9 @@ if (-not (Test-Path $ConfigPath)) {
             )
             commands = @{
                 allow_prefix = @(
-                    "git", "npm", "dotnet", "python", "node", "dir", "ls",
-                    "cd", "cat", "type", "find", "select-string", "echo",
-                    "pwd", "get-location", "get-childitem", "gci", "set-location",
-                    "sl", "write-output", "ping", "tracert", "ipconfig",
-                    "systeminfo", "tasklist", "get-process", "get-service",
-                    "where", "help", "man", "more"
+                    "git", "npm", "python", "ls", "pytest", "echo", "uv",
+                    "make", "docker", "cat", "type", "dotnet", "node",
+                    "pnpm", "flutter", "gh"
                 )
                 deny = @(
                     "shutdown", "reboot", "restart-computer", "stop-computer",
@@ -211,11 +208,11 @@ Write-Host "Data:         $McpDir\data"
 Write-Host "Claude Config: $ClaudeConfigPath"
 Write-Host ""
 Write-Host "Available tools:" -ForegroundColor White
-Write-Host "  Layer 1 - Filesystem:  fs_read, fs_write, fs_edit, fs_delete, fs_list, fs_tree, fs_search, fs_find, fs_info, fs_diff, fs_batch, fs_snapshot"
+Write-Host "  Layer 1 - Filesystem:  fs_read, fs_write, fs_edit, fs_edit_advanced, fs_delete, fs_delete_batch, fs_list, fs_list_with_sizes, fs_list_allowed, fs_tree, fs_search, fs_find, fs_find_duplicates, fs_info, fs_diff, fs_batch, fs_snapshot, fs_create_directory, fs_move, fs_read_multi, fs_read_media"
 Write-Host "  Layer 2 - Shell:       sh_exec, sh_session_start, sh_session_list, sh_session_send, sh_session_read, sh_session_interrupt, sh_session_close, sh_script, sh_history"
 Write-Host "  Layer 3 - SSH:         ssh_list_hosts, ssh_connect, ssh_exec, ssh_disconnect (if enabled)"
 Write-Host "  Layer 4 - Personal:    journal_add, journal_list, journal_search, journal_stats, journal_export, note_quick, project_scan, project_find"
-Write-Host "  Layer 5 - Health:      health_check, health_disk, health_processes, health_config, mcp_diag, mcp_audit_log, mcp_list_tools, mcp_benchmark"
+Write-Host "  Layer 5 - Health:      health_check, health_disk, health_processes, health_config, mcp_diag, mcp_audit_log, mcp_list_tools, mcp_benchmark, mcp_log"
 Write-Host "  Layer 6 - Permissions: fs_approve, fs_deny, fs_request_allow, security_pending, security_revoke, security_stats"
 Write-Host ""
 Write-Host "Restart Claude Desktop to activate personal-mcp." -ForegroundColor Yellow

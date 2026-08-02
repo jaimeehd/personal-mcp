@@ -618,6 +618,69 @@ async def fs_find_duplicates_impl(path: str, security: SecurityValidator,
     return "\n".join(lines).rstrip()
 
 
+def _disk_usage_sync(base: Path, depth: int) -> list[tuple[Path, int]]:
+    """Single pass over the tree: attribute every file's size to its ancestor
+    directory exactly `depth` levels under `base` (or to `base` itself if the
+    file lives shallower than `depth`). One os.walk() over the whole tree
+    regardless of how many buckets result — avoids re-walking shared subtrees
+    once per sibling folder, which a naive "call this per-subfolder" approach
+    would do.
+
+    No cap on the number of buckets computed or files scanned (2026-08-01,
+    same reasoning as fs_find_duplicates/project_git_status): the real cost
+    driver is how much of the tree os.walk() has to traverse, which a count
+    limit would not bound anyway. Only the *display* (top_n, in the caller)
+    is truncated.
+    """
+    buckets: dict[Path, int] = {}
+    base_depth = len(base.parts)
+    for dirpath, _dirnames, filenames in os.walk(base):
+        current = Path(dirpath)
+        rel_depth = len(current.parts) - base_depth
+        if rel_depth >= depth:
+            ancestor = Path(*current.parts[:base_depth + depth])
+        else:
+            ancestor = base
+        total = 0
+        for fname in filenames:
+            try:
+                total += (current / fname).stat().st_size
+            except (OSError, PermissionError):
+                continue
+        if total:
+            buckets[ancestor] = buckets.get(ancestor, 0) + total
+    return sorted(buckets.items(), key=lambda kv: -kv[1])
+
+
+async def fs_disk_usage_impl(path: str, security: SecurityValidator,
+                              top_n: int = 15, depth: int = 1) -> str:
+    rpath = security.resolve_and_validate(path)
+    if not rpath.is_dir():
+        return f"Error: not a directory: {rpath}"
+    buckets = await asyncio.to_thread(_disk_usage_sync, rpath, depth)
+    logger.info("fs_disk_usage path=%s depth=%d buckets=%d", path, depth, len(buckets))
+    if not buckets:
+        return "No files found"
+    total = sum(size for _, size in buckets)
+    shown = buckets[:top_n]
+    lines = [
+        f"Uso de disco bajo {rpath} — total {total:,} bytes ({total / 1024 / 1024 / 1024:.2f} GB)",
+        "",
+    ]
+    for p, size in shown:
+        pct = (size / total * 100) if total else 0
+        lines.append(f"{size:>15,} B  ({size / 1024 / 1024:8.1f} MB, {pct:5.1f}%)  {p}")
+    remaining = len(buckets) - len(shown)
+    if remaining > 0:
+        shown_total = sum(size for _, size in shown)
+        other_total = total - shown_total
+        lines.append(
+            f"... y {remaining} carpeta(s) más, "
+            f"{other_total:,} bytes ({other_total / 1024 / 1024:.1f} MB) en total"
+        )
+    return "\n".join(lines)
+
+
 async def fs_edit_advanced_impl(path: str, edits: list[dict[str, str]],
                                  security: SecurityValidator, dry_run: bool = False) -> str:
     content = await fs_read_impl(path, security)
@@ -842,6 +905,13 @@ def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None
         if err:
             return err
         return await fs_find_duplicates_impl(path, security, recursive, extensions)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    async def fs_disk_usage(path: str, top_n: int = 15, depth: int = 1) -> str:
+        err = security.validate_tool_path(path, "read")
+        if err:
+            return err
+        return await fs_disk_usage_impl(path, security, top_n, depth)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False, destructiveHint=True))
     async def fs_edit_advanced(path: str, edits: list[dict[str, str]],

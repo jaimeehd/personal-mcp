@@ -10,7 +10,7 @@
 | # | Tool | Beneficio | Riesgo | Estado |
 |---|------|-----------|--------|--------|
 | 1 | `project_git_status` | Alto — evidencia directa de la sesión del 2026-08-01 | Bajo | ✅ Completado (v1.4.43) |
-| 2 | `fs_disk_usage` | Alto — complementa `fs_find_duplicates` | Bajo | ⏳ Pendiente |
+| 2 | `fs_disk_usage` | Alto — complementa `fs_find_duplicates` | Bajo | ✅ Completado (v1.4.44) |
 | 3 | `sh_spawn` | Medio — ya diseñado en `AGENTS.md` | Alto — huérfanos entre reinicios, ver nota | ⏳ Pendiente, bloqueado |
 | 4 | `fs_compress`/`fs_extract` | Bajo — sin evidencia de necesidad real | Medio — zip slip | ⏳ Pendiente |
 
@@ -45,7 +45,7 @@ equipo) a cambio de no requerir mantenimiento manual de una lista de repos.
 No baja a nivel de archivo individual (para eso ya existe `fs_find_duplicates`
 y `fs_list_with_sizes`).
 
-**Estado:** no iniciado.
+**Estado:** ✅ Completado — v1.4.44. Ver `layer1_filesystem.py::fs_disk_usage_impl`.
 
 ## 3. `sh_spawn`
 

@@ -11,6 +11,7 @@ from src.layers.layer1_filesystem import (
     fs_batch_impl,
     fs_create_directory_impl,
     fs_diff_impl,
+    fs_disk_usage_impl,
     fs_edit_advanced_impl,
     fs_edit_impl,
     fs_find_duplicates_impl,
@@ -490,6 +491,65 @@ async def test_find_duplicates_not_a_directory(sample_file, sec):
     result = await fs_find_duplicates_impl(str(sample_file), sec)
     assert "Error" in result
     assert "not a directory" in result
+
+
+# --- fs_disk_usage ---
+
+@pytest.mark.asyncio
+async def test_disk_usage_basic(temp_home, sec):
+    base = temp_home / "Repos" / "disk_basic"
+    (base / "a").mkdir(parents=True)
+    (base / "b").mkdir(parents=True)
+    (base / "a" / "file1.txt").write_bytes(b"x" * 100)
+    (base / "b" / "file2.txt").write_bytes(b"x" * 200)
+    (base / "loose.txt").write_bytes(b"x" * 10)
+
+    result = await fs_disk_usage_impl(str(base), sec)
+    assert "310" in result  # total bytes
+    # 'b' (200 bytes) must be listed before 'a' (100 bytes) -- descending order
+    assert result.index(str(base / "b")) < result.index(str(base / "a"))
+
+
+@pytest.mark.asyncio
+async def test_disk_usage_depth_param(temp_home, sec):
+    base = temp_home / "Repos" / "disk_depth"
+    nested = base / "level1" / "level2"
+    nested.mkdir(parents=True)
+    (nested / "file.txt").write_bytes(b"x" * 300)
+
+    result_depth1 = await fs_disk_usage_impl(str(base), sec, depth=1)
+    assert str(base / "level1") in result_depth1
+    assert str(base / "level1" / "level2") not in result_depth1
+
+    result_depth2 = await fs_disk_usage_impl(str(base), sec, depth=2)
+    assert str(base / "level1" / "level2") in result_depth2
+
+
+@pytest.mark.asyncio
+async def test_disk_usage_top_n_truncation(temp_home, sec):
+    base = temp_home / "Repos" / "disk_topn"
+    for i in range(3):
+        d = base / f"folder{i}"
+        d.mkdir(parents=True)
+        (d / "f.txt").write_bytes(b"x" * (100 * (i + 1)))
+
+    result = await fs_disk_usage_impl(str(base), sec, top_n=1)
+    assert "y 2 carpeta(s) más" in result
+
+
+@pytest.mark.asyncio
+async def test_disk_usage_not_a_directory(sample_file, sec):
+    result = await fs_disk_usage_impl(str(sample_file), sec)
+    assert "Error" in result
+    assert "not a directory" in result
+
+
+@pytest.mark.asyncio
+async def test_disk_usage_empty_dir(temp_home, sec):
+    base = temp_home / "Repos" / "disk_empty"
+    base.mkdir(parents=True)
+    result = await fs_disk_usage_impl(str(base), sec)
+    assert "No files found" in result
 
 
 

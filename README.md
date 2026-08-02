@@ -6,7 +6,7 @@ Servidor MCP personalizado para orquestación de estaciones de trabajo Windows/L
 
 ```
 6 capas, diseño hexagonal:
-  Capa 1: Filesystem      — 21 tools (read, write, edit, delete, delete-batch, list, tree, search, find, find-duplicates, info, diff, batch, snapshot, create-dir, move, read-multi, list-allowed, list-with-sizes, read-media, edit-advanced)
+  Capa 1: Filesystem      — 22 tools (read, write, edit, delete, delete-batch, list, tree, search, find, find-duplicates, disk-usage, info, diff, batch, snapshot, create-dir, move, read-multi, list-allowed, list-with-sizes, read-media, edit-advanced)
   Capa 2: Shell           — 9 tools (exec, sesiones persistentes, ejecución de scripts, historial, shell configurable)
   Capa 3: SSH             — 4 tools (listar hosts, conectar, ejecutar, desconectar) [deshabilitado por defecto]
   Capa 4: Personal        — 9 tools (journal CRUD, notas rápidas, escaneo de proyectos, búsqueda en proyectos, estado git multi-repo)
@@ -14,7 +14,7 @@ Servidor MCP personalizado para orquestación de estaciones de trabajo Windows/L
   Capa 6: Permissions     — 6 tools (aprobar, denegar, pre-autorizar, listar pendientes, revocar, estadísticas)
 ```
 
-58 tools en total, 54 activas (las 4 de SSH deshabilitadas por defecto).
+59 tools en total, 55 activas (las 4 de SSH deshabilitadas por defecto).
 
 ## Tools
 
@@ -42,6 +42,7 @@ Servidor MCP personalizado para orquestación de estaciones de trabajo Windows/L
 | `fs_read_media` | Leer una imagen/binario como base64, con escaneo de secretos en el contenido decodificado |
 | `fs_edit_advanced` | Múltiples reemplazos find/replace en un archivo en una sola llamada, con dry-run |
 | `fs_find_duplicates` | Buscar archivos con contenido idéntico (SHA256) dentro de una carpeta, aunque el nombre difiera — a diferencia de `fs_find`, que busca por nombre/tamaño/antigüedad. Sin límite de cantidad ni tamaño de archivo: agrupa primero por tamaño exacto (gratis, sin leer contenido) y solo calcula hash dentro de esos grupos. Parámetros: `path`, `recursive?` (default `false`), `extensions?` (acepta `".pdf"` o `"pdf"` indistintamente). Solo lectura — no borra nada. |
+| `fs_disk_usage` | Auditoría de espacio en disco: agrupa el tamaño de todos los archivos bajo `path` por carpeta ancestro a `depth` niveles, devuelve las `top_n` que más pesan. Complementa a `fs_find_duplicates` — esa responde "qué está repetido", esta responde "qué carpeta pesa más". Parámetros: `path`, `top_n?` (default `15`), `depth?` (default `1`). Solo lectura. |
 
 **Ejemplo de uso — `fs_find_duplicates`:**
 ```
@@ -85,6 +86,28 @@ Cuando tengas el resultado:
    fs_delete_batch, y sigue el flujo normal de ticket/confirm_code.
 ```
 El paso 2 es la línea que realmente importa: sin ella, un agente proactivo podría encadenar búsqueda y borrado en el mismo turno. El sistema de tickets igual exigiría confirmación por popup antes de cualquier borrado real, pero esta instrucción evita que el agente *intente* hacerlo sin pedirlo primero — es una capa de intención, no solo de permiso técnico.
+
+**Ejemplo de uso — `fs_disk_usage`:**
+```
+fs_disk_usage(path="C:\\Users\\usuario\\Downloads")
+```
+Agrupa por subcarpeta inmediata (`depth=1`), muestra las 15 que más pesan (`top_n=15`, ambos defaults).
+
+```
+fs_disk_usage(path="C:\\Repos", top_n=5, depth=2)
+```
+Agrupa dos niveles de profundidad (ej. `Repos\Proyecto\subcarpeta`), muestra solo las 5 más pesadas.
+
+Salida (ejemplo):
+```
+Uso de disco bajo C:\Users\usuario\Downloads — total 17,038,532,030 bytes (15.87 GB)
+
+   8,542,210,304 B  (  8146.5 MB,  50.1%)  C:\Users\usuario\Downloads\videos
+   3,221,225,472 B  (  3072.0 MB,  18.9%)  C:\Users\usuario\Downloads\instaladores
+     830,472,192 B  (   792.1 MB,   4.9%)  C:\Users\usuario\Downloads\documentos
+... y 12 carpeta(s) más, 4,444,624,062 bytes (4238.5 MB) en total
+```
+Solo lee — no borra ni mueve nada. Útil junto con `fs_find_duplicates` para decidir dónde limpiar primero.
 
 ### Capa 2 — Shell (ejecución multi-shell, cambio de shell en runtime)
 | Tool | Descripción |

@@ -15,6 +15,16 @@
 ### Security — sin cambio de superficie
 - La persistencia es de solo-metadatos; el `confirm_code` y `_confirm_secret` siguen siendo exclusivamente en memoria. `paths_allow=["C:\"]` permite lectura libre del disco, por lo que persistir códigos o el secreto reabriría el gap que v1.4.14 cerró deliberadamente.
 
+## [1.4.44] — 2026-08-01
+
+### Added — `fs_disk_usage`, auditoría de espacio en disco por carpeta
+- Nueva tool de solo lectura en Layer 1: dado un `path`, agrupa el tamaño de todos los archivos por carpeta ancestro a `depth` niveles (default 1) y devuelve las `top_n` (default 15) que más pesan. Complementa a `fs_find_duplicates` (2026-07-31) — esa responde "¿qué está repetido?", esta responde "¿qué carpeta específica se está comiendo el disco?", la otra mitad de la misma pregunta de auditoría de espacio.
+- **Un solo recorrido del árbol** (`os.walk()`), sin importar cuántas carpetas resulten — evita recorrer subárboles compartidos una vez por cada carpeta hermana, que sería el costo de un enfoque ingenuo de "sumar el tamaño de cada subcarpeta por separado".
+- Sin límite artificial de cantidad de carpetas ni de archivos escaneados — mismo principio que `fs_find_duplicates`/`project_git_status`: el costo real es cuánto árbol hay que recorrer, no algo que un límite de conteo acotaría de todas formas. Solo la salida (`top_n`) se trunca, no el cómputo.
+- Segundo ítem completado de `PLAN-NUEVAS-TOOLS.md`.
+- 5 tests nuevos en `test_filesystem.py`: agrupación y orden descendente, comportamiento del parámetro `depth`, truncamiento de `top_n`, carpeta vacía, y error si no es un directorio.
+- Verificado: ruff limpio, 321/321 tests.
+
 ## [1.4.43] — 2026-08-01
 
 ### Added — `project_git_status`, estado de git multi-repo con descubrimiento automático

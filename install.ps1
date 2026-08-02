@@ -117,7 +117,8 @@ if (-not (Test-Path $ConfigPath)) {
                 allow_prefix = @(
                     "git", "npm", "python", "ls", "pytest", "echo", "uv",
                     "make", "docker", "cat", "type", "dotnet", "node",
-                    "pnpm", "flutter", "gh"
+                    "pnpm", "flutter", "gh", "yarn", "where", "cargo",
+                    "pip", "ruff", "select-string", "tree"
                 )
                 deny = @(
                     "shutdown", "reboot", "restart-computer", "stop-computer",

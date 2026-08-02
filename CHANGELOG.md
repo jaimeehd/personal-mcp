@@ -15,6 +15,18 @@
 ### Security — sin cambio de superficie
 - La persistencia es de solo-metadatos; el `confirm_code` y `_confirm_secret` siguen siendo exclusivamente en memoria. `paths_allow=["C:\"]` permite lectura libre del disco, por lo que persistir códigos o el secreto reabriría el gap que v1.4.14 cerró deliberadamente.
 
+## [1.4.43] — 2026-08-01
+
+### Added — `project_git_status`, estado de git multi-repo con descubrimiento automático
+- Nueva tool de solo lectura en Layer 4 (Personal): recorre todas las raíces de `paths_allow` buscando carpetas `.git` y reporta, para cada repo encontrado, cambios sin commitear, commits sin pushear y commits del remoto sin traer.
+- **Decisión de diseño explícita (2026-08-01):** descubrimiento automático (recorrido de `paths_allow`) en vez de una lista fija de repos en config. Trade-off aceptado: más lento si `paths_allow` es amplio (como `["C:\\"]` en la config real de este equipo), a cambio de no requerir mantenimiento manual. Documentado en `PLAN-NUEVAS-TOOLS.md`.
+- Recorrido con `os.walk()` y poda de directorios en el propio recorrido (no `Path.rglob`, que no permite saltar subárboles una vez que decide entrar) — mismo conjunto de exclusión ya usado por `project_find` (`node_modules`, `.venv`, `AppData`, etc.), extendido con algunas carpetas más de sistema.
+- Sin límite artificial de cantidad de repos — mismo principio que `fs_find_duplicates` (2026-07-31).
+- `_git_project_info()` (ya existente, usada por `project_scan`) extendida para agregar `ahead`/`behind` contra el upstream, reutilizando la misma función en vez de duplicar lógica de subprocess.
+- 5 tests nuevos en `test_personal.py`, incluyendo un repo con remoto real (bare repo local) para ejercitar el camino real de `git rev-list --left-right --count`, y un caso de regresión para la exclusión de `node_modules`.
+- Primer ítem completado de `PLAN-NUEVAS-TOOLS.md` (documento de seguimiento nuevo, agregado en este mismo commit) — quedan pendientes `fs_disk_usage`, `sh_spawn` (bloqueada, ver el plan) y `fs_compress`/`fs_extract`.
+- Verificado: ruff limpio, 316/316 tests.
+
 ## [1.4.42] — 2026-07-31
 
 ### Added — `fs_find_duplicates`, búsqueda de duplicados exactos por hash

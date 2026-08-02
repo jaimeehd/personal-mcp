@@ -9,12 +9,12 @@ Servidor MCP personalizado para orquestación de estaciones de trabajo Windows/L
   Capa 1: Filesystem      — 21 tools (read, write, edit, delete, delete-batch, list, tree, search, find, find-duplicates, info, diff, batch, snapshot, create-dir, move, read-multi, list-allowed, list-with-sizes, read-media, edit-advanced)
   Capa 2: Shell           — 9 tools (exec, sesiones persistentes, ejecución de scripts, historial, shell configurable)
   Capa 3: SSH             — 4 tools (listar hosts, conectar, ejecutar, desconectar) [deshabilitado por defecto]
-  Capa 4: Personal        — 8 tools (journal CRUD, notas rápidas, escaneo de proyectos, búsqueda en proyectos)
+  Capa 4: Personal        — 9 tools (journal CRUD, notas rápidas, escaneo de proyectos, búsqueda en proyectos, estado git multi-repo)
   Capa 5: Health/Diagnóstico — 9 tools (health check, disco, procesos, configuración, diag, audit log, lista de tools, benchmark, log tail)
   Capa 6: Permissions     — 6 tools (aprobar, denegar, pre-autorizar, listar pendientes, revocar, estadísticas)
 ```
 
-57 tools en total, 53 activas (las 4 de SSH deshabilitadas por defecto).
+58 tools en total, 54 activas (las 4 de SSH deshabilitadas por defecto).
 
 ## Tools
 
@@ -117,6 +117,21 @@ El paso 2 es la línea que realmente importa: sin ella, un agente proactivo podr
 | `note_quick` | Nota rápida a archivo inbox |
 | `project_scan` | Escanear repos: rama, cambios sin commit |
 | `project_find` | Buscar archivo en todos los repos permitidos |
+| `project_git_status` | Estado de git para **todos** los repos encontrados bajo `paths_allow`, sin lista fija — descubrimiento automático (recorre las carpetas buscando `.git`, saltando `node_modules`/`.venv`/etc.). Reporta cambios sin commitear, commits sin pushear y commits del remoto sin traer. Sin parámetros. |
+
+**Ejemplo de uso — `project_git_status`:**
+```
+project_git_status()
+```
+Sin parámetros — recorre automáticamente todas las raíces de `paths_allow`. Salida (ejemplo):
+```
+2 repo(s) con cambios pendientes:
+  HikBioAccess                   [main]  3 sin commitear
+  personal-mcp                   [main]  2 sin pushear
+
+7 repo(s) sin cambios pendientes: BookStore, doc-pipeline, Bitacora, lauris, ingesoft, VisorCamara, atril
+```
+⚠️ Si `paths_allow` es amplio (ej. `["C:\\"]`, como en este equipo), el recorrido puede tardar — el costo es del recorrido del disco, no de la tool en sí. No hay parámetro para acotar el alcance todavía; si se vuelve un problema real, hay que revisitar la decisión de diseño (ver `PLAN-NUEVAS-TOOLS.md`).
 
 ### Capa 5 — Health y Diagnóstico
 | Tool | Descripción |

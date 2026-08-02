@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import re
 import subprocess
 import time
@@ -168,7 +169,7 @@ def _default_project_root(security: SecurityValidator) -> str:
 
 
 def _git_project_info(entry: Path) -> dict:
-    """Gather branch/status for one project dir via subprocess.run() (blocking).
+    """Gather branch/status/ahead-behind for one project dir via subprocess.run() (blocking).
 
     Must be called through asyncio.to_thread() — subprocess.run() is synchronous,
     and project_scan_impl/project_find_impl are async functions that FastMCP runs
@@ -177,8 +178,13 @@ def _git_project_info(entry: Path) -> dict:
     under the scanned directory (reproduced live: hung the whole MCP connection
     for 4+ minutes scanning ~10 real repos under C:\\Repos after paths_allow was
     narrowed to point at it — see CHANGELOG 1.4.11).
+
+    ahead/behind added 2026-08-01 for project_git_status: None (not 0) means no
+    upstream is configured for the current branch (common for repos never pushed,
+    or a branch with no tracking set) — distinct from "0 ahead/behind", which
+    means there IS an upstream and it's fully in sync.
     """
-    info = {"project": entry.name}
+    info = {"project": entry.name, "path": str(entry)}
     git_dir = entry / ".git"
     if not git_dir.exists():
         info["branch"] = "(no git)"
@@ -195,9 +201,93 @@ def _git_project_info(entry: Path) -> dict:
         )
         changes = len([l for l in r2.stdout.splitlines() if l.strip()])
         info["uncommitted_changes"] = changes
-    except (subprocess.TimeoutExpired, OSError):
+        r3 = subprocess.run(
+            ["git", "-C", str(entry), "rev-list", "--left-right", "--count", "@{u}...HEAD"],
+            capture_output=True, text=True, timeout=10
+        )
+        if r3.returncode == 0 and r3.stdout.strip():
+            behind_str, ahead_str = r3.stdout.strip().split()
+            info["ahead"] = int(ahead_str)
+            info["behind"] = int(behind_str)
+        else:
+            info["ahead"] = None
+            info["behind"] = None
+    except (subprocess.TimeoutExpired, OSError, ValueError):
         info["branch"] = "error"
     return info
+
+
+_REPO_DISCOVERY_SKIP_DIRS = {
+    "node_modules", "bin", "obj", ".venv", "__pycache__",
+    "AppData", "$Recycle.Bin", "Windows", "Program Files", "Program Files (x86)",
+}
+
+
+def _discover_git_repos_sync(security: SecurityValidator) -> list[Path]:
+    """Walk every root in paths_allow looking for .git directories (2026-08-01
+    design decision: automatic discovery over a fixed repo list, accepted
+    trade-off being slower scans when paths_allow is broad — e.g. "C:\\" on
+    this machine's real config).
+
+    Uses os.walk() with in-place dirnames pruning rather than Path.rglob(),
+    since rglob has no way to skip descending into a directory once it
+    decides to look inside it — os.walk lets us drop known-noisy trees
+    (node_modules, .venv, AppData, ...) from the traversal entirely, same
+    exclusion set already used by _find_files_sync() for project_find.
+    No cap on the number of repos returned or the number of paths_allow
+    roots scanned — same reasoning as fs_find_duplicates (2026-07-31): the
+    real cost driver is how much of the tree has to be walked, which a
+    result-count limit would not meaningfully bound anyway.
+    """
+    found: set[Path] = set()
+    for root_str in security.config.security.paths_allow:
+        root = Path(root_str)
+        if not root.exists() or not root.is_dir():
+            continue
+        for dirpath, dirnames, _filenames in os.walk(root, topdown=True):
+            dirnames[:] = [d for d in dirnames if d not in _REPO_DISCOVERY_SKIP_DIRS]
+            if ".git" in dirnames:
+                found.add(Path(dirpath))
+                dirnames.remove(".git")
+    return sorted(found)
+
+
+async def project_git_status_impl(security: SecurityValidator) -> str:
+    repos = await asyncio.to_thread(_discover_git_repos_sync, security)
+    if not repos:
+        return "No git repositories found under paths_allow"
+
+    results = [await asyncio.to_thread(_git_project_info, r) for r in repos]
+
+    dirty = []
+    clean = []
+    for r in results:
+        has_pending = (
+            r.get("uncommitted_changes", 0) > 0
+            or (r.get("ahead") or 0) > 0
+            or (r.get("behind") or 0) > 0
+        )
+        (dirty if has_pending else clean).append(r)
+
+    lines = []
+    if dirty:
+        lines.append(f"{len(dirty)} repo(s) con cambios pendientes:")
+        for r in dirty:
+            parts = []
+            if r.get("uncommitted_changes"):
+                parts.append(f"{r['uncommitted_changes']} sin commitear")
+            if r.get("ahead"):
+                parts.append(f"{r['ahead']} sin pushear")
+            if r.get("behind"):
+                parts.append(f"{r['behind']} atras del remoto")
+            branch = r.get("branch", "?")
+            lines.append(f"  {r['project']:30s} [{branch}]  {', '.join(parts)}")
+    if clean:
+        if lines:
+            lines.append("")
+        names = ", ".join(r["project"] for r in clean)
+        lines.append(f"{len(clean)} repo(s) sin cambios pendientes: {names}")
+    return "\n".join(lines)
 
 
 _PROJECT_SCAN_CACHE: dict = {}
@@ -291,3 +381,7 @@ def register_personal_tools(mcp: FastMCP, config: AppConfig,
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
     async def project_find(filename: str, path: str | None = None) -> str:
         return await project_find_impl(filename, security, path)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
+    async def project_git_status() -> str:
+        return await project_git_status_impl(security)

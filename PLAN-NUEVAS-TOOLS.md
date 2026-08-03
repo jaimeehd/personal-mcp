@@ -11,7 +11,7 @@
 |---|------|-----------|--------|--------|
 | 1 | `project_git_status` | Alto — evidencia directa de la sesión del 2026-08-01 | Bajo | ✅ Completado (v1.4.43) |
 | 2 | `fs_disk_usage` | Alto — complementa `fs_find_duplicates` | Bajo | ✅ Completado (v1.4.44) |
-| 3 | `sh_spawn` | Medio — ya diseñado en `AGENTS.md` | Alto — huérfanos entre reinicios, ver nota | ⏳ Pendiente, bloqueado |
+| 3 | `sh_spawn` | Medio — ya diseñado en `AGENTS.md` | Alto — resuelto vía `owner_pid`, ver diseño | ✅ Completado (v1.4.45) |
 | 4 | `fs_compress`/`fs_extract` | Bajo — sin evidencia de necesidad real | Medio — zip slip | ⏳ Pendiente |
 
 ## 1. `project_git_status`
@@ -49,18 +49,27 @@ y `fs_list_with_sizes`).
 
 ## 3. `sh_spawn`
 
-**Diseño ya documentado en `AGENTS.md`** (sección "Feature diferida"). Tres
-requisitos de seguridad ya establecidos: registro de PIDs en `data_dir`, ring
-buffer en la cola de output, exclusión explícita del wildcard `"*"` en grants.
+**Diseño original en `AGENTS.md`** (sección "Feature diferida"). Tres
+requisitos de seguridad establecidos desde el inicio: registro de PIDs en
+`data_dir`, ring buffer en la cola de output, exclusión explícita del
+wildcard `"*"` en grants.
 
-⛔ **Bloqueador nuevo, encontrado el 2026-08-01, no estaba en el diseño original:**
-puede haber múltiples procesos `personal-mcp` corriendo en paralelo (confirmado
-hoy vía `server.log` compartido con PIDs distintos intercalados). Un proceso
-lanzado por `sh_spawn` en un servidor que luego se reinicia quedaría huérfano
-— corriendo, pero sin nadie que lo controle. Hay que resolver esto en el diseño
-antes de implementar, no después.
+**Bloqueador encontrado el 2026-08-01, resuelto el 2026-08-02:** puede haber
+múltiples procesos `personal-mcp` corriendo en paralelo (confirmado en vivo:
+3 procesos para 3 ventanas/cuentas distintas de Claude Desktop). Un proceso
+lanzado por `sh_spawn` en un servidor que luego se reinicia quedaría huérfano.
 
-**Estado:** no iniciado, diseño incompleto.
+**Diseño que lo desbloqueó — rastreo por `owner_pid`:** cada spawn se persiste
+a `spawned_processes.jsonl` en `data_dir` junto con el PID del servidor que lo
+creó. Al arrancar, un servidor nuevo solo actúa sobre un registro cuyo
+`owner_pid` está confirmado muerto — si el dueño sigue vivo, no se toca.
+Huérfanos reales se reportan (`sh_spawn_list`, status `"orphaned"`), nunca se
+matan automáticamente. El requisito del wildcard se resolvió gratis: `execute`
+ya estaba excluido de los grants `"*"` en `PermissionManager.check_granted()`.
+
+**Estado:** ✅ Completado — v1.4.45, 4 tools (`sh_spawn`/`sh_spawn_read`/
+`sh_spawn_kill`/`sh_spawn_list`) + 15 tests, incluyendo los 3 tests centrales
+de reconciliación de huérfanos. Ver `layer2_shell.py::SpawnManager`.
 
 ## 4. `fs_compress` / `fs_extract`
 

@@ -7,14 +7,14 @@ Servidor MCP personalizado para orquestación de estaciones de trabajo Windows/L
 ```
 6 capas, diseño hexagonal:
   Capa 1: Filesystem      — 22 tools (read, write, edit, delete, delete-batch, list, tree, search, find, find-duplicates, disk-usage, info, diff, batch, snapshot, create-dir, move, read-multi, list-allowed, list-with-sizes, read-media, edit-advanced)
-  Capa 2: Shell           — 9 tools (exec, sesiones persistentes, ejecución de scripts, historial, shell configurable)
+  Capa 2: Shell           — 13 tools (exec, sesiones persistentes, ejecución de scripts, historial, shell configurable, procesos en background)
   Capa 3: SSH             — 4 tools (listar hosts, conectar, ejecutar, desconectar) [deshabilitado por defecto]
   Capa 4: Personal        — 9 tools (journal CRUD, notas rápidas, escaneo de proyectos, búsqueda en proyectos, estado git multi-repo)
   Capa 5: Health/Diagnóstico — 9 tools (health check, disco, procesos, configuración, diag, audit log, lista de tools, benchmark, log tail)
   Capa 6: Permissions     — 6 tools (aprobar, denegar, pre-autorizar, listar pendientes, revocar, estadísticas)
 ```
 
-59 tools en total, 55 activas (las 4 de SSH deshabilitadas por defecto).
+63 tools en total, 59 activas (las 4 de SSH deshabilitadas por defecto).
 
 ## Tools
 
@@ -120,6 +120,39 @@ Solo lee — no borra ni mueve nada. Útil junto con `fs_find_duplicates` para d
 | `sh_session_interrupt` | Enviar Ctrl+C a sesión |
 | `sh_session_close` | Cerrar sesión |
 | `sh_script` | Ejecutar script multi-línea desde archivo temporal. Parámetros: `script`, `timeout`, `working_dir?`, `shell?` |
+| `sh_spawn` | Arrancar un proceso de larga duración en background (dev server, watcher) — a diferencia de `sh_exec`, que muere al cumplirse el timeout. Devuelve `spawn_id`. Exige su propio ticket de `execute` (nunca satisfecho por un grant wildcard `"*"`, igual que `python`/`node`/`bash`). Parámetros: `command`, `working_dir?`, `shell?` |
+| `sh_spawn_read` | Leer el output acumulado de un proceso en background (buffer circular de las últimas 500 líneas). Parámetros: `spawn_id`, `n?` (default `100`) |
+| `sh_spawn_kill` | Terminar un proceso en background y su árbol de procesos hijos |
+| `sh_spawn_list` | Listar procesos en background activos — incluye los que quedaron huérfanos de un servidor `personal-mcp` anterior que ya no está corriendo (marcados `"orphaned"`, nunca matados automáticamente) |
+
+**Ejemplo de uso — `sh_spawn`:**
+```
+sh_spawn(command="npm run dev", working_dir="C:\\Repos\\BookStore\\marketing-tools")
+```
+Devuelve algo como `{"spawn_id": "a1b2c3d4-...", "pid": 12345, "message": "Spawned a1b2c3d4... (pid=12345)..."}`.
+
+```
+sh_spawn_read(spawn_id="a1b2c3d4-...")
+```
+Devuelve el output acumulado hasta ahora, sin bloquear ni esperar a que el proceso termine.
+
+```
+sh_spawn_kill(spawn_id="a1b2c3d4-...")
+```
+Termina el proceso (y sus hijos) cuando ya no se necesita.
+
+```
+sh_spawn_list()
+```
+Salida (ejemplo, con un huérfano detectado de un servidor anterior):
+```
+[
+  {"spawn_id": "a1b2c3d4", "pid": 12345, "command": "npm run dev", "status": "running", "uptime_seconds": 340},
+  {"spawn_id": "f9e8d7c6", "pid": 9876, "command": "npm run watch", "status": "orphaned",
+   "note": "owner pid 5432 no longer running -- use sh_spawn_kill to stop it"}
+]
+```
+⚠️ Un proceso huérfano sigue corriendo de verdad — no se mata solo. Si aparece uno que ya no necesitás, usá `sh_spawn_kill` con su `spawn_id` para pararlo.
 
 ### Capa 3 — SSH (condicional, deshabilitado por defecto)
 | Tool | Descripción |

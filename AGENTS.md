@@ -11,17 +11,17 @@
 ## Arranque rápido
 ```powershell
 cd C:\Repos\.personal-mcp
-.\.venv\Scripts\python -m pytest tests/ -v       # 321 tests, verificado 2026-08-01 (0 fallidos). El CHANGELOG 1.4.23 decía 331 -- investigado (1.4.29): comparado contra dos backups independientes del repo, ninguno tiene más tests que este árbol. 331 nunca fue exacto, no es una pérdida.
+.\.venv\Scripts\python -m pytest tests/ -v       # 332 tests, verificado 2026-08-02 (0 fallidos). El CHANGELOG 1.4.23 decía 331 -- investigado (1.4.29): comparado contra dos backups independientes del repo, ninguno tiene más tests que este árbol. 331 nunca fue exacto, no es una pérdida.
 .\.venv\Scripts\python -m src.server              # modo stdio para Claude Desktop
 .\install.ps1                                     # registrar con Claude Desktop (crea el venv automáticamente)
 .\sync-config.ps1                                 # refrescar el espejo de solo lectura config.json desde ~/.personal-mcp/config.json
 ```
 
-## Arquitectura — 6 capas hexagonales, 59 tools (55 activas — las 4 de SSH deshabilitadas por defecto)
+## Arquitectura — 6 capas hexagonales, 63 tools (59 activas — las 4 de SSH deshabilitadas por defecto)
 | Capa | Archivo | Tools | Frontera de seguridad |
 |------|---------|-------|------------------------|
 | 1 Filesystem | `layer1_filesystem.py` | 22 | `resolve_and_validate()` en cada ruta |
-| 2 Shell | `layer2_shell.py` + `shell_resolver.py` | 9 | lista de denegación de comandos + escaneo de rutas + multi-shell (powershell/pwsh/cmd/bash) |
+| 2 Shell | `layer2_shell.py` + `shell_resolver.py` | 13 | lista de denegación de comandos + escaneo de rutas + multi-shell (powershell/pwsh/cmd/bash); `sh_spawn` además exige ticket propio de `execute` |
 | 3 SSH | `layer3_ssh.py` | 4 | deshabilitado por defecto (`ssh.enabled: false`) |
 | 4 Personal | `layer4_personal.py` | 9 | diario, notas, escaneo de proyectos, estado git multi-repo |
 | 5 Health | `layer5_health.py` | 9 | diagnóstico, auditoría, benchmark, log tail (`mcp_log`) |
@@ -34,6 +34,7 @@ cd C:\Repos\.personal-mcp
 - **`fs_find_duplicates` (Layer 1, v1.4.42)**: búsqueda de duplicados exactos por contenido (SHA256) dentro de un `path`, a diferencia de buscar por patrón de nombre. Diseño de dos fases sin límite de cantidad ni tamaño de archivo (decisión explícita, 2026-07-31): fase 1 agrupa por tamaño exacto en bytes (`stat()`, prácticamente gratis — medido en 240ms para 232 archivos reales); fase 2 solo calcula hash dentro de los grupos que ya comparten tamaño con al menos otro archivo. Un archivo de tamaño único, por grande que sea, nunca se hashea — así se evita tanto el coste de hashear innecesariamente como el error de excluir archivos grandes que es justamente lo que se busca auditar. Parámetro `extensions` acepta `".pdf"` o `"pdf"` indistintamente (normalización case-insensitive). Solo lectura, no borra nada — deliberadamente separada de `fs_delete_batch`.
 - **`project_git_status` (Layer 4, v1.4.43)**: estado de git para todos los repos encontrados bajo `paths_allow`, sin necesidad de mantener una lista fija. Descubrimiento vía `os.walk()` con poda de directorios (`node_modules`, `.venv`, `AppData`, etc.) — no `Path.rglob`, que no permite saltar subárboles completos una vez que entra. Sin límite de cantidad de repos, mismo principio que `fs_find_duplicates`. Reutiliza `_git_project_info()` (ya usada por `project_scan`), extendida con `ahead`/`behind` contra el upstream — `None` en esos campos significa "sin upstream configurado", distinto de `0` ("sincronizado"). Ver `PLAN-NUEVAS-TOOLS.md` para el resto del plan de herramientas nuevas (esta es la primera de cuatro).
 - **`fs_disk_usage` (Layer 1, v1.4.44)**: agrupa el tamaño de todos los archivos bajo un `path` por carpeta ancestro a `depth` niveles, devuelve las `top_n` que más pesan. Complementa a `fs_find_duplicates` (esa responde "qué está repetido", esta responde "qué carpeta pesa más"). Un solo `os.walk()` sobre todo el árbol, atribuyendo cada archivo a su ancestro correspondiente en un solo pase — evita recorrer subárboles compartidos una vez por carpeta hermana. Sin límite de cantidad de carpetas ni de archivos escaneados, mismo principio que las dos anteriores; solo la salida (`top_n`) se trunca. Segunda de cuatro en `PLAN-NUEVAS-TOOLS.md`.
+- **`sh_spawn`/`sh_spawn_read`/`sh_spawn_kill`/`sh_spawn_list` (Layer 2, v1.4.45)**: procesos de larga duración en background (dev servers, watchers). Desbloqueada tras resolver el problema de huérfanos entre reinicios — ver sección dedicada más abajo. Tercera de cuatro en `PLAN-NUEVAS-TOOLS.md`.
 - **Layer 2 nunca tuvo 10 tools — la tabla decía 10 por un error de doc introducido en 2026-07-25** (commit `2784539`, la sesión anterior de "corregir discrepancias AGENTS.md vs código"): esa sesión subió Layer 2 de 9→10 al mismo tiempo que corregía el total general (56→57), pero el código en ese mismo commit ya tenía 9 tools — las mismas de siempre (`sh_exec`, `sh_session_start/list/send/read/interrupt/close`, `sh_script`, `sh_history`). Nunca existió una décima tool ni se eliminó ninguna; fue un desliz aritmético al mover dos números a la vez. Verificado el 2026-08-01 contando `@mcp.tool` tanto en el código actual como en el código histórico de ese commit — 9 en ambos casos. Lección: al corregir un total agregado, verificar cada fila por separado, no solo que la suma final "se vea bien".
 
 ## Reglas de seguridad (no violar)
@@ -141,47 +142,44 @@ que depender de `sh_session_read`. Ver idea diferida `sh_spawn` más abajo.
 `~/.personal-mcp/config.json` — elimina el gate para todo lo que arranque Node.
 No recomendado si se ejecutan scripts arbitrarios además de comandos conocidos.
 
-## sh_spawn — idea diferida (no implementada)
+## sh_spawn — implementada (v1.4.45)
 
-**Problema que resolvería:** arrancar procesos de larga duración (dev servers, watchers)
-desde el MCP y leer su output en llamadas posteriores sin que el proceso muera al
-cumplirse el timeout de `sh_exec`.
+Procesos de larga duración en background (dev servers, watchers), con lectura
+de output posterior sin que el proceso muera al cumplirse el timeout de `sh_exec`.
 
-**Por qué no se implementó (2026-07-25):** el caso de uso principal es arrancar
-`pnpm run dev` / `npm run dev`, lo que el usuario ya hace en dos segundos desde su
-terminal. El coste de implementación y mantenimiento no justifica el beneficio para
-ese caso.
+**Cuatro tools:** `sh_spawn(command, working_dir?, shell?)` → `spawn_id`;
+`sh_spawn_read(spawn_id, n?)`; `sh_spawn_kill(spawn_id)`; `sh_spawn_list()`.
 
-**Diseño acordado si se retoma:**
-- Tres tools: `sh_spawn(command, working_dir)` → `spawn_id`, `sh_spawn_read(spawn_id)`,
-  `sh_spawn_kill(spawn_id)`. Cuarto tool `sh_spawn_list` para recuperar spawn_ids perdidos
-  en contextos largos.
-- Clase `SpawnedProcess` análoga a `ShellSession` pero sin stdin — proceso independiente
-  con reader task y output buffer.
-- `SpawnManager` integrado en `ShellManager` con dict `_spawned`.
+**Bloqueador que retrasó la implementación desde 2026-07-25 hasta 2026-08-02:**
+en esta máquina es normal, no excepcional, tener varios procesos `personal-mcp`
+corriendo en simultáneo (confirmado en vivo: 3 procesos para 3 ventanas/cuentas
+distintas de Claude Desktop). Un proceso lanzado por `sh_spawn` en un servidor
+que luego se reinicia (o coexiste con otro proceso efímero, ej. una corrida de
+pytest) quedaría huérfano — corriendo, sin nadie que sepa de su PID.
 
-**Requisitos de seguridad antes de implementar:**
-1. Registro de PIDs activos en `data_dir` + cleanup al arrancar el servidor — sin esto
-   los procesos quedan huérfanos si el servidor MCP se reinicia.
-2. Ring buffer con tamaño máximo en el output queue — un proceso verboso llena memoria
-   indefinidamente con un Queue sin límite.
-3. `sh_spawn` excluido del wildcard `"*"` en grants de sesión — igual que `fs_delete`
-   y `execute`. Un proceso de background pre-aprobado para toda la sesión es superficie
-   de abuso.
+**Diseño que lo desbloqueó — rastreo por `owner_pid`:** cada spawn se persiste
+a `spawned_processes.jsonl` en `data_dir` (mismo patrón append-then-reconcile-
+on-boot que `tickets.jsonl`, v1.4.41) junto con el PID del servidor que lo creó.
+Al arrancar, un servidor nuevo solo actúa sobre un registro cuyo `owner_pid` está
+**confirmado muerto** — si el dueño original sigue vivo, el registro se deja
+intacto, aunque este proceso nuevo pueda ver el mismo archivo. Revisar solo "¿el
+hijo sigue vivo?" no distinguiría "todavía en manos de un servidor hermano que
+sigue corriendo" de "genuinamente huérfano". Los huérfanos se **reportan**
+(`sh_spawn_list` los marca `"orphaned"`), nunca se matan automáticamente.
 
-**Caso de uso que justificaría retomar:** Claude necesita arrancar un servidor,
-ejecutar tests de integración contra él, y apagarlo — todo en una sola operación
-sin intervención del usuario.
+**Requisito de seguridad "excluido del wildcard `*`" resuelto sin tocar
+`security.py`/`permissions.py`:** `sh_spawn` exige su propio ticket de
+`execute` (`_check_spawn_permission()`, `layer2_shell.py`), reutilizando el
+mismo mecanismo ya usado para `python`/`node`/`bash`. `check_granted()` ya
+excluía `operation="execute"` de cualquier grant wildcard — el requisito se
+cumple gratis.
 
-⛔ **Bloqueador adicional encontrado el 2026-08-01, no estaba en el diseño original:**
-puede haber múltiples procesos `personal-mcp` corriendo en paralelo (ver el
-gotcha de `server.log` compartido, arriba). Un proceso lanzado por `sh_spawn`
-en un servidor que luego se reinicia (o que coexiste con otro proceso efímero,
-ej. una corrida de pytest) quedaría huérfano — corriendo, pero sin ningún
-proceso vivo que sepa de su PID. El requisito #1 de la lista de arriba
-("registro de PIDs + cleanup al arrancar") ya apuntaba en esta dirección, pero
-no consideraba múltiples servidores simultáneos, solo reinicios secuenciales.
-Ver `PLAN-NUEVAS-TOOLS.md` para el seguimiento de este ítem.
+**Ring buffer:** output acotado con `collections.deque(maxlen=500)` por
+proceso — evita que un proceso ruidoso crezca en memoria sin límite solo por
+leerse con poca frecuencia.
+
+Detalle completo de diseño y tests: entrada `[1.4.45]` en `CHANGELOG.md`,
+`PLAN-NUEVAS-TOOLS.md` (ítem 3).
 
 ## Regla obligatoria antes de eliminar cualquier símbolo
 Antes de eliminar una función, clase, método o constante:

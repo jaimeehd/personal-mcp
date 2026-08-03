@@ -15,6 +15,17 @@
 ### Security — sin cambio de superficie
 - La persistencia es de solo-metadatos; el `confirm_code` y `_confirm_secret` siguen siendo exclusivamente en memoria. `paths_allow=["C:\"]` permite lectura libre del disco, por lo que persistir códigos o el secreto reabriría el gap que v1.4.14 cerró deliberadamente.
 
+## [1.4.45] — 2026-08-02
+
+### Added — `sh_spawn`/`sh_spawn_read`/`sh_spawn_kill`/`sh_spawn_list`, procesos de larga duración en background
+- Tercer y último ítem crítico completado de `PLAN-NUEVAS-TOOLS.md` — la feature quedó bloqueada en el diseño original (`AGENTS.md`, "Feature diferida") por un problema de procesos huérfanos entre reinicios, descubierto en profundidad esta sesión: en esta máquina es **normal, no excepcional**, tener varios procesos `personal-mcp` corriendo en simultáneo (confirmado en vivo el 2026-08-02: 3 procesos para 3 ventanas/cuentas distintas de Claude Desktop).
+- **Diseño que desbloqueó la feature — rastreo por `owner_pid`, no solo por el PID del proceso hijo:** cada spawn se persiste a `spawned_processes.jsonl` en `data_dir` (mismo patrón append-then-reconcile-on-boot que `tickets.jsonl`, v1.4.41) con el PID del servidor que lo creó. Al arrancar, un servidor nuevo solo actúa sobre un registro cuyo `owner_pid` está **confirmado muerto** — si el dueño original sigue vivo, el registro no se toca, sin importar que este proceso nuevo pueda ver el mismo archivo. Esto evita el error de solo revisar "¿el proceso hijo sigue vivo?", que no tiene forma de distinguir "todavía en manos de un servidor hermano que sigue corriendo" de "genuinamente huérfano".
+- Los huérfanos detectados se **reportan** (`sh_spawn_list` los marca `"orphaned"`), nunca se matan automáticamente — un dev server huérfano puede seguir siendo exactamente lo que el usuario quiere que siga corriendo.
+- **Requisito de seguridad #3 del diseño original ("excluido del wildcard `*` en grants") resuelto sin tocar `security.py`/`permissions.py`:** `sh_spawn` exige su propio ticket de `execute`, reutilizando el mismo mecanismo ya usado para `python`/`node`/`bash`. `PermissionManager.check_granted()` ya excluía `operation="execute"` de cualquier grant wildcard `"*"` — el requisito se cumple gratis, sin código nuevo.
+- **Requisito #2 (ring buffer):** output acotado con `collections.deque(maxlen=500)` por proceso — un proceso ruidoso no puede crecer en memoria sin límite solo por leerse con poca frecuencia.
+- 15 tests nuevos en `test_shell.py`: spawn/read/kill/list básicos, ticket de `execute` requerido, grant wildcard insuficiente (prueba directa de la exclusión ya existente en `check_granted`), y los 3 tests centrales de reconciliación de huérfanos (huérfano real detectado, registro con dueño vivo ignorado intacto, registro totalmente muerto descartado).
+- Verificado: ruff limpio, 332/332 tests.
+
 ## [1.4.44] — 2026-08-01
 
 ### Added — `fs_disk_usage`, auditoría de espacio en disco por carpeta

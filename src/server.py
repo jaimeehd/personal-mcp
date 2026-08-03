@@ -12,7 +12,7 @@ from mcp.server.fastmcp import FastMCP
 from src.audit import AuditLog
 from src.config import AppConfig
 from src.layers.layer1_filesystem import register_filesystem_tools
-from src.layers.layer2_shell import ShellManager, register_shell_tools
+from src.layers.layer2_shell import ShellManager, SpawnManager, register_shell_tools
 from src.layers.layer3_ssh import SSHManager, register_ssh_tools
 from src.layers.layer4_personal import register_personal_tools
 from src.layers.layer5_health import register_health_tools
@@ -147,7 +147,8 @@ def create_app() -> FastMCP:
     register_filesystem_tools(app, security)
     shell_info = resolve_shell(config.shell.default_shell, config.shell.shell_map)
     shell_manager = ShellManager(security, config.shell.session_timeout_seconds, shell_info, config.shell.shell_map)
-    register_shell_tools(app, security, shell_manager)
+    spawn_manager = SpawnManager(security)
+    register_shell_tools(app, security, shell_manager, spawn_manager)
     ssh_manager = SSHManager(config)
     register_ssh_tools(app, config, ssh_manager)
     register_personal_tools(app, config, security)

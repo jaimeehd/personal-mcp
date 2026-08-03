@@ -5,8 +5,10 @@ import shutil
 import sys
 import time
 import uuid
+from collections import deque
 from pathlib import Path
 
+import psutil
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
@@ -250,6 +252,258 @@ class ShellManager:
         return len(self._sessions)
 
 
+_SPAWN_RING_MAX_LINES = 500
+SPAWN_REGISTRY_FILE = "spawned_processes.jsonl"
+
+
+class SpawnedProcess:
+    """A long-running background process started via sh_spawn.
+
+    Distinct from ShellSession (interactive REPL, send-a-command/read-the-
+    result repeatedly): this is start-once/poll-output-over-time/eventually-
+    kill, the pattern needed for a dev server or a file watcher. Output is
+    kept in a bounded ring buffer (deque maxlen) rather than an unbounded
+    queue -- a noisy long-running process must not be able to grow memory
+    without limit just from being read infrequently (security requirement
+    #2 from the original design, AGENTS.md 'Feature diferida').
+    """
+
+    def __init__(self, spawn_id: str, command: str, process: asyncio.subprocess.Process):
+        self.spawn_id = spawn_id
+        self.command = command
+        self.pid = process.pid
+        self.created_at = time.time()
+        self.status = "running"
+        self._process = process
+        self._ring: deque = deque(maxlen=_SPAWN_RING_MAX_LINES)
+        self._reader_task: asyncio.Task | None = None
+
+    async def _reader(self) -> None:
+        try:
+            while self._process.stdout and not self._process.stdout.at_eof():
+                try:
+                    line = await asyncio.wait_for(self._process.stdout.readline(), timeout=0.5)
+                except TimeoutError:
+                    continue
+                if not line:
+                    break
+                self._ring.append(line.decode("utf-8", errors="replace").rstrip())
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if self.status == "running":
+                self.status = "exited"
+
+    def read_recent(self, n: int = 100) -> list[str]:
+        items = list(self._ring)
+        return items[-n:] if n else items
+
+
+class SpawnManager:
+    """Tracks background processes started via sh_spawn.
+
+    Persists {spawn_id, pid, owner_pid, command, working_dir, started_at,
+    status} to spawned_processes.jsonl in data_dir on every spawn/kill --
+    same append-then-reconcile-on-boot pattern as PermissionManager's
+    tickets.jsonl (v1.4.41). Needed because on this machine it is normal,
+    not exceptional, to have several personal-mcp server processes running
+    concurrently (confirmed live 2026-08-02: 3 processes for 3 different
+    Claude Desktop windows/profiles). A process spawned by one server has no
+    way to be tracked by another unless this state survives on disk.
+
+    owner_pid is the key design choice (2026-08-01/02, security requirement
+    #1 from AGENTS.md 'Feature diferida'): reconciliation on startup only
+    acts on a record whose owner_pid is confirmed DEAD. A record whose owner
+    is still alive is left completely untouched, even though this new
+    process can see the same file -- that record belongs to a sibling server
+    that is still responsible for it. Checking only "is the child pid
+    alive" (without the owner_pid distinction) would have no way to tell
+    "still legitimately owned by a running sibling" apart from "genuinely
+    orphaned", and would misreport every process owned by a sibling that is
+    simply still running as if it needed attention.
+
+    Orphans are reported (sh_spawn_list marks them "orphaned"), never
+    auto-killed -- a spawned dev server surviving its own server's restart
+    may still be exactly what the user wants running.
+    """
+
+    def __init__(self, security: SecurityValidator):
+        self.security = security
+        self._spawned: dict[str, SpawnedProcess] = {}
+        self._owner_pid = os.getpid()
+        self._orphans: list[dict] = []
+        self._reconcile_on_startup()
+
+    def _registry_path(self) -> Path:
+        return Path(self.security.config.data_dir) / SPAWN_REGISTRY_FILE
+
+    def _reconcile_on_startup(self) -> None:
+        path = self._registry_path()
+        if not path.exists():
+            return
+        latest: dict[str, dict] = {}
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                except ValueError:
+                    continue
+                if item.get("spawn_id"):
+                    latest[item["spawn_id"]] = item
+        except OSError:
+            return
+        surviving = []
+        for record in latest.values():
+            if record.get("status") != "running":
+                continue
+            owner_pid = record.get("owner_pid")
+            child_pid = record.get("pid")
+            owner_alive = owner_pid is not None and psutil.pid_exists(owner_pid)
+            if owner_alive:
+                surviving.append(record)
+                continue
+            child_alive = child_pid is not None and psutil.pid_exists(child_pid)
+            if child_alive:
+                logger.warning(
+                    "ORPHANED spawn=%s pid=%s command=%.80s owner_pid=%s no longer running "
+                    "-- reporting via sh_spawn_list, NOT auto-killed",
+                    record.get("spawn_id"), child_pid,
+                    sanitize_log_value(record.get("command", "")), owner_pid,
+                )
+                record["orphaned_from"] = owner_pid
+                self._orphans.append(record)
+                surviving.append(record)
+            # else: both owner and child are dead -- drop silently, nothing to track
+        self._rewrite_registry(surviving)
+
+    def _rewrite_registry(self, records: list[dict]) -> None:
+        path = self._registry_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
+
+    def _append_record(self, record: dict) -> None:
+        path = self._registry_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def register(self, spawned: SpawnedProcess, working_dir: str | None) -> None:
+        self._spawned[spawned.spawn_id] = spawned
+        self._append_record({
+            "spawn_id": spawned.spawn_id, "pid": spawned.pid,
+            "owner_pid": self._owner_pid, "command": spawned.command,
+            "working_dir": working_dir, "started_at": spawned.created_at,
+            "status": "running",
+        })
+
+    def mark_killed(self, spawn_id: str, pid: int, command: str) -> None:
+        self._append_record({
+            "spawn_id": spawn_id, "pid": pid, "owner_pid": self._owner_pid,
+            "command": command, "started_at": None, "status": "killed",
+        })
+
+    def get(self, spawn_id: str) -> SpawnedProcess | None:
+        return self._spawned.get(spawn_id)
+
+    def list_all(self) -> list[dict]:
+        items = []
+        now = time.time()
+        for sid, sp in self._spawned.items():
+            items.append({
+                "spawn_id": sid[:8], "pid": sp.pid, "command": sp.command[:100],
+                "status": sp.status, "uptime_seconds": round(now - sp.created_at),
+            })
+        for o in self._orphans:
+            items.append({
+                "spawn_id": (o.get("spawn_id") or "")[:8], "pid": o.get("pid"),
+                "command": (o.get("command") or "")[:100], "status": "orphaned",
+                "note": f"owner pid {o.get('orphaned_from')} no longer running -- use sh_spawn_kill to stop it",
+            })
+        return items
+
+
+def _check_spawn_permission(command: str, security: SecurityValidator) -> str | None:
+    """Gate sh_spawn behind its own 'execute' ticket, keyed by the exact command
+    string -- same operation type already used for python/node/bash via
+    validate_shell_execution()/approval_required_prefix, reused directly
+    rather than duplicated.
+
+    operation='execute' is hardcoded in PermissionManager.check_granted() to
+    never match a wildcard '*' grant (`operation not in ("delete", "execute")`
+    in check_granted) -- this alone satisfies security requirement #3 from
+    the original design (AGENTS.md 'Feature diferida'): a background process
+    can never be started off a blanket wildcard grant, only an explicit
+    ticket for this exact command. No new code was needed in security.py/
+    permissions.py for this -- the exclusion already existed for the
+    python/node/bash execute gate and applies here for free.
+    """
+    resource = f"spawn:{command}"
+    if security.perm_manager and security.perm_manager.check_granted(resource, "execute"):
+        return None
+    return security.request_permission(resource, "execute")
+
+
+async def sh_spawn_impl(command: str, security: SecurityValidator, manager: ShellManager,
+                        spawn_manager: SpawnManager, working_dir: str | None = None,
+                        shell_info: ShellInfo | None = None) -> str:
+    logger.info("sh_spawn command=%.200s", sanitize_log_value(command))
+    si = shell_info or manager.shell_info
+    proc_kwargs = {
+        "stdin": asyncio.subprocess.DEVNULL,
+        "stdout": asyncio.subprocess.PIPE,
+        "stderr": asyncio.subprocess.STDOUT,
+    }
+    if working_dir:
+        proc_kwargs["cwd"] = working_dir
+    process = await asyncio.create_subprocess_exec(
+        si.executable, *si.command_args, command, **proc_kwargs,
+    )
+    spawn_id = str(uuid.uuid4())
+    spawned = SpawnedProcess(spawn_id, command, process)
+    spawned._reader_task = asyncio.create_task(spawned._reader())
+    spawn_manager.register(spawned, working_dir)
+    return json.dumps({
+        "spawn_id": spawn_id,
+        "pid": process.pid,
+        "message": f"Spawned {spawn_id[:8]}... (pid={process.pid}). "
+                   f"Use sh_spawn_read to poll output, sh_spawn_kill to stop it.",
+    })
+
+
+async def sh_spawn_read_impl(spawn_id: str, spawn_manager: SpawnManager, n: int = 100) -> str:
+    spawned = spawn_manager.get(spawn_id)
+    if not spawned:
+        return (f"Spawn not found: {spawn_id[:8]}... (may belong to a different "
+                f"personal-mcp process -- check sh_spawn_list)")
+    lines = spawned.read_recent(n)
+    header = f"[status: {spawned.status}, pid={spawned.pid}]"
+    body = "\n".join(lines) if lines else "(no output yet)"
+    return f"{header}\n{body}"
+
+
+async def sh_spawn_kill_impl(spawn_id: str, spawn_manager: SpawnManager) -> str:
+    spawned = spawn_manager.get(spawn_id)
+    if not spawned:
+        return f"Spawn not found: {spawn_id[:8]}..."
+    await kill_process_tree(spawned.pid)
+    await reap_after_kill(spawned._process)
+    if spawned._reader_task:
+        spawned._reader_task.cancel()
+    spawned.status = "killed"
+    spawn_manager.mark_killed(spawn_id, spawned.pid, spawned.command)
+    spawn_manager._spawned.pop(spawn_id, None)
+    return f"Killed spawn {spawn_id[:8]}... (pid={spawned.pid})"
+
+
+async def sh_spawn_list_impl(spawn_manager: SpawnManager) -> str:
+    items = spawn_manager.list_all()
+    return json.dumps(items, indent=2) if items else "No spawned processes"
+
+
 async def sh_exec_impl(command: str, security: SecurityValidator, timeout: int = 30,
                        working_dir: str | None = None,
                        shell_info: ShellInfo | None = None) -> str:
@@ -451,7 +705,7 @@ def _format_warnings(warnings: list[str]) -> str:
 
 
 def register_shell_tools(mcp: FastMCP, security: SecurityValidator,
-                         manager: ShellManager) -> None:
+                         manager: ShellManager, spawn_manager: SpawnManager) -> None:
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
     async def sh_exec(command: str, timeout: int = 30,
@@ -551,3 +805,38 @@ def register_shell_tools(mcp: FastMCP, security: SecurityValidator,
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
     async def sh_history() -> str:
         return await sh_history_impl(manager)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
+    async def sh_spawn(command: str, working_dir: str | None = None,
+                       shell: str | None = None) -> str:
+        if working_dir:
+            err = security.validate_tool_path(working_dir)
+            if err:
+                return err
+        err = _validate_command_paths(command, security)
+        if err:
+            return err
+        try:
+            security.validate_command(command)
+        except CommandNotAllowedError as e:
+            return f"Command not allowed: {e}"
+        err = _check_spawn_permission(command, security)
+        if err:
+            return err
+        try:
+            si = await asyncio.to_thread(manager.resolve_shell, shell) if shell else manager.shell_info
+        except ValueError as e:
+            return str(e)
+        return await sh_spawn_impl(command, security, manager, spawn_manager, working_dir, si)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
+    async def sh_spawn_read(spawn_id: str, n: int = 100) -> str:
+        return await sh_spawn_read_impl(spawn_id, spawn_manager, n)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True))
+    async def sh_spawn_kill(spawn_id: str) -> str:
+        return await sh_spawn_kill_impl(spawn_id, spawn_manager)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
+    async def sh_spawn_list() -> str:
+        return await sh_spawn_list_impl(spawn_manager)

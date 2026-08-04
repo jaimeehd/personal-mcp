@@ -15,6 +15,18 @@
 ### Security — sin cambio de superficie
 - La persistencia es de solo-metadatos; el `confirm_code` y `_confirm_secret` siguen siendo exclusivamente en memoria. `paths_allow=["C:\"]` permite lectura libre del disco, por lo que persistir códigos o el secreto reabriría el gap que v1.4.14 cerró deliberadamente.
 
+## [1.4.46] — 2026-08-02
+
+### Added — `fs_compress`/`fs_extract`, con protección explícita contra zip slip
+- **Cuarto y último ítem de `PLAN-NUEVAS-TOOLS.md` — plan completo.** Dos tools nuevas en Layer 1: `fs_compress(paths, output_path)` crea un zip a partir de archivos/carpetas; `fs_extract(zip_path, output_dir)` lo descomprime.
+- **Riesgo de diseño identificado desde el inicio del plan (zip slip, CVE-2007-4559-style) resuelto con verificación explícita, no confiando en la protección de la librería estándar:** antes de escribir cada miembro del zip, `_safe_extract_sync()` calcula la ruta de destino resuelta y verifica con `Path.relative_to()` que caiga dentro de `output_dir` — si no, se **omite** ese miembro (no se renombra, no se trunca, se salta por completo) y se reporta en la respuesta. Un zip malicioso con un miembro `"../../escaped.txt"` no puede escribir fuera de `output_dir` bajo ninguna circunstancia.
+- `fs_extract` va por Layer 1 estándar: ticket de escritura sobre `output_dir` (uno solo, cubre todos los archivos que se extraigan adentro — mismo criterio que ya usan los grants de sesión recursivos).
+- 8 tests nuevos en `test_filesystem.py`, incluyendo el test de seguridad central: un zip con un miembro `../../escaped.txt` construido a propósito, verificando que el archivo objetivo de la fuga nunca se crea y que los miembros legítimos del mismo zip sí se extraen con normalidad.
+- Verificado: ruff limpio, 340/340 tests.
+
+### Plan de herramientas nuevas — cerrado
+`PLAN-NUEVAS-TOOLS.md` (iniciado 2026-08-01) queda con sus 4 ítems completados: `project_git_status` (1.4.43), `fs_disk_usage` (1.4.44), `sh_spawn`+3 (1.4.45), `fs_compress`/`fs_extract` (esta entrada). 65 tools totales (61 activas), desde las 57 (53 activas) con las que arrancó el plan.
+
 ## [1.4.45] — 2026-08-02
 
 ### Added — `sh_spawn`/`sh_spawn_read`/`sh_spawn_kill`/`sh_spawn_list`, procesos de larga duración en background

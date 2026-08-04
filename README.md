@@ -6,7 +6,7 @@ Servidor MCP personalizado para orquestación de estaciones de trabajo Windows/L
 
 ```
 6 capas, diseño hexagonal:
-  Capa 1: Filesystem      — 22 tools (read, write, edit, delete, delete-batch, list, tree, search, find, find-duplicates, disk-usage, info, diff, batch, snapshot, create-dir, move, read-multi, list-allowed, list-with-sizes, read-media, edit-advanced)
+  Capa 1: Filesystem      — 24 tools (read, write, edit, delete, delete-batch, list, tree, search, find, find-duplicates, disk-usage, info, diff, batch, snapshot, create-dir, move, read-multi, list-allowed, list-with-sizes, read-media, edit-advanced, compress, extract)
   Capa 2: Shell           — 13 tools (exec, sesiones persistentes, ejecución de scripts, historial, shell configurable, procesos en background)
   Capa 3: SSH             — 4 tools (listar hosts, conectar, ejecutar, desconectar) [deshabilitado por defecto]
   Capa 4: Personal        — 9 tools (journal CRUD, notas rápidas, escaneo de proyectos, búsqueda en proyectos, estado git multi-repo)
@@ -14,7 +14,7 @@ Servidor MCP personalizado para orquestación de estaciones de trabajo Windows/L
   Capa 6: Permissions     — 6 tools (aprobar, denegar, pre-autorizar, listar pendientes, revocar, estadísticas)
 ```
 
-63 tools en total, 59 activas (las 4 de SSH deshabilitadas por defecto).
+65 tools en total, 61 activas (las 4 de SSH deshabilitadas por defecto).
 
 ## Tools
 
@@ -43,6 +43,8 @@ Servidor MCP personalizado para orquestación de estaciones de trabajo Windows/L
 | `fs_edit_advanced` | Múltiples reemplazos find/replace en un archivo en una sola llamada, con dry-run |
 | `fs_find_duplicates` | Buscar archivos con contenido idéntico (SHA256) dentro de una carpeta, aunque el nombre difiera — a diferencia de `fs_find`, que busca por nombre/tamaño/antigüedad. Sin límite de cantidad ni tamaño de archivo: agrupa primero por tamaño exacto (gratis, sin leer contenido) y solo calcula hash dentro de esos grupos. Parámetros: `path`, `recursive?` (default `false`), `extensions?` (acepta `".pdf"` o `"pdf"` indistintamente). Solo lectura — no borra nada. |
 | `fs_disk_usage` | Auditoría de espacio en disco: agrupa el tamaño de todos los archivos bajo `path` por carpeta ancestro a `depth` niveles, devuelve las `top_n` que más pesan. Complementa a `fs_find_duplicates` — esa responde "qué está repetido", esta responde "qué carpeta pesa más". Parámetros: `path`, `top_n?` (default `15`), `depth?` (default `1`). Solo lectura. |
+| `fs_compress` | Crear un zip a partir de una lista de archivos/carpetas. Parámetros: `paths` (lista), `output_path` |
+| `fs_extract` | Descomprimir un zip a `output_dir`. Verifica explícitamente que cada archivo del zip caiga dentro de `output_dir` antes de escribirlo (protección contra zip slip) — un miembro con ruta `../../algo` se omite y se reporta, nunca se escribe fuera del destino |
 
 **Ejemplo de uso — `fs_find_duplicates`:**
 ```
@@ -108,6 +110,23 @@ Uso de disco bajo C:\Users\usuario\Downloads — total 17,038,532,030 bytes (15.
 ... y 12 carpeta(s) más, 4,444,624,062 bytes (4238.5 MB) en total
 ```
 Solo lee — no borra ni mueve nada. Útil junto con `fs_find_duplicates` para decidir dónde limpiar primero.
+
+**Ejemplo de uso — `fs_compress` / `fs_extract`:**
+```
+fs_compress(
+    paths=["C:\\Repos\\BookStore\\marketing-tools\\src"],
+    output_path="C:\\Users\\usuario\\Desktop\\backup_src.zip"
+)
+```
+Devuelve algo como `"Created C:\...\backup_src.zip (48,230 bytes, 12 file(s))"`.
+
+```
+fs_extract(
+    zip_path="C:\\Users\\usuario\\Desktop\\backup_src.zip",
+    output_dir="C:\\Repos\\restaurado"
+)
+```
+Devuelve `"Extracted 12 file(s) to C:\Repos\restaurado"`. Si el zip fuera malicioso (ej. un miembro con ruta `../../algo.txt`), la respuesta incluiría una advertencia con los miembros omitidos, y esos archivos **nunca** se escriben fuera de `output_dir`.
 
 ### Capa 2 — Shell (ejecución multi-shell, cambio de shell en runtime)
 | Tool | Descripción |

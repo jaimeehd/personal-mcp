@@ -1,5 +1,10 @@
 # Plan de nuevas herramientas — personal-mcp
 
+> ✅ **Plan cerrado el 2026-08-02** — los 4 ítems completados. Si estás
+> retomando trabajo relacionado en otra sesión, este documento queda como
+> referencia histórica del proceso de diseño (decisiones, bloqueadores
+> encontrados y cómo se resolvieron), no como lista de pendientes.
+>
 > Iniciado 2026-08-01. Si estás retomando esto en otra sesión, leé este archivo
 > antes de tocar código — evita el mismo problema que tuvimos hoy con trabajo
 > paralelo sin coordinar (ver CHANGELOG 1.4.41, persistencia de tickets,
@@ -12,7 +17,7 @@
 | 1 | `project_git_status` | Alto — evidencia directa de la sesión del 2026-08-01 | Bajo | ✅ Completado (v1.4.43) |
 | 2 | `fs_disk_usage` | Alto — complementa `fs_find_duplicates` | Bajo | ✅ Completado (v1.4.44) |
 | 3 | `sh_spawn` | Medio — ya diseñado en `AGENTS.md` | Alto — resuelto vía `owner_pid`, ver diseño | ✅ Completado (v1.4.45) |
-| 4 | `fs_compress`/`fs_extract` | Bajo — sin evidencia de necesidad real | Medio — zip slip | ⏳ Pendiente |
+| 4 | `fs_compress`/`fs_extract` | Bajo — sin evidencia de necesidad real | Medio — zip slip, resuelto con `Path.relative_to()` | ✅ Completado (v1.4.46) |
 
 ## 1. `project_git_status`
 
@@ -75,9 +80,21 @@ de reconciliación de huérfanos. Ver `layer2_shell.py::SpawnManager`.
 
 **Diseño:** `fs_compress(paths, output_path)` → zip. `fs_extract(zip_path, output_dir)` → unzip.
 
-⛔ **Riesgo de diseño no trivial:** `fs_extract` es la única de las 4 que crea
-archivos cuyo contenido no se controla de antemano — un zip puede contener
-rutas con `../` (zip slip). Necesita validación explícita de que cada archivo
-extraído cae dentro de `output_dir` antes de escribirlo.
+⛔ **Riesgo de diseño no trivial, identificado desde el inicio del plan:**
+`fs_extract` es la única de las 4 que crea archivos cuyo contenido no se
+controla de antemano — un zip puede contener rutas con `../` (zip slip,
+CVE-2007-4559-style).
 
-**Estado:** no iniciado.
+**Cómo se resolvió:** `_safe_extract_sync()` no confía en la protección de
+`zipfile` de la librería estándar por sí sola (sus garantías han variado
+entre versiones). Antes de escribir cada miembro, calcula la ruta de destino
+resuelta y verifica con `Path.relative_to()` que caiga dentro de `output_dir`
+— si no, `ValueError`, el miembro se **omite** (no se renombra, no se trunca)
+y se reporta en la respuesta de la tool. `fs_extract` va por el flujo estándar
+de Layer 1: un ticket de escritura sobre `output_dir`, mismo criterio que
+cualquier otra operación que crea archivos dentro de un directorio aprobado.
+
+**Estado:** ✅ Completado — v1.4.46, 8 tests incluyendo el test de seguridad
+central (zip malicioso con miembro `../../escaped.txt`, verificando que el
+archivo objetivo de la fuga nunca se crea). Ver
+`layer1_filesystem.py::_safe_extract_sync`.

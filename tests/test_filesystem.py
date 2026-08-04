@@ -1,5 +1,6 @@
 import os
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -9,11 +10,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.config import AppConfig, SecurityConfig
 from src.layers.layer1_filesystem import (
     fs_batch_impl,
+    fs_compress_impl,
     fs_create_directory_impl,
     fs_diff_impl,
     fs_disk_usage_impl,
     fs_edit_advanced_impl,
     fs_edit_impl,
+    fs_extract_impl,
     fs_find_duplicates_impl,
     fs_find_impl,
     fs_info_impl,
@@ -550,6 +553,126 @@ async def test_disk_usage_empty_dir(temp_home, sec):
     base.mkdir(parents=True)
     result = await fs_disk_usage_impl(str(base), sec)
     assert "No files found" in result
+
+
+# --- fs_compress / fs_extract ---
+
+@pytest.mark.asyncio
+async def test_compress_single_file(temp_home, sec):
+    src = temp_home / "Repos" / "to_zip.txt"
+    src.write_text("contenido de prueba")
+    output = temp_home / "Repos" / "out.zip"
+    result = await fs_compress_impl([str(src)], str(output), sec)
+    assert "Created" in result
+    assert output.is_file()
+    with zipfile.ZipFile(output) as zf:
+        assert "to_zip.txt" in zf.namelist()
+        assert zf.read("to_zip.txt").decode() == "contenido de prueba"
+
+
+@pytest.mark.asyncio
+async def test_compress_directory(temp_home, sec):
+    src_dir = temp_home / "Repos" / "dir_to_zip"
+    src_dir.mkdir()
+    (src_dir / "a.txt").write_text("a")
+    (src_dir / "sub").mkdir()
+    (src_dir / "sub" / "b.txt").write_text("b")
+    output = temp_home / "Repos" / "dir_out.zip"
+
+    result = await fs_compress_impl([str(src_dir)], str(output), sec)
+    assert "Created" in result
+    with zipfile.ZipFile(output) as zf:
+        names = zf.namelist()
+        assert any("a.txt" in n for n in names)
+        assert any("b.txt" in n for n in names)
+
+
+@pytest.mark.asyncio
+async def test_compress_nonexistent_path(temp_home, sec):
+    output = temp_home / "Repos" / "never.zip"
+    result = await fs_compress_impl(
+        [str(temp_home / "Repos" / "does_not_exist.txt")], str(output), sec
+    )
+    assert "Error" in result
+    assert "does not exist" in result
+
+
+@pytest.mark.asyncio
+async def test_extract_basic(temp_home, sec):
+    zip_path = temp_home / "Repos" / "sample.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("hello.txt", "hola mundo")
+        zf.writestr("sub/nested.txt", "anidado")
+
+    output_dir = temp_home / "Repos" / "extracted"
+    result = await fs_extract_impl(str(zip_path), str(output_dir), sec)
+
+    assert "Extracted 2 file(s)" in result
+    assert (output_dir / "hello.txt").read_text() == "hola mundo"
+    assert (output_dir / "sub" / "nested.txt").read_text() == "anidado"
+
+
+@pytest.mark.asyncio
+async def test_extract_creates_output_dir(temp_home, sec):
+    zip_path = temp_home / "Repos" / "sample2.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("a.txt", "a")
+    output_dir = temp_home / "Repos" / "brand_new_dir"
+    assert not output_dir.exists()
+    await fs_extract_impl(str(zip_path), str(output_dir), sec)
+    assert output_dir.is_dir()
+    assert (output_dir / "a.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_extract_bad_zip(temp_home, sec):
+    fake_zip = temp_home / "Repos" / "not_a_zip.zip"
+    fake_zip.write_text("this is not a real zip file")
+    output_dir = temp_home / "Repos" / "bad_extract"
+    result = await fs_extract_impl(str(fake_zip), str(output_dir), sec)
+    assert "Error" in result
+    assert "not a valid zip" in result
+
+
+@pytest.mark.asyncio
+async def test_extract_zip_slip_protection(temp_home, sec):
+    """Security regression test: a zip member with a '../' path traversal
+    name must never be written outside output_dir. This is the core safety
+    property fs_extract exists to guarantee -- Path.relative_to() containment
+    check in _safe_extract_sync, not trusting zipfile's own extraction."""
+    malicious_zip = temp_home / "Repos" / "evil.zip"
+    with zipfile.ZipFile(malicious_zip, "w") as zf:
+        zf.writestr("../../escaped.txt", "should never escape output_dir")
+        zf.writestr("safe.txt", "this one is fine")
+
+    output_dir = temp_home / "Repos" / "zipslip_out"
+    result = await fs_extract_impl(str(malicious_zip), str(output_dir), sec)
+
+    assert "Skipped 1 member" in result
+    assert "escaped.txt" in result
+    # The traversal target (two levels up from output_dir) must not exist.
+    assert not (temp_home / "escaped.txt").exists()
+    # The safe member must still have been extracted normally.
+    assert (output_dir / "safe.txt").exists()
+    assert (output_dir / "safe.txt").read_text() == "this one is fine"
+
+
+@pytest.mark.asyncio
+async def test_compress_extract_roundtrip(temp_home, sec):
+    src_dir = temp_home / "Repos" / "roundtrip_src"
+    src_dir.mkdir()
+    (src_dir / "one.txt").write_text("uno")
+    (src_dir / "two.txt").write_text("dos")
+
+    zip_path = temp_home / "Repos" / "roundtrip.zip"
+    await fs_compress_impl([str(src_dir)], str(zip_path), sec)
+
+    output_dir = temp_home / "Repos" / "roundtrip_out"
+    result = await fs_extract_impl(str(zip_path), str(output_dir), sec)
+
+    assert "Extracted 2 file(s)" in result
+    assert (output_dir / "roundtrip_src" / "one.txt").read_text() == "uno"
+    assert (output_dir / "roundtrip_src" / "two.txt").read_text() == "dos"
 
 
 

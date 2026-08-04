@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import time
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -681,6 +682,91 @@ async def fs_disk_usage_impl(path: str, security: SecurityValidator,
     return "\n".join(lines)
 
 
+def _compress_sync(rpaths: list[Path], routput: Path) -> list[str]:
+    added = []
+    with zipfile.ZipFile(routput, "w", zipfile.ZIP_DEFLATED) as zf:
+        for rpath in rpaths:
+            if rpath.is_file():
+                zf.write(rpath, arcname=rpath.name)
+                added.append(str(rpath))
+            elif rpath.is_dir():
+                for f in rpath.rglob("*"):
+                    if f.is_file():
+                        arcname = str(Path(rpath.name) / f.relative_to(rpath))
+                        zf.write(f, arcname=arcname)
+                        added.append(str(f))
+    return added
+
+
+async def fs_compress_impl(paths: list[str], output_path: str, security: SecurityValidator) -> str:
+    rpaths = []
+    for p in paths:
+        rp = security.resolve_and_validate(p)
+        if not rp.exists():
+            return f"Error: path does not exist: {rp}"
+        rpaths.append(rp)
+    routput = security.resolve_and_validate(output_path)
+    added = await asyncio.to_thread(_compress_sync, rpaths, routput)
+    logger.info("fs_compress output=%s files=%d", str(routput), len(added))
+    size = routput.stat().st_size
+    return f"Created {routput} ({size:,} bytes, {len(added)} file(s))"
+
+
+def _safe_extract_sync(rzip: Path, routput: Path) -> tuple[list[str], list[str]]:
+    """Extract a zip, verifying every member's resolved destination stays
+    within routput BEFORE writing it (zip slip / CVE-2007-4559-style attack:
+    a member named e.g. '../../../Windows/System32/evil.dll' or with an
+    absolute path). zipfile.extract()/extractall() sanitize some of this in
+    modern Python but the exact guarantees have varied across versions and
+    are not something to trust blindly for a tool that writes to disk on
+    the caller's behalf — containment is verified explicitly here via
+    Path.relative_to(), which raises if dest is not actually inside routput.
+    Any member that fails this check is skipped, not silently renamed or
+    partially applied.
+    """
+    routput_resolved = routput.resolve()
+    extracted = []
+    skipped = []
+    with zipfile.ZipFile(rzip, "r") as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            member = info.filename
+            dest = (routput_resolved / member).resolve()
+            try:
+                dest.relative_to(routput_resolved)
+            except ValueError:
+                skipped.append(member)
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info) as src, open(dest, "wb") as out:
+                shutil.copyfileobj(src, out)
+            extracted.append(member)
+    return extracted, skipped
+
+
+async def fs_extract_impl(zip_path: str, output_dir: str, security: SecurityValidator) -> str:
+    rzip = security.resolve_and_validate(zip_path)
+    if not rzip.is_file():
+        return f"Error: not a file: {rzip}"
+    routput = security.resolve_and_validate(output_dir)
+    await asyncio.to_thread(routput.mkdir, parents=True, exist_ok=True)
+    try:
+        extracted, skipped = await asyncio.to_thread(_safe_extract_sync, rzip, routput)
+    except zipfile.BadZipFile:
+        return f"Error: not a valid zip file: {rzip}"
+    logger.info("fs_extract zip=%s output=%s extracted=%d skipped=%d",
+                str(rzip), str(routput), len(extracted), len(skipped))
+    lines = [f"Extracted {len(extracted)} file(s) to {routput}"]
+    if skipped:
+        lines.append(
+            f"⚠️ Skipped {len(skipped)} member(s) with a path outside {routput} "
+            f"(zip slip protection): " + ", ".join(skipped[:5])
+            + (f", ... y {len(skipped) - 5} más" if len(skipped) > 5 else "")
+        )
+    return "\n".join(lines)
+
+
 async def fs_edit_advanced_impl(path: str, edits: list[dict[str, str]],
                                  security: SecurityValidator, dry_run: bool = False) -> str:
     content = await fs_read_impl(path, security)
@@ -912,6 +998,29 @@ def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None
         if err:
             return err
         return await fs_disk_usage_impl(path, security, top_n, depth)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True, destructiveHint=False))
+    async def fs_compress(paths: list[str], output_path: str) -> str:
+        if not paths:
+            return "Error: empty paths list"
+        for p in paths:
+            err = security.validate_tool_path(p, "read")
+            if err:
+                return err
+        err = security.validate_tool_path(output_path, "write")
+        if err:
+            return err
+        return await fs_compress_impl(paths, output_path, security)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False, destructiveHint=True))
+    async def fs_extract(zip_path: str, output_dir: str) -> str:
+        err = security.validate_tool_path(zip_path, "read")
+        if err:
+            return err
+        err = security.validate_tool_path(output_dir, "write")
+        if err:
+            return err
+        return await fs_extract_impl(zip_path, output_dir, security)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False, destructiveHint=True))
     async def fs_edit_advanced(path: str, edits: list[dict[str, str]],

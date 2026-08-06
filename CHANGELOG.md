@@ -15,6 +15,15 @@
 ### Security — sin cambio de superficie
 - La persistencia es de solo-metadatos; el `confirm_code` y `_confirm_secret` siguen siendo exclusivamente en memoria. `paths_allow=["C:\"]` permite lectura libre del disco, por lo que persistir códigos o el secreto reabriría el gap que v1.4.14 cerró deliberadamente.
 
+## [1.4.47] — 2026-08-05
+
+### Added — `fs_delete_directory`, borrado recursivo de carpetas con preview tipo Windows
+- **Gap real encontrado en esta sesión, no hipotético:** `fs_delete` y `fs_delete_batch` rechazan explícitamente carpetas ("only supports individual files, not directories") — hasta esta versión, **no existía ninguna forma de borrar un árbol de carpetas completo** en `personal-mcp`. Un agente en otra sesión chocó exactamente con esto intentando borrar un `node_modules` dos veces seguidas, ambas rechazadas. No fue un crash ni datos corrompidos — el rechazo funcionó tal como estaba escrito — pero tampoco había alternativa.
+- Nueva tool dedicada `fs_delete_directory(path)`, separada de `fs_delete`/`fs_delete_batch` en vez de agregarles un flag `recursive` — mismo criterio que ya se usó para separar `fs_delete_batch` de `fs_delete`: un nombre de tool explícito deja el alcance de la operación sin ambigüedad en el punto de llamada.
+- **Preview antes de confirmar, igual que el diálogo de Windows al borrar una carpeta:** antes de mostrar el ticket, la tool cuenta archivos y tamaño total recursivamente (solo lectura, sin ticket) y lo muestra junto con la solicitud de confirmación — "Contains N file(s), X bytes (Y MB)". El conteo reutiliza el mismo patrón de recorrido ya validado por `fs_disk_usage`/`project_git_status` (131k entradas en ~30s sobre un árbol real).
+- 4 tests nuevos en `test_filesystem.py`: borrado básico con subcarpetas, carpeta vacía, error si no es directorio, y verificación de que el conteo/tamaño reportado es exacto.
+- Verificado: ruff limpio, 344/344 tests.
+
 ## [1.4.46] — 2026-08-02
 
 ### Added — `fs_compress`/`fs_extract`, con protección explícita contra zip slip

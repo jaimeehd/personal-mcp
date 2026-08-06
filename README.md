@@ -6,7 +6,7 @@ Servidor MCP personalizado para orquestación de estaciones de trabajo Windows/L
 
 ```
 6 capas, diseño hexagonal:
-  Capa 1: Filesystem      — 24 tools (read, write, edit, delete, delete-batch, list, tree, search, find, find-duplicates, disk-usage, info, diff, batch, snapshot, create-dir, move, read-multi, list-allowed, list-with-sizes, read-media, edit-advanced, compress, extract)
+  Capa 1: Filesystem      — 25 tools (read, write, edit, delete, delete-batch, delete-directory, list, tree, search, find, find-duplicates, disk-usage, info, diff, batch, snapshot, create-dir, move, read-multi, list-allowed, list-with-sizes, read-media, edit-advanced, compress, extract)
   Capa 2: Shell           — 13 tools (exec, sesiones persistentes, ejecución de scripts, historial, shell configurable, procesos en background)
   Capa 3: SSH             — 4 tools (listar hosts, conectar, ejecutar, desconectar) [deshabilitado por defecto]
   Capa 4: Personal        — 9 tools (journal CRUD, notas rápidas, escaneo de proyectos, búsqueda en proyectos, estado git multi-repo)
@@ -14,7 +14,7 @@ Servidor MCP personalizado para orquestación de estaciones de trabajo Windows/L
   Capa 6: Permissions     — 6 tools (aprobar, denegar, pre-autorizar, listar pendientes, revocar, estadísticas)
 ```
 
-65 tools en total, 61 activas (las 4 de SSH deshabilitadas por defecto).
+66 tools en total, 62 activas (las 4 de SSH deshabilitadas por defecto).
 
 ## Tools
 
@@ -24,8 +24,8 @@ Servidor MCP personalizado para orquestación de estaciones de trabajo Windows/L
 | `fs_read` | Leer contenido de archivo (detección automática de binarios) |
 | `fs_write` | Escribir contenido en archivo |
 | `fs_edit` | Reemplazar texto en archivo con vista previa de diff |
-| `fs_delete` | Eliminar un solo archivo (sin directorios/recursión). Los tickets `delete` son siempre de un solo uso — no se permiten grants de sesión ni permanentes, por diseño |
-| `fs_delete_batch` | Eliminar múltiples archivos listados explícitamente bajo un solo ticket/código de confirmación, en vez de un popup por archivo. Misma regla de solo-uso-único que `fs_delete` |
+| `fs_delete` | Eliminar un solo archivo (sin directorios/recursión — usar `fs_delete_directory` para borrar una carpeta completa). Los tickets `delete` son siempre de un solo uso — no se permiten grants de sesión ni permanentes, por diseño |
+| `fs_delete_batch` | Eliminar múltiples archivos listados explícitamente bajo un solo ticket/código de confirmación, en vez de un popup por archivo. Tampoco borra directorios — usar `fs_delete_directory`. Misma regla de solo-uso-único que `fs_delete` |
 | `fs_list` | Listar directorio con filtros |
 | `fs_tree` | Árbol de directorio con límite de profundidad |
 | `fs_search` | Búsqueda tipo grep con regex en archivos (omite archivos >10MB) |
@@ -45,6 +45,7 @@ Servidor MCP personalizado para orquestación de estaciones de trabajo Windows/L
 | `fs_disk_usage` | Auditoría de espacio en disco: agrupa el tamaño de todos los archivos bajo `path` por carpeta ancestro a `depth` niveles, devuelve las `top_n` que más pesan. Complementa a `fs_find_duplicates` — esa responde "qué está repetido", esta responde "qué carpeta pesa más". Parámetros: `path`, `top_n?` (default `15`), `depth?` (default `1`). Solo lectura. |
 | `fs_compress` | Crear un zip a partir de una lista de archivos/carpetas. Parámetros: `paths` (lista), `output_path` |
 | `fs_extract` | Descomprimir un zip a `output_dir`. Verifica explícitamente que cada archivo del zip caiga dentro de `output_dir` antes de escribirlo (protección contra zip slip) — un miembro con ruta `../../algo` se omite y se reporta, nunca se escribe fuera del destino |
+| `fs_delete_directory` | Borrar una carpeta completa, recursivamente — la única tool de Layer 1 que sí borra directorios. Antes de mostrar el ticket de confirmación, cuenta archivos y tamaño total y lo muestra junto con la solicitud (mismo tipo de preview que el diálogo de Windows al borrar una carpeta). Parámetro: `path` |
 
 **Ejemplo de uso — `fs_find_duplicates`:**
 ```
@@ -127,6 +128,19 @@ fs_extract(
 )
 ```
 Devuelve `"Extracted 12 file(s) to C:\Repos\restaurado"`. Si el zip fuera malicioso (ej. un miembro con ruta `../../algo.txt`), la respuesta incluiría una advertencia con los miembros omitidos, y esos archivos **nunca** se escriben fuera de `output_dir`.
+
+**Ejemplo de uso — `fs_delete_directory`:**
+```
+fs_delete_directory(path="C:\\Repos\\mi-proyecto\\node_modules")
+```
+Primera llamada (sin ticket todavía) devuelve algo como:
+```
+About to delete directory: C:\Repos\mi-proyecto\node_modules
+Contains 14,832 file(s), 287,450,112 bytes (274.1 MB)
+
+{"status": "permission_required", "ticket": "perm_...", ...}
+```
+El conteo aparece **antes** de que confirmes — igual que el diálogo de Windows al borrar una carpeta. Tras aprobar el ticket con el código del popup y repetir la misma llamada, borra la carpeta completa y confirma cuántos archivos se eliminaron.
 
 ### Capa 2 — Shell (ejecución multi-shell, cambio de shell en runtime)
 | Tool | Descripción |

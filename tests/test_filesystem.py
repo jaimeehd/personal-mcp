@@ -12,6 +12,7 @@ from src.layers.layer1_filesystem import (
     fs_batch_impl,
     fs_compress_impl,
     fs_create_directory_impl,
+    fs_delete_directory_impl,
     fs_diff_impl,
     fs_disk_usage_impl,
     fs_edit_advanced_impl,
@@ -673,6 +674,55 @@ async def test_compress_extract_roundtrip(temp_home, sec):
     assert "Extracted 2 file(s)" in result
     assert (output_dir / "roundtrip_src" / "one.txt").read_text() == "uno"
     assert (output_dir / "roundtrip_src" / "two.txt").read_text() == "dos"
+
+
+# --- fs_delete_directory ---
+
+@pytest.mark.asyncio
+async def test_delete_directory_basic(temp_home, sec):
+    base = temp_home / "Repos" / "to_delete"
+    (base / "sub").mkdir(parents=True)
+    (base / "a.txt").write_text("aaaa")
+    (base / "sub" / "b.txt").write_text("bb")
+
+    result = await fs_delete_directory_impl(str(base), sec)
+
+    assert "Deleted directory" in result
+    assert "2 file(s)" in result
+    assert not base.exists()
+
+
+@pytest.mark.asyncio
+async def test_delete_directory_empty(temp_home, sec):
+    base = temp_home / "Repos" / "empty_to_delete"
+    base.mkdir(parents=True)
+
+    result = await fs_delete_directory_impl(str(base), sec)
+
+    assert "Deleted directory" in result
+    assert "0 file(s)" in result
+    assert not base.exists()
+
+
+@pytest.mark.asyncio
+async def test_delete_directory_not_a_directory(sample_file, sec):
+    result = await fs_delete_directory_impl(str(sample_file), sec)
+    assert "Error" in result
+    assert "not a directory" in result
+    assert sample_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_delete_directory_reports_correct_size(temp_home, sec):
+    base = temp_home / "Repos" / "sized_delete"
+    base.mkdir(parents=True)
+    (base / "f1.txt").write_bytes(b"x" * 100)
+    (base / "f2.txt").write_bytes(b"x" * 200)
+
+    result = await fs_delete_directory_impl(str(base), sec)
+
+    assert "300" in result  # total bytes
+    assert "2 file(s)" in result
 
 
 

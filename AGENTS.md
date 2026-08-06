@@ -11,16 +11,16 @@
 ## Arranque rápido
 ```powershell
 cd C:\Repos\.personal-mcp
-.\.venv\Scripts\python -m pytest tests/ -v       # 340 tests, verificado 2026-08-02 (0 fallidos). El CHANGELOG 1.4.23 decía 331 -- investigado (1.4.29): comparado contra dos backups independientes del repo, ninguno tiene más tests que este árbol. 331 nunca fue exacto, no es una pérdida.
+.\.venv\Scripts\python -m pytest tests/ -v       # 344 tests, verificado 2026-08-05 (0 fallidos). El CHANGELOG 1.4.23 decía 331 -- investigado (1.4.29): comparado contra dos backups independientes del repo, ninguno tiene más tests que este árbol. 331 nunca fue exacto, no es una pérdida.
 .\.venv\Scripts\python -m src.server              # modo stdio para Claude Desktop
 .\install.ps1                                     # registrar con Claude Desktop (crea el venv automáticamente)
 .\sync-config.ps1                                 # refrescar el espejo de solo lectura config.json desde ~/.personal-mcp/config.json
 ```
 
-## Arquitectura — 6 capas hexagonales, 65 tools (61 activas — las 4 de SSH deshabilitadas por defecto)
+## Arquitectura — 6 capas hexagonales, 66 tools (62 activas — las 4 de SSH deshabilitadas por defecto)
 | Capa | Archivo | Tools | Frontera de seguridad |
 |------|---------|-------|------------------------|
-| 1 Filesystem | `layer1_filesystem.py` | 24 | `resolve_and_validate()` en cada ruta; `fs_extract` verifica contención de rutas contra zip slip |
+| 1 Filesystem | `layer1_filesystem.py` | 25 | `resolve_and_validate()` en cada ruta; `fs_extract` verifica contención de rutas contra zip slip |
 | 2 Shell | `layer2_shell.py` + `shell_resolver.py` | 13 | lista de denegación de comandos + escaneo de rutas + multi-shell (powershell/pwsh/cmd/bash); `sh_spawn` además exige ticket propio de `execute` |
 | 3 SSH | `layer3_ssh.py` | 4 | deshabilitado por defecto (`ssh.enabled: false`) |
 | 4 Personal | `layer4_personal.py` | 9 | diario, notas, escaneo de proyectos, estado git multi-repo |
@@ -36,6 +36,7 @@ cd C:\Repos\.personal-mcp
 - **`fs_disk_usage` (Layer 1, v1.4.44)**: agrupa el tamaño de todos los archivos bajo un `path` por carpeta ancestro a `depth` niveles, devuelve las `top_n` que más pesan. Complementa a `fs_find_duplicates` (esa responde "qué está repetido", esta responde "qué carpeta pesa más"). Un solo `os.walk()` sobre todo el árbol, atribuyendo cada archivo a su ancestro correspondiente en un solo pase — evita recorrer subárboles compartidos una vez por carpeta hermana. Sin límite de cantidad de carpetas ni de archivos escaneados, mismo principio que las dos anteriores; solo la salida (`top_n`) se trunca. Segunda de cuatro en `PLAN-NUEVAS-TOOLS.md`.
 - **`sh_spawn`/`sh_spawn_read`/`sh_spawn_kill`/`sh_spawn_list` (Layer 2, v1.4.45)**: procesos de larga duración en background (dev servers, watchers). Desbloqueada tras resolver el problema de huérfanos entre reinicios — ver sección dedicada más abajo. Tercera de cuatro en `PLAN-NUEVAS-TOOLS.md`.
 - **`fs_compress`/`fs_extract` (Layer 1, v1.4.46)**: crear/descomprimir zips. `fs_extract` verifica explícitamente, con `Path.relative_to()`, que cada miembro del zip caiga dentro de `output_dir` antes de escribirlo — protección contra zip slip (CVE-2007-4559-style), sin confiar en la protección de `zipfile` de la librería estándar por sí sola. Miembros que fallan la verificación se omiten (no se renombran, no se truncan) y se reportan en la respuesta. Cuarta y última de `PLAN-NUEVAS-TOOLS.md` — plan cerrado.
+- **`fs_delete_directory` (Layer 1, v1.4.47)**: borrado recursivo de carpetas — gap real encontrado en sesión, no hipotético (`fs_delete`/`fs_delete_batch` rechazan directorios explícitamente, y hasta esta versión no había alternativa). Antes de mostrar el ticket, cuenta archivos y tamaño recursivamente (solo lectura, sin ticket) y lo muestra junto con la confirmación — mismo tipo de preview que el diálogo de Windows al borrar una carpeta.
 - **Layer 2 nunca tuvo 10 tools — la tabla decía 10 por un error de doc introducido en 2026-07-25** (commit `2784539`, la sesión anterior de "corregir discrepancias AGENTS.md vs código"): esa sesión subió Layer 2 de 9→10 al mismo tiempo que corregía el total general (56→57), pero el código en ese mismo commit ya tenía 9 tools — las mismas de siempre (`sh_exec`, `sh_session_start/list/send/read/interrupt/close`, `sh_script`, `sh_history`). Nunca existió una décima tool ni se eliminó ninguna; fue un desliz aritmético al mover dos números a la vez. Verificado el 2026-08-01 contando `@mcp.tool` tanto en el código actual como en el código histórico de ese commit — 9 en ambos casos. Lección: al corregir un total agregado, verificar cada fila por separado, no solo que la suma final "se vea bien".
 
 ## Reglas de seguridad (no violar)

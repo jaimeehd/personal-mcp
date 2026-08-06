@@ -404,6 +404,49 @@ async def fs_delete_impl(path: str, security: SecurityValidator) -> str:
     return f"Deleted {rpath} ({size:,} bytes)"
 
 
+def _count_dir_contents_sync(rpath: Path) -> tuple[int, int]:
+    """Count files and total size recursively -- read-only, no ticket needed.
+    Used to show the same kind of preview Windows Explorer shows before
+    deleting a folder ('this will delete N items, X MB'), not just a bare
+    confirm prompt. Reuses the same os.walk() pattern already proven cheap
+    by fs_disk_usage/project_git_status (measured: 131k entries in ~30s on
+    this machine's real Downloads tree)."""
+    file_count = 0
+    total_size = 0
+    for dirpath, _dirnames, filenames in os.walk(rpath):
+        for fname in filenames:
+            file_count += 1
+            try:
+                total_size += (Path(dirpath) / fname).stat().st_size
+            except (OSError, PermissionError):
+                continue
+    return file_count, total_size
+
+
+async def fs_delete_directory_impl(path: str, security: SecurityValidator) -> str:
+    """Recursively delete a directory. Separate tool from fs_delete/
+    fs_delete_batch (2026-08-05 design decision) rather than a 'recursive'
+    flag bolted onto either of those -- an explicit tool name makes the
+    intent (and the blast radius) unambiguous at the call site, same
+    reasoning already applied to fs_delete_batch being its own tool instead
+    of a loop parameter on fs_delete.
+
+    Motivated by a real gap found in this session: fs_delete and
+    fs_delete_batch both explicitly refuse directories
+    ('only supports individual files'), and until this tool there was no
+    way to delete a directory tree through personal-mcp at all -- a caller
+    hit exactly this wall trying to delete a node_modules folder.
+    """
+    rpath = security.resolve_and_validate(path)
+    if not rpath.is_dir():
+        return f"Error: not a directory: {rpath}"
+    file_count, total_size = await asyncio.to_thread(_count_dir_contents_sync, rpath)
+    await asyncio.to_thread(shutil.rmtree, rpath)
+    logger.info("fs_delete_directory path=%s files=%d size=%d", str(rpath), file_count, total_size)
+    return (f"Deleted directory {rpath} "
+            f"({file_count:,} file(s), {total_size:,} bytes / {total_size / 1024 / 1024:.1f} MB)")
+
+
 async def fs_delete_batch_impl(paths: list[str], security: SecurityValidator) -> str:
     """Same 'don't re-pass the operation' reasoning as fs_delete_impl: the
     fs_delete_batch() wrapper already validated + consumed the batch grant via
@@ -947,6 +990,24 @@ def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None
         if err:
             return err
         return await fs_delete_impl(path, security)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False, destructiveHint=True))
+    async def fs_delete_directory(path: str) -> str:
+        err = security.validate_tool_path(path, "read")
+        if err:
+            return err
+        rpath = security.resolve_and_validate(path)
+        if not rpath.is_dir():
+            return f"Error: not a directory: {rpath}"
+        file_count, total_size = await asyncio.to_thread(_count_dir_contents_sync, rpath)
+        err = security.validate_tool_path(path, "delete")
+        if err:
+            return (
+                f"About to delete directory: {rpath}\n"
+                f"Contains {file_count:,} file(s), {total_size:,} bytes "
+                f"({total_size / 1024 / 1024:.1f} MB)\n\n" + err
+            )
+        return await fs_delete_directory_impl(path, security)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False, destructiveHint=True))
     async def fs_delete_batch(paths: list[str]) -> str:

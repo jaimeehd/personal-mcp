@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "personal-mcp"
+version = "1.4.73"
+description = "Custom MCP server for Windows/Linux/macOS workstation orchestration"
+
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=3.4.0",
+    "pydantic>=2.0.0",
+    "psutil>=5.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+windows = [
+    "pywin32>=306",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.pytest-asyncio]
+default_async_timeout = 30
+
+[tool.ruff.lint]
+ignore = [
+    "BLE001",   # Intentional: defensive try-except in OS-specific code
+    "S110",     # Intentional: silent fail for OS calls, secret scanner, etc.
+    "DTZ005",   # Intentional: naive datetime for local timestamps in health check
+    "DTZ006",   # Intentional: naive datetime for file timestamps
+    "ASYNC230", # Intentional: file I/O in async functions wrapped in to_thread
+    "ASYNC221", # Intentional: subprocess in health tools run sync
+    "PLW1510",  # Intentional: subprocess.run() without explicit check= (default is False)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["RUF013"]  # Intentional: implicit Optional in test helpers

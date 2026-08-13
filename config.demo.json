@@ -1,0 +1,86 @@
+{
+  "security": {
+    "paths_allow": [
+      "%USERPROFILE%\\source\\repos",
+      "%USERPROFILE%\\Documents\\GitHub",
+      "%USERPROFILE%\\repos"
+    ],
+    "paths_deny": [
+      "**\\node_modules\\**",
+      "**\\.git\\**",
+      "**\\bin\\**",
+      "**\\obj\\**",
+      "**\\AppData\\**",
+      "**\\.ssh\\**",
+      "**\\.aws\\**",
+      "**\\.azure\\**",
+      "**\\.kube\\**",
+      "**\\.gnupg\\**",
+      "**\\.env*",
+      "**\\*.pem",
+      "**\\id_rsa*",
+      "**\\id_ed25519*",
+      "**\\.git-credentials",
+      "**\\.npmrc",
+      "**\\.pypirc",
+      "**\\.docker\\config.json"
+    ],
+    "commands": {
+      "allow_prefix": [
+        "git",
+        "npm",
+        "dotnet",
+        "python",
+        "node",
+        "ls",
+        "pytest",
+        "echo",
+        "uv",
+        "make",
+        "docker",
+        "cat",
+        "type",
+        "gh"
+      ],
+      "deny": [
+        "shutdown",
+        "reboot",
+        "restart-computer",
+        "stop-computer",
+        "format",
+        "format-volume",
+        "reg delete",
+        "net user",
+        "net localgroup administrators",
+        "clear-eventlog",
+        "remove-item -recurse -force",
+        "rm -rf",
+        "rm -r -f"
+      ],
+      "require_flag_approval": [
+        "-force",
+        "-f",
+        "/f",
+        "/q", "-recurse -force"
+      ]
+    },
+    "rate_limit_commands_per_minute": 60,
+    "rate_limit_files_per_operation": 100
+  },
+  "shell": {
+    "enabled": true,
+    "default_shell": "powershell",
+    "shell_map": {},
+    "session_timeout_seconds": 600,
+    "command_timeout_seconds": 120
+  },
+  "ssh": {
+    "enabled": false
+  },
+  "journal": {
+    "enabled": true,
+    "path": "C:\\Users\\usuario\\.personal-mcp\\data\\journal"
+  },
+  "audit_max_entries": 10000,
+  "data_dir": "C:\\Users\\usuario\\.personal-mcp\\data"
+}

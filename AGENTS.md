@@ -37,11 +37,12 @@
 ```
 
 ## Journal — memoria de operación
-Convención obligatoria: **cerrar cada sesión con `journal_add` de 1–3 líneas** (qué se hizo,
-decisión clave, tags). Complementa a CHANGELOG (evolución del código) con la historia del
-sistema/operación (config, limpiezas, diagnósticos, decisiones sin versión). El archivo vive
-en `~/.personal-mcp/data/journal/journal.jsonl` y se crea solo al primer uso — no agregar
-entradas retrospectivas salvo pedido explícito.
+Convención: **cerrar cada sesión con `journal_add` de 1–3 líneas** (qué se hizo, decisión clave,
+tags) — **solo si `config.journal.enabled` es `true`**. Si está `false`, Layer 4 (y por tanto
+`journal_add`) no se registra y la convención no aplica. Complementa a CHANGELOG (evolución del
+código) con la historia del sistema/operación (config, limpiezas, diagnósticos, decisiones sin
+versión). El archivo vive en `~/.personal-mcp/data/journal/journal.jsonl` y se crea solo al primer
+uso — no agregar entradas retrospectivas salvo pedido explícito.
 
 ## Arquitectura — 6 capas hexagonales, 66 tools (62 activas — las 4 de SSH deshabilitadas por defecto)
 | Capa | Archivo | Tools | Frontera de seguridad |

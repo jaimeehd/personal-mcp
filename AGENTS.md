@@ -13,7 +13,7 @@
 > - **Antes de CADA `git add` + `git commit` + `git push`, correr el sweep de sanitización** y exigir **cero coincidencias fuera de AGENTS.md** (este bloque contiene la regla misma y los tokens):
 >   `git grep -nE "C:\\\\Users\\\\User|C:\\\\Repos|HikBioAccess|BookStore|VisorCamara|atril|doc-pipeline|lauris|ingesoft|Bitacora|ant\\.dir\\.ant" -- . ':!AGENTS.md'`
 > - Si el sweep encuentra algo, reemplazar con los placeholders estándar (`usuario`, `C:\Users\usuario\Repos`, `MiProyecto` — en CONFIG-GUIA.md: `C:\Users\TuUsuario\Repos`) **antes** de commitear, nunca después. Un commit ya pusheado queda para siempre en el historial remoto.
-> - Incidente real 2026-08-13: la raíz de repos local y la carpeta `.ssh` del usuario llegaron al remoto público vía CHANGELOG.md y AGENTS.md. Corregidas hacia adelante; el historial anterior quedó publicado de forma permanente.
+> - Incidente real 2026-08-13: la raíz de repos local y la carpeta `.ssh` del usuario llegaron al remoto público vía CHANGELOG.md y AGENTS.md. Corregido doble: hacia adelante (placeholders en docs) y hacia atrás (historial reescrito como único commit raíz sanitizado `2dc4817`, force-push; los 6 commits anteriores salieron de `main`). La reescritura fue aprobada explícitamente por el dueño. Lección: correr el sweep ANTES de cada push, no solo antes de cada commit — el primer `git push` de la corrección casi repite la fuga en el historial.
 
 > ⚠️ **HISTORIAL GIT — CRÍTICO, NO TOCAR:**
 > - `main` es el historial público del repo (1 commit raíz, sanitizado). Todo trabajo

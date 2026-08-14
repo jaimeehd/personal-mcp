@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -271,6 +272,37 @@ async def test_sh_exec_shell_operators_fallback(sec, manager):
 # _scan_command_warnings/_format_warnings eran codigo muerto: el gate previo
 # _validate_command_paths() usa el mismo predicado y ya corta con error antes
 # de que el escaneo de warnings pudiera encontrar algo)
+
+
+# --- Exit code real (2026-08-13, encontrado revisando un comando de git que
+# parecia colgado): _read_stream_capped() (M-S5) lee stdout/stderr hasta EOF
+# pero nunca llama process.wait(), asi que process.returncode quedaba en
+# None para TODO comando que pasara por la Ruta A o B, sin importar como
+# haya terminado en realidad -- "Exit code: None" para git status, git log,
+# git --version, todos por igual. Se usa un codigo especifico distinto de
+# cero para que un 0 por defecto/obsoleto no tape el bug. ---
+
+@pytest.mark.skipif(shutil.which("python") is None, reason="'python' not on PATH (some Linux distros only ship python3)")
+@pytest.mark.asyncio
+async def test_sh_exec_argv_native_reports_real_exit_code(sec, manager):
+    result = await sh_exec_impl('python -c "import sys; sys.exit(7)"', sec, timeout=10)
+    assert "Exit code: 7" in result
+    assert "Exit code: None" not in result
+
+
+@pytest.mark.asyncio
+async def test_sh_exec_fallback_shell_reports_real_exit_code(sec, manager):
+    """Mismo bug, ruta de fallback (Ruta B) -- forzada con un operador de
+    shell (';') para que has_shell_operators() de True. No se fija un
+    codigo exacto (la propagacion de $LASTEXITCODE varia entre shells):
+    lo que importa es que sea un numero real, no None.
+    """
+    import re
+
+    result = await sh_exec_impl("echo first; echo second", sec, timeout=10)
+    assert "Exit code: None" not in result
+    match = re.search(r"Exit code: (-?\d+)", result)
+    assert match is not None, f"no numeric exit code found in: {result!r}"
 
 
 # --- Mejora 4: Kill recursivo ---
@@ -624,3 +656,68 @@ async def test_read_stream_capped_no_truncation():
     out, truncated = await _read_stream_capped(_FakeStream(b"hello"), 100)
     assert out == b"hello"
     assert truncated is False
+
+
+# --- Escenario B (2026-08-13): el proceso principal sale pero un hijo
+# desacoplado mantiene el pipe abierto. `subprocess.Popen(..., close_fds=False)`
+# desde python lanza un nieto que hereda los write-ends de stdout/stderr de
+# sh_exec y NO es esperado por el padre: el padre (python) muere enseguida,
+# el nieto duerme 5s y EOF no llega hasta que muere. Sin el fix, sh_exec
+# esperaba el timeout completo ("Command timed out"); con el fix, retorna con
+# la salida parcial apenas el padre muere (grace de ~1s). El nieto se muere
+# solo (sleep 5s), sin cleanup. ---
+
+
+def _sec_with_python_allowed(temp_home):
+    config = AppConfig(
+        security=SecurityConfig(
+            paths_allow=[str(temp_home / "Repos")],
+        ),
+        shell=ShellConfig(enabled=True, session_timeout_seconds=300),
+        data_dir=str(temp_home / ".personal-mcp" / "data"),
+        config_path=str(temp_home / ".personal-mcp" / "config.json"),
+    )
+    return SecurityValidator(config)
+
+
+_DETACHED_CHILD = (
+    "import subprocess; subprocess.Popen("
+    "['python', '-c', 'import time; time.sleep(5)'], close_fds=False)"
+)
+
+
+@pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.asyncio
+async def test_sh_exec_native_path_detached_child_returns_early(temp_home):
+    """Ruta A (argv nativo): python lanza un nieto desacoplado con
+    close_fds=False que mantiene el pipe. sh_exec debe retornar tras la salida
+    del padre (muy por debajo del timeout de 20s y por debajo del sleep del
+    nieto), sin esperar a que el nieto cierre el pipe."""
+    sec = _sec_with_python_allowed(temp_home)
+    start = time.time()
+    result = await sh_exec_impl(
+        f'python -c "{_DETACHED_CHILD}"',
+        sec, timeout=20,
+    )
+    elapsed = time.time() - start
+    assert "timed out" not in result.lower()
+    assert "Exit code:" in result
+    assert elapsed < 4, f"expected early return after parent exit, took {elapsed:.1f}s"
+
+
+@pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.asyncio
+async def test_sh_exec_shell_path_detached_child_returns_early(temp_home):
+    """Ruta B (shell): el ';' fuerza el fallback a powershell; el nieto
+    desacoplado deja el pipe abierto igual. Debe retornar igualmente rápido
+    tras salir el shell, no esperar el timeout."""
+    sec = _sec_with_python_allowed(temp_home)
+    start = time.time()
+    result = await sh_exec_impl(
+        f'python -c "{_DETACHED_CHILD}"; echo done',
+        sec, timeout=20,
+    )
+    elapsed = time.time() - start
+    assert "timed out" not in result.lower()
+    assert "Exit code:" in result
+    assert elapsed < 4, f"expected early return after parent exit, took {elapsed:.1f}s"

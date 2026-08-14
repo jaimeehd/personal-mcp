@@ -21,8 +21,10 @@ def test_resolve_powershell_default():
     assert info.name == "powershell"
     assert info.executable.lower().endswith("powershell.exe")
     assert "-NoProfile" in info.command_args
+    assert "-NonInteractive" in info.command_args
     assert "-Command" in info.command_args
     assert "-NoExit" in info.session_args
+    assert "-NonInteractive" in info.session_args
     assert "Set-Location" in info.workdir_prefix
 
 
@@ -175,6 +177,32 @@ def test_shell_subprocess_env_leaves_valid_pathext_untouched(monkeypatch):
 def test_shell_subprocess_env_none_on_non_windows(monkeypatch):
     monkeypatch.setattr("src.shell_resolver.sys.platform", "linux")
     assert shell_subprocess_env() is None
+
+
+# --- Pager hardening (2026-08-13): a pipe is never a TTY, so an interactive
+# pager (git's default less) can stall a command waiting for input that will
+# never come. Default to cat unless the user set an explicit value. ---
+
+@pytest.mark.usefixtures("skip_on_linux")
+def test_shell_subprocess_env_sets_pager_defaults(monkeypatch):
+    monkeypatch.delenv("PATHEXT", raising=False)
+    monkeypatch.delenv("PAGER", raising=False)
+    monkeypatch.delenv("GIT_PAGER", raising=False)
+    monkeypatch.delenv("LESS", raising=False)
+    env = shell_subprocess_env()
+    assert env["PAGER"] == "cat"
+    assert env["GIT_PAGER"] == "cat"
+    assert env["LESS"] == "-FRX"
+
+
+@pytest.mark.usefixtures("skip_on_linux")
+def test_shell_subprocess_env_respects_explicit_pager(monkeypatch):
+    monkeypatch.delenv("PATHEXT", raising=False)
+    monkeypatch.setenv("GIT_PAGER", "less")
+    monkeypatch.delenv("PAGER", raising=False)
+    env = shell_subprocess_env()
+    assert env["GIT_PAGER"] == "less"
+    assert env["PAGER"] == "cat"
 
 
 # --- C-2 (auditoría 2026-08-11): has_unsafe_substitution ---

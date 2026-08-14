@@ -1,3 +1,23 @@
+## [1.4.74] — 2026-08-13
+
+### Fixed — `sh_exec` falso timeout cuando un hijo desacoplado mantiene el pipe abierto (escenario B)
+
+- **Contexto**: un comando cuyo proceso principal sale pero deja un hijo desacoplado que heredó los write-ends de stdout/stderr (`subprocess.Popen(close_fds=False)`, daemonized children, `cmd /c start /b` en consola compartida) hacía que `sh_exec` esperara el timeout completo (`Command timed out after Ns`) aunque el comando hubiera terminado bien. Diagnóstico de raíz en sesión del 13/08: **el `process.wait()` de asyncio solo despierta cuando TODOS los pipes del proceso hacen EOF** (`_try_finish()` → `_call_connection_lost()` en `asyncio/base_subprocess.py:257-283`) — un nieto que mantiene el pipe impide el EOF, y el wait queda pendiente aunque el proceso esté muerto desde hace segundos. El `returncode` sí se puebla al morir (`_process_exited()`), independientemente del estado de los pipes.
+- **Cambio**:
+  - `_wait_for_exit()` (`layer2_shell.py`): detecta la salida del proceso con polling del `returncode` (~0.1s) en lugar de `process.wait()` — este último queda documentado como no fiable para detectar salida cuando hay pipes heredados.
+  - `sh_exec_impl` (ambas rutas, nativa y shell): carrera entre `_capture()` y `_wait_for_exit()` con `asyncio.wait(..., FIRST_COMPLETED)`. Si el proceso sale antes del EOF, se setea un `stop_event` y `_read_stream_capped()` da un grace de 1s para que llegue el EOF natural (caso normal: el padre cierra sus pipes al salir, no se pierde nada); si el EOF no llega (nieto desacoplado), corta y devuelve la salida parcial con el exit code real.
+  - `_read_stream_capped()` acepta un `asyncio.Event` opcional y poll con timeout por lectura (`_READ_POLL_SECONDS=0.5`, `_STOP_GRACE_SECONDS=1.0`).
+  - Mensaje de timeout ahora sugiere el canal correcto: `— long-running process? use sh_spawn instead` (junto al hint de memoria existente).
+- **Deuda aceptada (documentada, no implementada)**: el nieto desacoplado queda vivo sin rastreo (Windows Job Object `KILL_ON_JOB_CLOSE` sería la solución completa; diferido — solo implementar si se observa un leak real en producción). El síntoma visible (falso timeout) queda eliminado.
+- **Tests nuevos (2)**: `test_shell.py::test_sh_exec_native_path_detached_child_returns_early` y `test_sh_exec_shell_path_detached_child_returns_early` — reproducen el escenario B con `Popen(close_fds=False)` y un nieto que duerme 5s; aseveran retorno en < 4s (antes del fix: 5.2s y timeout).
+
+### Changed — hardening de shell: `-NonInteractive` y pager defaults
+
+- `SHELL_REGISTRY` powershell/pwsh: `command_args` y `session_args` ahora incluyen `-NonInteractive` (`shell_resolver.py`) — los prompts interactivos (confirmaciones, `Read-Host`) fallan rápido en vez de dejar el comando esperando input que nunca llega con stdin=DEVNULL. `script_args` sin cambios (`-File` no lo necesita). Fallback hardcodeado de `ShellManager._default_shell()` sincronizado.
+- `shell_subprocess_env()` (rama Windows): `PAGER=cat`, `GIT_PAGER=cat`, `LESS=-FRX` vía `setdefault()` — respeta un valor explícito del usuario. Un pipe nunca es un TTY; git auto-desactiva el pager en no-TTY, pero no cuando `core.pager`/`GIT_PAGER` está forzado en el entorno (defensa barata contra un pager interactivo que espera input que nunca llegará).
+- **Tests nuevos (3)**: `test_shell_resolver.py` — `-NonInteractive` presente en args de powershell (2 asserts en `test_resolve_powershell_default`), defaults de pager seteados, valor explícito de `GIT_PAGER` respetado.
+- **Verificado**: `pytest tests/` → 481 passed, 1 skipped (subió de 475).
+
 ## [1.4.73] — 2026-08-13
 
 ### Fixed — install.ps1: lista de tools desactualizada y `-ForegroundColor` pasado como argumento a python

@@ -27,6 +27,33 @@ logger = get_logger("layer2_shell")
 
 MAX_CAPTURE_BYTES: int = 1_048_576
 
+# _read_stream_capped() poll cadence: idle reads are bounded so the loop can
+# notice a stop_event (process exited while a detached grandchild holds the
+# pipe) instead of blocking on read() forever. Once stop_event is set, the
+# grace is longer: EOF after a normal exit arrives immediately, so this only
+# cuts off output when a detached child really is keeping the pipe open.
+_READ_POLL_SECONDS: float = 0.5
+_STOP_GRACE_SECONDS: float = 1.0
+
+
+async def _wait_for_exit(process, poll_interval: float = 0.1) -> int | None:
+    """Return the exit code once the process has actually exited.
+
+    NOT a substitute for process.wait() in general -- it is a workaround for
+    one specific asyncio behavior (2026-08-13, scenario-B hang): asyncio's
+    subprocess transport only wakes up the awaiters of process.wait() once
+    ALL of the process's pipes have hit EOF (_try_finish() then
+    _call_connection_lost() in asyncio/base_subprocess.py). A detached
+    grandchild that inherited the pipe write-ends (`Popen(close_fds=False)`,
+    daemonized children) prevents EOF forever, so wait() stays pending even
+    though the process itself died long ago. The process returncode, by
+    contrast, is populated on death regardless of pipe state
+    (_process_exited()), so polling it detects exit reliably in both cases.
+    """
+    while process.returncode is None:
+        await asyncio.sleep(poll_interval)
+    return process.returncode
+
 
 def _truncate(output: str, max_bytes: int = MAX_CAPTURE_BYTES) -> tuple[str, bool]:
     encoded = output.encode("utf-8")
@@ -36,7 +63,8 @@ def _truncate(output: str, max_bytes: int = MAX_CAPTURE_BYTES) -> tuple[str, boo
     return truncated, True
 
 
-async def _read_stream_capped(stream, cap_bytes: int) -> tuple[bytes, bool]:
+async def _read_stream_capped(stream, cap_bytes: int,
+                              stop_event: asyncio.Event | None = None) -> tuple[bytes, bool]:
     """Read a stream to EOF but keep at most cap_bytes in memory (M-S5).
 
     M-S5 (auditoría 2026-08-11): `process.communicate()` buffered the FULL output
@@ -44,12 +72,32 @@ async def _read_stream_capped(stream, cap_bytes: int) -> tuple[bytes, bool]:
     before the 1 MiB cap ever applied. Read in chunks and keep only the first
     cap_bytes; the rest is drained (so the child never blocks on a full pipe) but
     discarded. Returns (bytes, truncated).
+
+    stop_event (2026-08-13, scenario-B fix): when set, EOF may never arrive --
+    the main process exited but a detached grandchild (`cmd /c start /b ...`,
+    daemonized children) still holds the pipe write-ends. The loop then gives
+    the stream a short grace to reach a real EOF (normal case: the parent
+    closes its pipes on exit, so EOF follows immediately and nothing is lost);
+    if no data arrives during the grace, it cuts off and returns the partial
+    output captured so far instead of waiting forever.
     """
     chunks: list[bytes] = []
     total = 0
     truncated = False
     while True:
-        chunk = await stream.read(65536)
+        # Once the process has exited, EOF is expected immediately; only a
+        # detached grandchild keeping the pipe open delays it. Poll with a
+        # short grace in that state, otherwise with the regular poll timeout.
+        if stop_event and stop_event.is_set():
+            timeout = _STOP_GRACE_SECONDS
+        else:
+            timeout = _READ_POLL_SECONDS
+        try:
+            chunk = await asyncio.wait_for(stream.read(65536), timeout=timeout)
+        except TimeoutError:
+            if stop_event and stop_event.is_set():
+                break
+            continue
         if not chunk:
             break
         if total >= cap_bytes:
@@ -264,8 +312,8 @@ class ShellManager:
                 return resolve_shell("powershell")
             except ValueError:
                 return ShellInfo(name="powershell", executable="powershell.exe",
-                                 command_args=["-NoProfile", "-Command"],
-                                 session_args=["-NoExit", "-Command", "-"],
+                                 command_args=["-NoProfile", "-NonInteractive", "-Command"],
+                                 session_args=["-NoExit", "-NonInteractive", "-Command", "-"],
                                  script_args=["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"],
                                  workdir_prefix='Set-Location -LiteralPath "{wd}"; ')
         try:
@@ -654,13 +702,53 @@ async def sh_exec_impl(command: str, security: SecurityValidator, timeout: int =
                 process = await asyncio.create_subprocess_exec(
                     native, *tokens[1:], **proc_kwargs,
                 )
-                try:
-                    async def _capture():
-                        out_b, out_tr = await _read_stream_capped(process.stdout, MAX_CAPTURE_BYTES)
-                        err_b, err_tr = await _read_stream_capped(process.stderr, MAX_CAPTURE_BYTES)
-                        return out_b, err_b, out_tr, err_tr
+                stop_event = asyncio.Event()
 
-                    stdout_b, stderr_b, out_trunc, err_trunc = await asyncio.wait_for(_capture(), timeout=timeout)
+                async def _capture():
+                    out_b, out_tr = await _read_stream_capped(
+                        process.stdout, MAX_CAPTURE_BYTES, stop_event)
+                    err_b, err_tr = await _read_stream_capped(
+                        process.stderr, MAX_CAPTURE_BYTES, stop_event)
+                    return out_b, err_b, out_tr, err_tr
+
+                capture_task = asyncio.create_task(_capture())
+                wait_task = asyncio.create_task(_wait_for_exit(process))
+                try:
+                    await asyncio.wait(
+                        {capture_task, wait_task}, timeout=timeout,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if not wait_task.done() and not capture_task.done():
+                        raise TimeoutError
+                    if wait_task.done() and not capture_task.done():
+                        # Process exited but a detached grandchild still holds
+                        # the pipe write-ends (e.g. Popen(close_fds=False)):
+                        # EOF will never arrive -- stop waiting for it and keep
+                        # whatever _read_stream_capped captured in its grace.
+                        stop_event.set()
+                        await asyncio.wait({capture_task}, timeout=3.0)
+                        if not capture_task.done():
+                            capture_task.cancel()
+                    elif not wait_task.done():
+                        # Pipes closed (capture got EOF) while the process is
+                        # still alive -- rare; bound the wait so we can't hang
+                        # here either.
+                        await asyncio.wait({wait_task}, timeout=5.0)
+                        if not wait_task.done():
+                            wait_task.cancel()
+                            await asyncio.gather(wait_task, return_exceptions=True)
+                    try:
+                        stdout_b, stderr_b, out_trunc, err_trunc = capture_task.result()
+                    except asyncio.CancelledError:
+                        stdout_b, stderr_b, out_trunc, err_trunc = b"", b"", False, False
+                    # M-S5 introduced _read_stream_capped() to read stdout/stderr
+                    # to EOF without buffering unboundedly, replacing
+                    # process.communicate() -- but EOF on the pipes is not the
+                    # same as the process being reaped: asyncio only populates
+                    # .returncode after the process exits. The returncode is
+                    # read directly (see _wait_for_exit) -- using
+                    # process.wait() here would hang whenever a detached
+                    # grandchild keeps a pipe open (scenario B, 2026-08-13).
                     out = stdout_b.decode("utf-8", errors="replace")
                     err = stderr_b.decode("utf-8", errors="replace")
                     result = f"Exit code: {process.returncode}"
@@ -673,9 +761,12 @@ async def sh_exec_impl(command: str, security: SecurityValidator, timeout: int =
                     result = _append_secret_scan(result, out + "\n" + err, security, "sh_exec")
                     return result
                 except TimeoutError:
+                    capture_task.cancel()
+                    wait_task.cancel()
+                    await asyncio.gather(capture_task, wait_task, return_exceptions=True)
                     await kill_process_tree(process.pid)
                     await reap_after_kill(process)
-                    return f"Command timed out after {timeout}s{memory_pressure_hint()}"
+                    return f"Command timed out after {timeout}s{memory_pressure_hint()} — long-running process? use sh_spawn instead"
 
     # Fallback: shell execution
     si = shell_info or ShellManager._default_shell()
@@ -686,13 +777,46 @@ async def sh_exec_impl(command: str, security: SecurityValidator, timeout: int =
     process = await run_subprocess(
         [si.executable, *si.command_args, cmd], **proc_kwargs,
     )
-    try:
-        async def _capture():
-            out_b, out_tr = await _read_stream_capped(process.stdout, MAX_CAPTURE_BYTES)
-            err_b, err_tr = await _read_stream_capped(process.stderr, MAX_CAPTURE_BYTES)
-            return out_b, err_b, out_tr, err_tr
+    stop_event = asyncio.Event()
 
-        stdout_b, stderr_b, out_trunc, err_trunc = await asyncio.wait_for(_capture(), timeout=timeout)
+    async def _capture():
+        out_b, out_tr = await _read_stream_capped(
+            process.stdout, MAX_CAPTURE_BYTES, stop_event)
+        err_b, err_tr = await _read_stream_capped(
+            process.stderr, MAX_CAPTURE_BYTES, stop_event)
+        return out_b, err_b, out_tr, err_tr
+
+    capture_task = asyncio.create_task(_capture())
+    wait_task = asyncio.create_task(_wait_for_exit(process))
+    try:
+        await asyncio.wait(
+            {capture_task, wait_task}, timeout=timeout,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not wait_task.done() and not capture_task.done():
+            raise TimeoutError
+        if wait_task.done() and not capture_task.done():
+            # Same scenario-B case as the native-argv path: the shell exited
+            # but a detached grandchild keeps the pipe open; stop waiting for
+            # EOF and keep the partial output.
+            stop_event.set()
+            await asyncio.wait({capture_task}, timeout=3.0)
+            if not capture_task.done():
+                capture_task.cancel()
+        elif not wait_task.done():
+            # Pipes closed while the process is still alive -- rare; bound the
+            # wait so we can't hang here either.
+            await asyncio.wait({wait_task}, timeout=5.0)
+            if not wait_task.done():
+                wait_task.cancel()
+                await asyncio.gather(wait_task, return_exceptions=True)
+        try:
+            stdout_b, stderr_b, out_trunc, err_trunc = capture_task.result()
+        except asyncio.CancelledError:
+            stdout_b, stderr_b, out_trunc, err_trunc = b"", b"", False, False
+        # Same M-S5 gap as the native-argv path above: EOF on the pipes doesn't
+        # populate process.returncode; it is read directly after the process
+        # exits (see _wait_for_exit -- process.wait() would hang on scenario B).
         out = stdout_b.decode("utf-8", errors="replace")
         err = stderr_b.decode("utf-8", errors="replace")
         result = f"Exit code: {process.returncode}"
@@ -705,9 +829,12 @@ async def sh_exec_impl(command: str, security: SecurityValidator, timeout: int =
         result = _append_secret_scan(result, out + "\n" + err, security, "sh_exec")
         return result
     except TimeoutError:
+        capture_task.cancel()
+        wait_task.cancel()
+        await asyncio.gather(capture_task, wait_task, return_exceptions=True)
         await kill_process_tree(process.pid)
         await reap_after_kill(process)
-        return f"Command timed out after {timeout}s{memory_pressure_hint()}"
+        return f"Command timed out after {timeout}s{memory_pressure_hint()} — long-running process? use sh_spawn instead"
 
 
 async def sh_session_start_impl(manager: ShellManager, timeout: int | None = None,

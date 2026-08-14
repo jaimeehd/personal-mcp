@@ -214,6 +214,43 @@ leerse con poca frecuencia.
 
 Detalle completo de diseño y tests: entrada `[1.4.45]` en `CHANGELOG.md`.
 
+## sh_exec vs sh_spawn — dos escenarios de "comando que se cuelga" (v1.4.74)
+
+Regla práctica para cualquier sesión que vea un `Command timed out` de `sh_exec`:
+
+1. **Escenario A — proceso largo legítimo** (dev servers, watchers, `npm run dev`):
+   el comando corre para siempre por diseño. El timeout de `sh_exec` lo mata
+   y es comportamiento **correcto** — no es un bug. La herramienta correcta
+   es `sh_spawn` (arriba), que corre en background, guarda output en ring
+   buffer y es rastreable por PID. El mensaje de timeout desde v1.4.74 lo
+   sugiere explícitamente (`use sh_spawn instead`).
+2. **Escenario B — el proceso principal sale pero un hijo desacoplado mantiene
+   el pipe** (`subprocess.Popen(close_fds=False)`, daemonized children,
+   `cmd /c start /b` en consola compartida): el comando "terminó" pero EOF
+   nunca llega. **Gotcha de asyncio (diagnosticado 13/08/2026)**: `process.wait()`
+   solo despierta cuando TODOS los pipes del proceso hacen EOF
+   (`_try_finish()` → `_call_connection_lost()` en `asyncio/base_subprocess.py`)
+   — un nieto que heredó los write-ends impide el EOF para siempre, así que
+   `wait()` queda pendiente aunque el proceso esté muerto desde hace segundos.
+   El `returncode`, en cambio, se puebla al morir sin depender del estado de
+   los pipes. Por eso `sh_exec_impl` usa `_wait_for_exit()` (polling del
+   returncode) y nunca `process.wait()` para detectar la salida — **cualquier
+   código nuevo que detecte salida de un subproceso con pipes debe usar el
+   mismo patrón** (`_wait_for_exit`), no `process.wait()`.
+   Desde v1.4.74 el escenario B retorna la salida parcial con el exit code real
+   en ~1.5s en vez de esperar el timeout completo.
+   **Deuda aceptada**: el nieto desacoplado queda vivo sin rastreo — la
+   solución completa es un Job Object de Windows (`KILL_ON_JOB_CLOSE`),
+   diferida; implementar solo si se observa un leak real de procesos huérfanos
+   en producción.
+
+Otro hardening del mismo cambio (v1.4.74): powershell/pwsh corren con
+`-NonInteractive` (`command_args`/`session_args` — prompts interactivos fallan
+rápido en vez de esperar input que con `stdin=DEVNULL` nunca llega), y
+`shell_subprocess_env()` setea `PAGER=cat`/`GIT_PAGER=cat`/`LESS=-FRX` por
+default (defensa contra un pager forzado vía config que espera input de un TTY
+que no existe). Verificado: `pytest tests/` → 481 passed, 1 skipped.
+
 ## Regla obligatoria antes de eliminar cualquier símbolo
 Antes de eliminar una función, clase, método o constante:
 1. Busca el nombre exacto del símbolo en src/ Y tests/ (no solo donde ya se sabe que se usa)

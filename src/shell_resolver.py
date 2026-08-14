@@ -141,16 +141,16 @@ _WINDOWS_SHELLS: dict[str, ShellInfo] = {
     "powershell": ShellInfo(
         name="powershell",
         executable="powershell.exe",
-        command_args=["-NoProfile", "-Command"],
-        session_args=["-NoExit", "-Command", "-"],
+        command_args=["-NoProfile", "-NonInteractive", "-Command"],
+        session_args=["-NoExit", "-NonInteractive", "-Command", "-"],
         script_args=["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"],
         workdir_prefix='Set-Location -LiteralPath "{wd}"; ',
     ),
     "pwsh": ShellInfo(
         name="pwsh",
         executable="pwsh.exe",
-        command_args=["-NoProfile", "-Command"],
-        session_args=["-NoExit", "-Command", "-"],
+        command_args=["-NoProfile", "-NonInteractive", "-Command"],
+        session_args=["-NoExit", "-NonInteractive", "-Command", "-"],
         script_args=["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"],
         workdir_prefix='Set-Location -LiteralPath "{wd}"; ',
     ),
@@ -306,4 +306,12 @@ def shell_subprocess_env() -> dict[str, str] | None:
     env = os.environ.copy()
     if ".EXE" not in env.get("PATHEXT", "").upper():
         env["PATHEXT"] = _DEFAULT_PATHEXT
+    # Pagers: a pipe is never a TTY, so interactive pagers (git's default
+    # less) can stall a command waiting for input that will never come --
+    # usually git auto-disables the pager on non-TTY stdout, but not when
+    # core.pager/GIT_PAGER is forced in the environment. setdefault() so an
+    # explicit user-set value is respected. (2026-08-13)
+    env.setdefault("PAGER", "cat")
+    env.setdefault("GIT_PAGER", "cat")
+    env.setdefault("LESS", "-FRX")
     return env

@@ -208,11 +208,11 @@ Salida (ejemplo, con un huérfano detectado de un servidor anterior):
 | `project_find` | Buscar archivo en todos los repos permitidos |
 | `project_git_status` | Estado de git para los repos encontrados bajo `paths_allow` (o bajo un `path` puntual si se especifica), descubrimiento automático (recorre las carpetas buscando `.git`, saltando `node_modules`/`.venv`/etc.). Reporta cambios sin commitear, commits sin pushear y commits del remoto sin traer. Parámetro: `path?` (opcional). Si se omite y `paths_allow` incluye una raíz de disco completa (ej. `C:\`), no escanea — devuelve un mensaje pidiendo un `path` puntual, en vez de colgarse recorriendo todo el disco. |
 
-**Ejemplo de uso — `project_git_status`:**
+**Ejemplo de uso — `project_git_status` (recomendado: pasar siempre `path` puntual):**
 ```
-project_git_status()
+project_git_status(path="C:\Users\usuario\Repos")
 ```
-Sin `path`, recorre automáticamente todas las raíces de `paths_allow`. Salida (ejemplo):
+Con `path` se acota el recorrido a esa carpeta puntual (debe estar dentro de `paths_allow`), evitando el recorrido de disco completo. Salida (ejemplo):
 ```
 2 repo(s) con cambios pendientes:
   MiProyecto                     [main]  3 sin commitear
@@ -220,15 +220,13 @@ Sin `path`, recorre automáticamente todas las raíces de `paths_allow`. Salida 
 
 7 repo(s) sin cambios pendientes: RepoA, RepoB, RepoC, RepoD, RepoE, RepoF, RepoG
 ```
+Sin `path`, recorre automáticamente todas las raíces de `paths_allow` — solo funciona si estas están acotadas.
 ⚠️ Si alguna raíz de `paths_allow` es una raíz de disco completa (ej. `["C:\\"]`), `project_git_status()` sin `path` no escanea — devuelve directamente:
 ```
 paths_allow incluye una raiz de disco completa (C:\) - recorrerla puede tardar varios minutos y agotar el timeout del cliente MCP.
 Pasa un path puntual dentro de las rutas permitidas, ej.: project_git_status(path="C:\\Users\\usuario\\Repos").
 ```
-Pasando `path` se acota el recorrido a esa carpeta puntual (debe estar dentro de `paths_allow`), evitando el recorrido de disco completo:
-```
-project_git_status(path="C:\\Users\\usuario\\Repos")
-```
+Ese mensaje no es un error de la tool: es el guard de seguridad por diseño. Reintenta con un `path` puntual.
 
 ### Capa 5 — Health y Diagnóstico
 | Tool | Descripción |

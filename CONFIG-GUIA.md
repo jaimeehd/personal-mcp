@@ -76,6 +76,11 @@ se le pida.
 > agrégalas explícitamente a `paths_allow` en el config oficial. En Linux/macOS,
 > el valor por defecto (`~`) ya cubre todo.
 
+> ⚠️ Si `paths_allow` incluye una raíz de disco completa (ej. `C:\`), la tool
+> `project_git_status` sin `path` no escanea — devuelve el guard pidiendo un
+> `path` puntual (comportamiento por diseño). Pasar siempre `path` a esa tool,
+> ej.: `project_git_status(path="C:\Users\TuUsuario\Repos")`.
+
 ### paths_deny — Carpetas prohibidas (incluso dentro de una permitida)
 
 Aunque una carpeta esté "por dentro" de una carpeta permitida, si coincide con

@@ -469,4 +469,13 @@ def register_personal_tools(mcp: FastMCP, config: AppConfig,
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True))
     async def project_git_status(path: str | None = None) -> str:
+        """Estado de git multi-repo: cambios sin commitear, commits sin pushear y
+        commits del remoto sin traer.
+
+        path (recomendado siempre): ruta puntual validada contra paths_allow,
+        ej. path="C:\\Users\\usuario\\Repos". Sin path solo funciona si
+        paths_allow está acotado. Si paths_allow incluye una raiz de disco
+        completa (ej. C:\\), la tool devuelve el mensaje del guard pidiendo un
+        path puntual — es el comportamiento esperado, no un error.
+        """
         return await project_git_status_impl(security, path)

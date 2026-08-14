@@ -26,6 +26,11 @@ windows = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+filterwarnings = [
+    # Windows asyncio proactor: repr de un pipe transport ya cerrado durante gc
+    # ("I/O operation on closed pipe") — limpieza inofensiva (ver AGENTS.md)
+    "ignore:I/O operation on closed pipe:pytest.PytestUnraisableExceptionWarning",
+]
 
 [tool.pytest-asyncio]
 default_async_timeout = 30

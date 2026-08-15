@@ -611,6 +611,152 @@ async def fs_delete_batch_impl(paths: list[str], security: SecurityValidator) ->
     return summary + "\n" + "\n".join(results)
 
 
+def _dedupe_writes(writes: list[dict]) -> tuple[list[dict], list[str]]:
+    """Unlike fs_delete_batch (where a repeated path is a harmless duplicate --
+    deleting the same file twice has one outcome either way), a repeated path
+    here with DIFFERENT content is not a duplicate, it's an ambiguous or
+    contradictory instruction: dict.fromkeys()-style dedup would silently keep
+    one and discard the other's real intent without telling the caller. Paths
+    repeated with IDENTICAL content dedupe silently (same reasoning as delete:
+    truly harmless). Paths repeated with conflicting content are reported as
+    errors and the whole batch is rejected before touching the filesystem --
+    partial silent data loss is worse than a batch that requires the caller to
+    resend one entry per path.
+    """
+    seen: dict[str, str] = {}
+    conflicts: set[str] = set()
+    for w in writes:
+        path, content = w.get("path", ""), w.get("content", "")
+        if path in seen and seen[path] != content:
+            conflicts.add(path)
+        seen.setdefault(path, content)
+    if conflicts:
+        return [], sorted(conflicts)
+    deduped, seen_paths = [], set()
+    for w in writes:
+        path = w.get("path", "")
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
+        deduped.append(w)
+    return deduped, []
+
+
+def _write_batch_sync(writes: list[dict], security: SecurityValidator,
+                      encoding: str = "utf-8") -> tuple[list[str], int]:
+    """Whole loop off-thread, same pattern as _delete_batch_sync -- mkdir +
+    write per item (fs_write_impl does the same mkdir before writing single
+    files; a batch write to a not-yet-existing directory needs it just as
+    much), and per-item failure logging (2026-08-07 reasoning from
+    fs_delete_batch: the return string was the only place a per-file failure
+    reason ever existed, which is exactly why the 232-vs-192 incident took so
+    long to diagnose after the fact).
+    """
+    results = []
+    written = 0
+    for w in writes:
+        p, content = w.get("path", ""), w.get("content", "")
+        try:
+            rpath = security.resolve_and_validate(p)
+            rpath.parent.mkdir(parents=True, exist_ok=True)
+            size_bytes = len(content.encode(encoding))
+            rpath.write_text(content, encoding=encoding)
+            written += 1
+            results.append(f"Written {len(content)} chars ({size_bytes:,} bytes) to {rpath}")
+        except Exception as e:
+            logger.warning("fs_write_batch FAIL path=%s error=%s", p, e)
+            results.append(f"Error writing {p}: {e}")
+    return results, written
+
+
+async def fs_write_batch_impl(writes: list[dict], security: SecurityValidator) -> str:
+    """Same 'don't re-pass the operation' reasoning as fs_delete_batch_impl:
+    the fs_write_batch() wrapper already validated + consumed the batch grant
+    via validate_tool_paths_batch(paths, "write") for every path, so
+    _write_batch_sync()'s resolve_and_validate() calls use the default
+    operation="read" rather than re-checking/re-consuming "write".
+    """
+    results, written = await asyncio.to_thread(_write_batch_sync, writes, security)
+    logger.info("fs_write_batch requested=%d written=%d", len(writes), written)
+    summary = f"{written}/{len(writes)} files written"
+    return summary + "\n" + "\n".join(results)
+
+
+def _dedupe_edits(edits: list[dict]) -> tuple[list[dict], list[str]]:
+    """Same reasoning as _dedupe_writes: a repeated path with an IDENTICAL
+    (old_string, new_string) pair dedupes silently; a repeated path with a
+    DIFFERENT pair is an ambiguous instruction, rejected up front rather than
+    silently applying one and discarding the other.
+    """
+    seen: dict[str, tuple[str, str]] = {}
+    conflicts: set[str] = set()
+    for e in edits:
+        path = e.get("path", "")
+        pair = (e.get("old_string", ""), e.get("new_string", ""))
+        if path in seen and seen[path] != pair:
+            conflicts.add(path)
+        seen.setdefault(path, pair)
+    if conflicts:
+        return [], sorted(conflicts)
+    deduped, seen_paths = [], set()
+    for e in edits:
+        path = e.get("path", "")
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
+        deduped.append(e)
+    return deduped, []
+
+
+async def fs_edit_batch_impl(edits: list[dict], security: SecurityValidator) -> str:
+    """Unlike _delete_batch_sync/_write_batch_sync (whole loop off-thread in one
+    asyncio.to_thread call), this loop stays in the async function: each
+    iteration needs to await _diff_or_timeout_note() (itself async, wrapping
+    difflib in its own to_thread+timeout) -- an async function cannot be
+    called from inside a sync helper running in a worker thread. Same pattern
+    already used by fs_read_multi_impl: a loop of individually-awaited async
+    calls rather than one big sync helper. Each file read/write is still
+    off-thread via asyncio.to_thread individually, matching fs_edit_impl.
+
+    Same M-F1 reasoning as fs_edit_impl: check the file exists before reading,
+    so a nonexistent file reports "does not exist" instead of the misleading
+    "old_string not found". Same per-item failure logging as fs_delete_batch/
+    fs_write_batch (2026-08-07): a batch's partial failures need to be
+    diagnosable from server.log after the fact, not only from the return
+    string of a single chat turn. Same "don't re-pass the operation"
+    reasoning as fs_delete_batch_impl/fs_write_batch_impl: the wrapper already
+    consumed the batch "write" grant via validate_tool_paths_batch(), so
+    resolve_and_validate() here uses the default operation="read".
+    """
+    results = []
+    edited = 0
+    for e in edits:
+        p = e.get("path", "")
+        old_s = e.get("old_string", "")
+        new_s = e.get("new_string", "")
+        try:
+            rpath = security.resolve_and_validate(p)
+            if not await asyncio.to_thread(rpath.is_file):
+                logger.warning("fs_edit_batch FAIL path=%s error=not_found", p)
+                results.append(f"Error: not a file or does not exist: {rpath}")
+                continue
+            content = await asyncio.to_thread(rpath.read_text, encoding="utf-8")
+            if old_s not in content:
+                logger.warning("fs_edit_batch FAIL path=%s error=old_string_not_found", p)
+                results.append(f"Error: old_string not found in {p}")
+                continue
+            new_content = content.replace(old_s, new_s, 1)
+            await asyncio.to_thread(rpath.write_text, new_content, encoding="utf-8")
+            diff = await _diff_or_timeout_note(content, new_content)
+            edited += 1
+            results.append(f"Edited {rpath}:\n{diff}")
+        except Exception as ex:
+            logger.warning("fs_edit_batch FAIL path=%s error=%s", p, ex)
+            results.append(f"Error editing {p}: {ex}")
+    logger.info("fs_edit_batch requested=%d edited=%d", len(edits), edited)
+    return f"{edited}/{len(edits)} files edited\n" + "\n".join(results)
+
+
 async def fs_read_multi_impl(paths: list[str], security: SecurityValidator,
                               encoding: str = "utf-8", max_size_mb: int = 0) -> str:
     results = []
@@ -968,6 +1114,15 @@ async def fs_extract_impl(zip_path: str, output_dir: str, security: SecurityVali
 
 async def fs_edit_advanced_impl(path: str, edits: list[dict[str, str]],
                                  security: SecurityValidator, dry_run: bool = False) -> str:
+    rpath = security.resolve_and_validate(path)
+    # Same fix as fs_edit_impl's M-F1 (2026-08-11), applied here 2026-08-15:
+    # editing a nonexistent file used to fall through to a misleading
+    # "'oldText' not found" -- fs_read_impl returns an error string rather
+    # than raising, and the loop below would try to match oldText against
+    # that error string as if it were real file content. Report the real
+    # problem instead.
+    if not await asyncio.to_thread(rpath.is_file):
+        return f"Error: not a file or does not exist: {rpath}"
     content = await fs_read_impl(path, security)
     new_content = content
     match_info = []
@@ -1002,17 +1157,38 @@ def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True, destructiveHint=True))
     async def fs_write(path: str, content: str, encoding: str = "utf-8", max_size_mb: int = 0) -> str:
+        # Same class of bug as fs_edit (see comment there): fs_write_impl's
+        # max_size_mb check runs after validate_tool_path() already consumed
+        # the grant, and it's the only "Error:" path fs_write_impl has before
+        # ever touching the filesystem (confirmed by reading fs_write_impl:
+        # no other early return exists between the grant check and the write).
+        grant_key = security.has_single_grant(path, "write")
         err = security.validate_tool_path(path, "write")
         if err:
             return err
-        return await fs_write_impl(path, content, security, encoding, max_size_mb)
+        result = await fs_write_impl(path, content, security, encoding, max_size_mb)
+        if grant_key and result.startswith("Error:"):
+            security.refund_single(path, grant_key)
+        return result
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False, destructiveHint=True))
     async def fs_edit(path: str, old_string: str, new_string: str) -> str:
+        # M-Fxx (2026-08-15): validate_tool_path() consumes a SINGLE grant (if
+        # that's what authorizes this call) before fs_edit_impl gets a chance
+        # to check whether old_string is even present in the current file.
+        # A mismatch there means the grant was spent on an attempt that never
+        # touched the filesystem -- refund it so a corrected retry doesn't
+        # need a brand new ticket/popup. grant_key is None (no-op refund) when
+        # access came from a session/permanent grant instead, since those were
+        # never consumed in the first place.
+        grant_key = security.has_single_grant(path, "write")
         err = security.validate_tool_path(path, "write")
         if err:
             return err
-        return await fs_edit_impl(path, old_string, new_string, security)
+        result = await fs_edit_impl(path, old_string, new_string, security)
+        if grant_key and result.startswith("Error:"):
+            security.refund_single(path, grant_key)
+        return result
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def fs_list(path: str, pattern: str | None = None, max_results: int | None = 100,
@@ -1152,6 +1328,27 @@ def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None
             return err
         return await fs_delete_batch_impl(deduped, security)
 
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False, destructiveHint=True))
+    async def fs_write_batch(writes: list[dict]) -> str:
+        if not writes:
+            return "Error: empty writes list"
+        # A repeated path with identical content dedupes silently (same
+        # reasoning as fs_delete_batch); a repeated path with DIFFERENT
+        # content is an ambiguous instruction, not a duplicate -- rejected
+        # up front instead of silently keeping one and discarding the other.
+        deduped, conflicts = _dedupe_writes(writes)
+        if conflicts:
+            return (
+                "Error: conflicting content for the same path(s) in this batch "
+                "(each path can appear once, or repeated with identical content): "
+                + ", ".join(conflicts)
+            )
+        paths = [w.get("path", "") for w in deduped]
+        err = security.validate_tool_paths_batch(paths, "write")
+        if err:
+            return err
+        return await fs_write_batch_impl(deduped, security)
+
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def fs_read_multi(paths: list[str], encoding: str = "utf-8",
                              max_size_mb: int = 0) -> str:
@@ -1220,9 +1417,23 @@ def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False, destructiveHint=True))
     async def fs_edit_advanced(path: str, edits: list[dict[str, str]],
                                 dry_run: bool = False) -> str:
+        # Same reasoning as fs_edit (see comment there): validate_tool_path()
+        # consumes a SINGLE grant, if that's what authorizes this call, before
+        # any oldText match is checked. Both early-return failure paths below
+        # (empty edits, and every "Error:" return from the impl) happen after
+        # that consumption without ever touching the filesystem.
+        grant_key = security.has_single_grant(path, "write")
         err = security.validate_tool_path(path, "write")
         if err:
             return err
         if not edits:
+            if grant_key:
+                security.refund_single(path, grant_key)
             return "Error: edits list is empty"
-        return await fs_edit_advanced_impl(path, edits, security, dry_run)
+        result = await fs_edit_advanced_impl(path, edits, security, dry_run)
+        # dry_run never touches the filesystem regardless of whether the
+        # match preview succeeded or failed -- refund unconditionally, not
+        # just on "Error:", or a successful dry run still burns the grant.
+        if grant_key and (dry_run or result.startswith("Error:")):
+            security.refund_single(path, grant_key)
+        return result

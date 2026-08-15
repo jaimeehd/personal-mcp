@@ -31,6 +31,7 @@ from src.layers.layer1_filesystem import (
     fs_search_impl,
     fs_snapshot_impl,
     fs_tree_impl,
+    fs_write_batch_impl,
     fs_write_impl,
 )
 from src.permissions import GrantLevel, PermissionManager
@@ -831,6 +832,117 @@ async def test_delete_batch_logs_individual_failures(temp_home, sec):
     assert not real.exists()
 
 
+# --- fs_write_batch (2026-08-14) ---
+
+@pytest.mark.asyncio
+async def test_write_batch_basic(temp_home, sec):
+    a = temp_home / "Repos" / "wb_a.txt"
+    b = temp_home / "Repos" / "wb_b.txt"
+    result = await fs_write_batch_impl(
+        [{"path": str(a), "content": "alpha"}, {"path": str(b), "content": "beta"}], sec
+    )
+    assert "2/2 files written" in result
+    assert a.read_text() == "alpha"
+    assert b.read_text() == "beta"
+
+
+@pytest.mark.asyncio
+async def test_write_batch_creates_parent_directory(temp_home, sec):
+    # fs_write_impl (single-file) already does parent.mkdir(parents=True) before
+    # writing -- the batch version needs the same per item, or a write into a
+    # not-yet-existing directory fails.
+    target = temp_home / "Repos" / "brand_new_subdir" / "deep" / "file.txt"
+    result = await fs_write_batch_impl([{"path": str(target), "content": "x"}], sec)
+    assert "1/1 files written" in result
+    assert target.read_text() == "x"
+
+
+@pytest.mark.asyncio
+async def test_write_batch_logs_individual_failures(temp_home, sec):
+    """Companion to test_delete_batch_logs_individual_failures."""
+    import io
+    import logging
+
+    logger = logging.getLogger("personal-mcp.layer1_filesystem")
+    logger.handlers.clear()
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    ok = temp_home / "Repos" / "wb_ok.txt"
+    outside = temp_home / "Outside" / "wb_denied.txt"
+
+    result = await fs_write_batch_impl(
+        [{"path": str(ok), "content": "fine"}, {"path": str(outside), "content": "nope"}], sec
+    )
+
+    text = stream.getvalue()
+    assert "1/2 files written" in result
+    assert ok.read_text() == "fine"
+    assert f"fs_write_batch FAIL path={outside}" in text
+
+
+@pytest.mark.asyncio
+async def test_write_batch_dedup_identical_content_no_error(temp_home, sec):
+    """Same path repeated with IDENTICAL content dedupes silently -- same
+    reasoning as fs_delete_batch: truly harmless, not an ambiguous instruction.
+    """
+    import logging
+
+    from src.audit import AuditLog
+    from src.layers.layer1_filesystem import register_filesystem_tools
+    from src.server import AuditedFastMCP
+
+    a = temp_home / "Repos" / "wb_dup_same.txt"
+
+    app = AuditedFastMCP("test", audit_log=AuditLog(max_entries=10),
+                          logger=logging.getLogger("test-write-batch-dedup"))
+    register_filesystem_tools(app, sec)
+
+    result = await app.call_tool(
+        "fs_write_batch",
+        {"writes": [{"path": str(a), "content": "same"}, {"path": str(a), "content": "same"}]},
+    )
+    text = app._result_text(result)
+
+    assert "1/1 files written" in text
+    assert a.read_text() == "same"
+
+
+@pytest.mark.asyncio
+async def test_write_batch_conflicting_content_rejected(temp_home, sec):
+    """Regression test for the design gap found reviewing the fs_delete_batch
+    dedup fix before reusing it here: a path repeated with DIFFERENT content
+    is not a harmless duplicate like delete -- it's an ambiguous instruction.
+    dict.fromkeys()-style dedup would silently keep one and discard the
+    other's real intent. The whole batch must be rejected before touching the
+    filesystem, not partially applied.
+    """
+    import logging
+
+    from src.audit import AuditLog
+    from src.layers.layer1_filesystem import register_filesystem_tools
+    from src.server import AuditedFastMCP
+
+    a = temp_home / "Repos" / "wb_conflict.txt"
+
+    app = AuditedFastMCP("test", audit_log=AuditLog(max_entries=10),
+                          logger=logging.getLogger("test-write-batch-conflict"))
+    register_filesystem_tools(app, sec)
+
+    result = await app.call_tool(
+        "fs_write_batch",
+        {"writes": [{"path": str(a), "content": "version A"}, {"path": str(a), "content": "version B"}]},
+    )
+    text = app._result_text(result)
+
+    assert "Error" in text
+    assert "conflicting content" in text
+    assert not a.exists()
+
+
 # --- A-1 (auditoría 2026-08-11): junction/symlink traversal ---
 
 def _can_create_symlinks():
@@ -908,6 +1020,17 @@ async def test_edit_nonexistent_file_returns_error(temp_home, sec):
     assert "not a file or does not exist" in result
 
 
+async def test_edit_advanced_nonexistent_file_returns_error(temp_home, sec):
+    """Same fix as test_edit_nonexistent_file_returns_error, applied to the
+    advanced variant: without the is_file check, this used to report a
+    misleading "'oldText' not found" instead of the real problem."""
+    missing = temp_home / "Repos" / "does_not_exist_advanced.txt"
+    result = await fs_edit_advanced_impl(
+        str(missing), [{"oldText": "old", "newText": "new"}], sec
+    )
+    assert "not a file or does not exist" in result
+
+
 # --- M-F2 (auditoría 2026-08-11): fs_diff on nonexistent file ---
 
 @pytest.mark.asyncio
@@ -954,6 +1077,197 @@ async def test_batch_copy_outside_target_rejected(temp_home, sec):
     outside_target = temp_home / "Outside" / "dest"
     result = await fs_batch_impl(str(d), "copy", str(outside_target), sec, pattern="*.txt", dry_run=True)
     assert "Access denied" in result
+
+
+# --- refund_single (2026-08-15): fs_edit's/fs_edit_advanced's wrapper consumes
+# a SINGLE grant before checking whether the edit is even possible (old_string
+# present, oldText present, edits non-empty). A mismatch there must not cost
+# the caller a second ticket/popup for a retry against the same file. ---
+
+def _make_single_grant_sec(temp_home, resource: str, operation: str = "write"):
+    """A SecurityValidator with exactly one approved SINGLE grant for
+    `resource`, and nothing else -- unlike the `sec` fixture, which grants a
+    blanket SESSION "*" over temp_home that would satisfy check_granted
+    before ever reaching _single_grants, making the scenarios below
+    impossible to set up.
+    """
+    from src.permissions import GrantLevel, PermissionManager
+
+    config = AppConfig(
+        security=SecurityConfig(
+            paths_allow=[str(temp_home / "Repos")],
+            paths_deny=["**/node_modules/**", "**/.git/**"],
+        ),
+        data_dir=str(temp_home / ".personal-mcp" / "data"),
+        config_path=str(temp_home / ".personal-mcp" / "config.json"),
+    )
+    validator = SecurityValidator(config)
+    validator.perm_manager = PermissionManager(config)
+    ticket = validator.perm_manager.request(resource, operation, GrantLevel.SINGLE)
+    validator.perm_manager.approve(ticket.id, confirm_code=ticket.confirm_code)
+    return validator
+
+
+@pytest.mark.asyncio
+async def test_edit_refunds_single_grant_on_content_mismatch(temp_home):
+    import logging
+
+    from src.audit import AuditLog
+    from src.layers.layer1_filesystem import register_filesystem_tools
+    from src.server import AuditedFastMCP
+
+    f = temp_home / "Repos" / "edit_refund.txt"
+    f.write_text("original content")
+    sec = _make_single_grant_sec(temp_home, str(f))
+
+    app = AuditedFastMCP("test", audit_log=AuditLog(max_entries=10),
+                          logger=logging.getLogger("test-edit-refund"))
+    register_filesystem_tools(app, sec)
+
+    # Wrong old_string: must fail without writing, and must not spend the
+    # single grant we just approved.
+    result = await app.call_tool(
+        "fs_edit", {"path": str(f), "old_string": "wrong text", "new_string": "irrelevant"}
+    )
+    text = app._result_text(result)
+    assert "old_string not found" in text
+    assert f.read_text() == "original content"
+
+    # Correct old_string, same (never re-approved) ticket's grant. If the
+    # refund did not happen this comes back permission_required instead of
+    # actually applying the edit.
+    result = await app.call_tool(
+        "fs_edit", {"path": str(f), "old_string": "original", "new_string": "updated"}
+    )
+    text = app._result_text(result)
+    assert "Applied edit" in text
+    assert f.read_text() == "updated content"
+
+
+@pytest.mark.asyncio
+async def test_edit_does_not_fabricate_grant_when_session_authorized(sample_file, sec):
+    """Safety-net: sample_file/sec is authorized via sec's session grant, not
+    a SINGLE one. A failed edit must not create a phantom single-use grant
+    for it -- has_single_grant() should return None here, so refund_single()
+    is never called.
+    """
+    import logging
+
+    from src.audit import AuditLog
+    from src.layers.layer1_filesystem import register_filesystem_tools
+    from src.server import AuditedFastMCP
+
+    app = AuditedFastMCP("test", audit_log=AuditLog(max_entries=10),
+                          logger=logging.getLogger("test-edit-no-fabricate"))
+    register_filesystem_tools(app, sec)
+
+    result = await app.call_tool(
+        "fs_edit", {"path": str(sample_file), "old_string": "definitely not present", "new_string": "x"}
+    )
+    text = app._result_text(result)
+    assert "old_string not found" in text
+    resolved = sec.perm_manager._resolve(str(sample_file))
+    assert resolved not in sec.perm_manager._single_grants
+
+
+@pytest.mark.asyncio
+async def test_edit_advanced_refunds_single_grant_on_empty_edits(temp_home):
+    """Same bug class as fs_edit: the wrapper's own 'edits list is empty'
+    check runs after validate_tool_path() already consumed the grant."""
+    import logging
+
+    from src.audit import AuditLog
+    from src.layers.layer1_filesystem import register_filesystem_tools
+    from src.server import AuditedFastMCP
+
+    f = temp_home / "Repos" / "edit_advanced_refund.txt"
+    f.write_text("content")
+    sec = _make_single_grant_sec(temp_home, str(f))
+
+    app = AuditedFastMCP("test", audit_log=AuditLog(max_entries=10),
+                          logger=logging.getLogger("test-edit-advanced-refund"))
+    register_filesystem_tools(app, sec)
+
+    result = await app.call_tool("fs_edit_advanced", {"path": str(f), "edits": []})
+    text = app._result_text(result)
+    assert "edits list is empty" in text
+
+    result = await app.call_tool(
+        "fs_edit_advanced",
+        {"path": str(f), "edits": [{"oldText": "content", "newText": "changed"}]},
+    )
+    text = app._result_text(result)
+    assert "Applied 1 edit" in text
+    assert f.read_text() == "changed"
+
+
+@pytest.mark.asyncio
+async def test_write_refunds_single_grant_on_content_too_large(temp_home):
+    """Same bug class: fs_write_impl's max_size_mb check is its only
+    "Error:" path, and it runs after validate_tool_path() already consumed
+    the grant -- content rejected for size never touches the filesystem."""
+    import logging
+
+    from src.audit import AuditLog
+    from src.layers.layer1_filesystem import register_filesystem_tools
+    from src.server import AuditedFastMCP
+
+    f = temp_home / "Repos" / "write_refund.txt"
+    sec = _make_single_grant_sec(temp_home, str(f))
+
+    app = AuditedFastMCP("test", audit_log=AuditLog(max_entries=10),
+                          logger=logging.getLogger("test-write-refund"))
+    register_filesystem_tools(app, sec)
+
+    big_content = "x" * (2 * 1024 * 1024)
+    result = await app.call_tool(
+        "fs_write", {"path": str(f), "content": big_content, "max_size_mb": 1}
+    )
+    text = app._result_text(result)
+    assert "content too large" in text
+    assert not f.exists()
+
+    # Same (never re-approved) ticket's grant applies the real write.
+    result = await app.call_tool("fs_write", {"path": str(f), "content": "short"})
+    text = app._result_text(result)
+    assert "Written" in text
+    assert f.read_text() == "short"
+
+
+@pytest.mark.asyncio
+async def test_edit_advanced_dry_run_refunds_single_grant(temp_home):
+    """dry_run never touches the filesystem, win or lose -- a successful
+    preview must not burn the grant either, not just a failed one."""
+    import logging
+
+    from src.audit import AuditLog
+    from src.layers.layer1_filesystem import register_filesystem_tools
+    from src.server import AuditedFastMCP
+
+    f = temp_home / "Repos" / "edit_advanced_dry_run.txt"
+    f.write_text("content")
+    sec = _make_single_grant_sec(temp_home, str(f))
+
+    app = AuditedFastMCP("test", audit_log=AuditLog(max_entries=10),
+                          logger=logging.getLogger("test-edit-advanced-dryrun"))
+    register_filesystem_tools(app, sec)
+
+    result = await app.call_tool(
+        "fs_edit_advanced",
+        {"path": str(f), "edits": [{"oldText": "content", "newText": "changed"}], "dry_run": True},
+    )
+    text = app._result_text(result)
+    assert "Dry run" in text
+    assert f.read_text() == "content"
+
+    # Same (never re-approved) ticket's grant applies the real edit.
+    result = await app.call_tool(
+        "fs_edit_advanced",
+        {"path": str(f), "edits": [{"oldText": "content", "newText": "changed"}]},
+    )
+    text = app._result_text(result)
+    assert "Applied 1 edit" in text
+    assert f.read_text() == "changed"
 
 
 

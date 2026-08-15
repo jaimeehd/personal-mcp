@@ -380,6 +380,20 @@ class SecurityValidator:
             "message": f"Access to '{raw_path}' denied. No PermissionManager configured.",
         })
 
+    def has_single_grant(self, raw_path: str, operation: str) -> str | None:
+        """Thin pass-through to PermissionManager.has_single_grant() -- see
+        that docstring for the full contract. Returns None (nothing to
+        refund) when no PermissionManager is configured."""
+        if not self.perm_manager:
+            return None
+        return self.perm_manager.has_single_grant(raw_path, operation)
+
+    def refund_single(self, raw_path: str, operation_key: str) -> None:
+        """Thin pass-through to PermissionManager.refund_single(). No-op
+        when no PermissionManager is configured."""
+        if self.perm_manager:
+            self.perm_manager.refund_single(raw_path, operation_key)
+
     # Matches Windows absolute paths using either separator (PowerShell accepts both
     # "C:\foo\bar" and "C:/foo/bar"); a backslash-only regex let forward-slash paths
     # bypass the shell command path scan entirely.

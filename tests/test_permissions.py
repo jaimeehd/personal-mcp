@@ -381,3 +381,87 @@ def test_check_granted_safety_net(perm):
     resolved = perm._resolve("C:\\Temp\\corrupt.txt")
     perm._single_grants[resolved] = None
     assert perm.check_granted("C:\\Temp\\corrupt.txt", "read") is False
+
+
+# --- has_single_grant / refund_single (2026-08-15): fs_edit's wrapper consumes
+# a SINGLE grant before the impl can check whether the edit is even possible;
+# these back the refund that undoes that consumption on a failed attempt. ---
+
+def test_has_single_grant_and_refund_roundtrip(perm):
+    ticket = perm.request("C:\\Repos\\foo.txt", "write", GrantLevel.SINGLE)
+    perm.approve(ticket.id, confirm_code=ticket.confirm_code)
+    assert perm.has_single_grant("C:\\Repos\\foo.txt", "write") == "write"
+    assert perm.check_granted("C:\\Repos\\foo.txt", "write", consume=True) is True
+    # Consumed: nothing left to peek, and a second real check fails.
+    assert perm.has_single_grant("C:\\Repos\\foo.txt", "write") is None
+    assert perm.check_granted("C:\\Repos\\foo.txt", "write", consume=True) is False
+    # Refund restores exactly one unit -- usable once, not permanently.
+    perm.refund_single("C:\\Repos\\foo.txt", "write")
+    assert perm.has_single_grant("C:\\Repos\\foo.txt", "write") == "write"
+    assert perm.check_granted("C:\\Repos\\foo.txt", "write", consume=True) is True
+    assert perm.check_granted("C:\\Repos\\foo.txt", "write", consume=True) is False
+
+
+def test_has_single_grant_returns_none_for_session_grant(perm):
+    # A session grant satisfies check_granted but is never tracked in
+    # _single_grants -- has_single_grant must not mistake it for one, or a
+    # caller refunding on its say-so would fabricate a real single-use grant
+    # for a resource that was only ever meant to have session-wide access.
+    perm.grant_direct("C:\\Repos\\bar.txt", "write", GrantLevel.SESSION)
+    assert perm.has_single_grant("C:\\Repos\\bar.txt", "write") is None
+    assert perm.check_granted("C:\\Repos\\bar.txt", "write") is True
+
+
+def test_has_single_grant_wildcard_key(perm):
+    # A "*" single grant covers "write", but the refundable key is "*", not
+    # "write" -- refunding into the wrong key would create an unrelated grant
+    # instead of restoring the one that was actually spent.
+    perm.grant_direct("C:\\Repos\\baz.txt", "*", GrantLevel.SINGLE)
+    assert perm.has_single_grant("C:\\Repos\\baz.txt", "write") == "*"
+    assert perm.check_granted("C:\\Repos\\baz.txt", "write", consume=True) is True
+    assert perm.has_single_grant("C:\\Repos\\baz.txt", "write") is None
+    perm.refund_single("C:\\Repos\\baz.txt", "*")
+    assert perm.check_granted("C:\\Repos\\baz.txt", "write", consume=True) is True
+
+
+# --- approve() re-shows the popup on ANY invalid code, not just restored
+# tickets (2026-08-15 fix) ---
+# Before this fix, a wrong confirm_code on a ticket from the CURRENT process
+# (not restored from a previous one) returned an error but never re-showed
+# the popup -- the user had no way to see the code again unless the agent
+# happened to retry the ORIGINAL request() call instead of approve(). Zero
+# test coverage existed for this before (no test ever mocked/spied
+# show_confirmation_code), which is exactly why it went undetected.
+
+from unittest.mock import patch
+
+
+def test_approve_wrong_code_reshows_popup_for_live_ticket(perm):
+    ticket = perm.request("C:\\Repos\\foo.txt", "write")
+    assert ticket.restored is False
+    with patch("src.permissions.show_confirmation_code") as mock_show:
+        ok, msg = perm.approve(ticket.id, GrantLevel.SESSION, confirm_code="000000")
+    assert ok is False
+    assert "Invalid" in msg
+    mock_show.assert_called_once_with(ticket.resource, ticket.operation, ticket.confirm_code)
+
+
+def test_approve_wrong_code_reshows_batch_popup_for_live_ticket(perm):
+    paths = ["C:\\Repos\\a.txt", "C:\\Repos\\b.txt"]
+    ticket = perm.request_batch(paths, "delete")
+    with patch("src.permissions.show_confirmation_code_batch") as mock_show:
+        ok, msg = perm.approve(ticket.id, GrantLevel.SESSION, confirm_code="000000")
+    assert ok is False
+    mock_show.assert_called_once_with(ticket.resources, ticket.operation, ticket.confirm_code)
+
+
+def test_approve_max_attempts_stops_reshowing_popup(perm):
+    ticket = perm.request("C:\\Repos\\foo.txt", "write")
+    with patch("src.permissions.show_confirmation_code") as mock_show:
+        for _ in range(PermissionManager._MAX_APPROVE_ATTEMPTS):
+            perm.approve(ticket.id, GrantLevel.SESSION, confirm_code="000000")
+    # Locked on the final attempt -- that one must NOT re-show (ticket is
+    # already denied by then, no code left to show).
+    assert mock_show.call_count == PermissionManager._MAX_APPROVE_ATTEMPTS - 1
+    assert perm._tickets[ticket.id].status == "denied"
+

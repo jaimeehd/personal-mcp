@@ -331,17 +331,23 @@ class PermissionManager:
                                ticket_id, attempts, self._MAX_APPROVE_ATTEMPTS)
                 return False, (f"Ticket locked after {attempts} failed attempts. "
                                f"Create a new request to try again.")
-            if ticket.restored:
-                # Un reinicio regenera el secret HMAC, asi que un ticket restaurado
-                # tiene un confirm_code nuevo. Re-mostrar el popup para que el humano
-                # lea el codigo actual en vez del viejo pre-reinicio (v1.4.41).
-                if ticket.resources is not None:
-                    show_confirmation_code_batch(ticket.resources, ticket.operation, ticket.confirm_code)
-                else:
-                    show_confirmation_code(ticket.resource, ticket.operation, ticket.confirm_code)
+            # 2026-08-15 fix: antes solo se re-mostraba el popup si
+            # ticket.restored (ticket reconstruido tras un reinicio). Para un
+            # ticket vivo del proceso actual -- el caso normal -- un codigo
+            # incorrecto dejaba al usuario sin forma de volver a ver el codigo
+            # correcto salvo que el agente reintentara la llamada ORIGINAL
+            # (fs_edit/fs_request_allow, que si re-muestra via el dedup de
+            # request()) en vez de fs_approve. Mismo comportamiento que ya
+            # tiene request()/request_batch() en cada llamada mientras el
+            # ticket siga pending -- ahora unificado, sin la condicion
+            # restored. Acotado por el rate-limit de arriba (maximo 10 veces).
+            if ticket.resources is not None:
+                show_confirmation_code_batch(ticket.resources, ticket.operation, ticket.confirm_code)
+            else:
+                show_confirmation_code(ticket.resource, ticket.operation, ticket.confirm_code)
             logger.warning("APPROVE_FAIL ticket=%s reason=invalid_code attempt=%d/%d%s",
                            ticket_id, attempts, self._MAX_APPROVE_ATTEMPTS,
-                           " (restored; popup re-shown)" if ticket.restored else "")
+                           " (restored; popup re-shown)" if ticket.restored else " (popup re-shown)")
             return False, "Invalid or missing confirmation code."
 
         ticket.status = "approved"
@@ -447,6 +453,49 @@ class PermissionManager:
         except ValueError:
             pass
         return False
+
+    def has_single_grant(self, resource: str, operation: str) -> str | None:
+        """Non-consuming peek at whether a SINGLE grant (not session/permanent,
+        not data_dir) currently covers resource+operation, and if so, which key
+        in _single_grants would be consumed by a check_granted(consume=True)
+        call for the same arguments right now: the exact operation, or the
+        wildcard "*" (mirrors check_granted's own matching order). Returns None
+        when access -- if granted at all -- would come from something other
+        than a SINGLE grant (session, permanent, data_dir), meaning nothing
+        would be consumed and there is nothing to refund later.
+
+        Callers must call this BEFORE the check_granted(consume=True) call it
+        is peeking at (the state read here is the same state that call is
+        about to mutate), and pass the returned key -- not `operation` itself
+        -- to refund_single(), since it may be "*" rather than the exact
+        operation.
+        """
+        resolved = self._resolve(resource)
+        ops = self._single_grants.get(resolved, {})
+        if operation in ops:
+            return operation
+        if operation not in ("delete", "execute") and "*" in ops:
+            return "*"
+        return None
+
+    def refund_single(self, resource: str, operation_key: str) -> None:
+        """Restore one unit to a SINGLE grant consumed by check_granted().
+
+        For tools where the wrapper validates (and consumes) permission
+        before the impl can check whether the operation is actually possible
+        (e.g. fs_edit's old_string not present in the current file content),
+        a failure there means the grant was spent on an attempt that never
+        touched the filesystem. Call only with the exact operation_key
+        returned by a prior has_single_grant() call for the same resource --
+        calling this unconditionally, or with a guessed key, can fabricate a
+        grant that was never actually consumed (e.g. when access came from a
+        session/permanent grant instead), silently widening access beyond
+        what was approved.
+        """
+        resolved = self._resolve(resource)
+        ops = self._single_grants.setdefault(resolved, {})
+        ops[operation_key] = ops.get(operation_key, 0) + 1
+        logger.info("REFUND_SINGLE resource=%s op=%s", resolved, operation_key)
 
     def pending(self) -> list[dict]:
         self._cleanup_expired()

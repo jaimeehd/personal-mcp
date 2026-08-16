@@ -942,7 +942,7 @@ async def fs_find_duplicates_impl(path: str, security: SecurityValidator,
     return "\n".join(lines).rstrip()
 
 
-def _disk_usage_sync(base: Path, depth: int) -> list[tuple[Path, int]]:
+def _disk_usage_sync(base: Path, depth: int, exclude: list[str] | None = None) -> list[tuple[Path, int, int]]:
     """Single pass over the tree: attribute every file's size to its ancestor
     directory exactly `depth` levels under `base` (or to `base` itself if the
     file lives shallower than `depth`). One os.walk() over the whole tree
@@ -950,53 +950,139 @@ def _disk_usage_sync(base: Path, depth: int) -> list[tuple[Path, int]]:
     once per sibling folder, which a naive "call this per-subfolder" approach
     would do.
 
+    Returns (bucket_path, total_size, file_count) per bucket, sorted by size
+    descending (2026-08-16, v1.4.79: file count added — the walk already
+    iterates every filename, so counting is free).
+
+    `exclude` (2026-08-16, v1.4.79): fnmatch patterns in paths_deny style
+    ("**/node_modules/**", "node_modules", ".venv"), matched against the
+    relative posix path of each directory or file. Matching directories are
+    PRUNED from the walk (dirnames[:] filter, before descending) — excluding
+    node_modules without pruning would still traverse it, defeating the
+    purpose of the common use case (ignoring dependencies when answering
+    "which folder weighs most"). Empty/None means no exclusion, exactly the
+    pre-v1.4.79 behavior.
+
     No cap on the number of buckets computed or files scanned (2026-08-01,
     same reasoning as fs_find_duplicates/project_git_status): the real cost
     driver is how much of the tree os.walk() has to traverse, which a count
     limit would not bound anyway. Only the *display* (top_n, in the caller)
     is truncated.
     """
-    buckets: dict[Path, int] = {}
+    patterns = _normalize_exclude_patterns(exclude)
+    buckets: dict[Path, tuple[int, int]] = {}
     base_depth = len(base.parts)
-    for dirpath, _dirnames, filenames in os.walk(base):
+    for dirpath, dirnames, filenames in os.walk(base):
         current = Path(dirpath)
+        if patterns:
+            dirnames[:] = [
+                d for d in dirnames
+                if not _excluded_by_patterns(base, current, d, patterns)
+            ]
         rel_depth = len(current.parts) - base_depth
         if rel_depth >= depth:
             ancestor = Path(*current.parts[:base_depth + depth])
         else:
             ancestor = base
         total = 0
+        count = 0
         for fname in filenames:
+            if patterns and _excluded_by_patterns(base, current, fname, patterns):
+                continue
             try:
                 total += (current / fname).stat().st_size
+                count += 1
             except (OSError, PermissionError):
                 continue
         if total:
-            buckets[ancestor] = buckets.get(ancestor, 0) + total
-    return sorted(buckets.items(), key=lambda kv: -kv[1])
+            prev_total, prev_count = buckets.get(ancestor, (0, 0))
+            buckets[ancestor] = (prev_total + total, prev_count + count)
+    return sorted(
+        ((p, s, c) for p, (s, c) in buckets.items()),
+        key=lambda kv: -kv[1],
+    )
+
+
+def _normalize_exclude_patterns(exclude: list[str] | None) -> list[tuple[str, str]]:
+    """Normalize exclude patterns to forward-slash posix form and derive a
+    "core" name for each (2026-08-16, v1.4.79).
+
+    fnmatch has no real recursive "**" semantics (it is just doubled "*"), so
+    "**/node_modules/**" never matches a TOP-LEVEL node_modules — the same
+    limitation already documented for paths_deny (AGENTS.md: the repo needed
+    explicit duplicate patterns for the direct-child case). For exclusion that
+    is the wrong default: pruning node_modules/.venv is the whole point. So
+    each pattern is paired with its core — the pattern with one leading
+    "**/" and one trailing "/**" stripped — and an entry matches if its bare
+    name fnmatches the core (plus the full relative path vs. the full
+    pattern). Examples: "**/node_modules/**" -> core "node_modules";
+    "*.tmp" -> core "*.tmp"; "build/**" -> core "build".
+    """
+    if not exclude:
+        return []
+    normalized = []
+    for pat in exclude:
+        pat = pat.strip().replace("\\", "/")
+        if not pat:
+            continue
+        core = pat
+        if core.startswith("**/"):
+            core = core[3:]
+        if core.endswith("/**"):
+            core = core[:-3]
+        normalized.append((pat, core))
+    return normalized
+
+
+def _excluded_by_patterns(base: Path, dirpath: Path, name: str,
+                          patterns: list[tuple[str, str]]) -> bool:
+    """Match a directory or file entry against the exclude patterns.
+
+    The candidate is the RELATIVE posix path (dirpath.relative_to(base) /
+    name): patterns are anchored to the scanned tree, so "build/**" matches
+    "proj/build/..." inside base regardless of where base lives on disk. The
+    bare name is ALSO matched against each pattern's core (see
+    _normalize_exclude_patterns) — a pattern like "**/node_modules/**" or
+    "node_modules" matches ANY directory named node_modules at any depth,
+    including a top-level one.
+    """
+    try:
+        rel = dirpath.relative_to(base)
+    except ValueError:
+        rel = Path()
+    candidate = str(rel / name).replace("\\", "/")
+    return any(
+        fnmatch.fnmatch(candidate, pat) or fnmatch.fnmatch(name, core)
+        for pat, core in patterns
+    )
 
 
 async def fs_disk_usage_impl(path: str, security: SecurityValidator,
-                              top_n: int = 15, depth: int = 1) -> str:
+                              top_n: int = 15, depth: int = 1,
+                              exclude: list[str] | None = None) -> str:
     rpath = security.resolve_and_validate(path)
     if not rpath.is_dir():
         return f"Error: not a directory: {rpath}"
-    buckets = await asyncio.to_thread(_disk_usage_sync, rpath, depth)
-    logger.info("fs_disk_usage path=%s depth=%d buckets=%d", path, depth, len(buckets))
+    buckets = await asyncio.to_thread(_disk_usage_sync, rpath, depth, exclude)
+    logger.info("fs_disk_usage path=%s depth=%d buckets=%d exclude=%s",
+                path, depth, len(buckets), exclude)
     if not buckets:
         return "No files found"
-    total = sum(size for _, size in buckets)
+    total = sum(size for _, size, _ in buckets)
     shown = buckets[:top_n]
     lines = [
         f"Uso de disco bajo {rpath} — total {total:,} bytes ({total / 1024 / 1024 / 1024:.2f} GB)",
         "",
     ]
-    for p, size in shown:
+    for p, size, count in shown:
         pct = (size / total * 100) if total else 0
-        lines.append(f"{size:>15,} B  ({size / 1024 / 1024:8.1f} MB, {pct:5.1f}%)  {p}")
+        lines.append(
+            f"{size:>15,} B  ({size / 1024 / 1024:8.1f} MB, {pct:5.1f}%)  "
+            f"{count:,} archivo(s)  {p}"
+        )
     remaining = len(buckets) - len(shown)
     if remaining > 0:
-        shown_total = sum(size for _, size in shown)
+        shown_total = sum(size for _, size, _ in shown)
         other_total = total - shown_total
         lines.append(
             f"... y {remaining} carpeta(s) más, "
@@ -1404,11 +1490,35 @@ def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None
         return await fs_find_duplicates_impl(path, security, recursive, extensions)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
-    async def fs_disk_usage(path: str, top_n: int = 15, depth: int = 1) -> str:
+    async def fs_disk_usage(path: str, top_n: int = 15, depth: int = 1,
+                             exclude: list[str] | None = None) -> str:
+        """Uso de disco por carpeta bajo `path`, agrupado a `depth` niveles.
+
+        Cada archivo se atribuye a su carpeta ancestro exactamente `depth`
+        niveles bajo `path` (o a `path` mismo si vive más superficial). Devuelve
+        las `top_n` carpetas que más pesan con tamaño, porcentaje del total y
+        número de archivos, ordenadas descendentemente.
+
+        Semántica de `depth` (v1.4.79, documentado): los ancestros intermedios
+        NO aparecen como bucket propio — con `depth=2`, el archivo en
+        `a/b/c/x` se atribuye a `a/b`, no a `a`. `a` solo aparece como bucket
+        si contiene archivos directos (esos caen a `path` mismo, no a `a`).
+
+        `exclude` (v1.4.79): patrones fnmatch estilo paths_deny ("**/node_modules/**",
+        "node_modules", ".venv") contra la ruta relativa de cada entrada — un
+        patrón desnudo como "node_modules" matchea cualquier carpeta con ese
+        nombre a cualquier profundidad. Las carpetas que matchean se PODAN del
+        recorrido (no se desciende a ellas); los archivos que matchean se
+        omiten del conteo. Default None: nada se excluye (comportamiento
+        previo a v1.4.79).
+
+        Solo lectura; sin límite de carpetas ni de archivos escaneados — solo
+        la salida (top_n) se trunca.
+        """
         err = security.validate_tool_path(path, "read")
         if err:
             return err
-        return await fs_disk_usage_impl(path, security, top_n, depth)
+        return await fs_disk_usage_impl(path, security, top_n, depth, exclude)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True, destructiveHint=False))
     async def fs_compress(paths: list[str], output_path: str) -> str:

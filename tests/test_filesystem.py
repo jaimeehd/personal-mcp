@@ -584,6 +584,69 @@ async def test_disk_usage_empty_dir(temp_home, sec):
     assert "No files found" in result
 
 
+# --- fs_disk_usage: file_count por bucket + exclude (v1.4.79) ---
+
+@pytest.mark.asyncio
+async def test_disk_usage_file_count_per_bucket(temp_home, sec):
+    base = temp_home / "Repos" / "disk_count"
+    (base / "a").mkdir(parents=True)
+    (base / "b").mkdir(parents=True)
+    (base / "a" / "f1.txt").write_bytes(b"x" * 100)
+    (base / "a" / "f2.txt").write_bytes(b"x" * 50)
+    (base / "b" / "f3.txt").write_bytes(b"x" * 200)
+
+    result = await fs_disk_usage_impl(str(base), sec)
+    # bucket 'a' = 2 archivos (150 B), bucket 'b' = 1 archivo (200 B)
+    assert "2 archivo(s)" in result
+    assert "1 archivo(s)" in result
+    assert "150" in result
+    assert "200" in result
+
+
+@pytest.mark.asyncio
+async def test_disk_usage_exclude_prunes_subtree(temp_home, sec):
+    base = temp_home / "Repos" / "disk_excl"
+    (base / "keep").mkdir(parents=True)
+    (base / "node_modules" / "lib").mkdir(parents=True)
+    (base / "keep" / "f.txt").write_bytes(b"x" * 100)
+    # El árbol podado nunca se toca: si el walk bajara, 'lib' pesaría 400 B
+    (base / "node_modules" / "lib" / "big.bin").write_bytes(b"x" * 400)
+
+    result = await fs_disk_usage_impl(str(base), sec, exclude=["**/node_modules/**"])
+    assert "100" in result
+    assert "400" not in result
+    assert "node_modules" not in result
+
+
+@pytest.mark.asyncio
+async def test_disk_usage_exclude_bare_name_and_files(temp_home, sec):
+    base = temp_home / "Repos" / "disk_excl2"
+    (base / "src" / "x").mkdir(parents=True)
+    (base / ".venv" / "y").mkdir(parents=True)
+    (base / "src" / "x" / "keep.py").write_bytes(b"x" * 60)
+    (base / ".venv" / "y" / "waste.bin").write_bytes(b"x" * 300)
+    (base / "src" / "x" / "skip.tmp").write_bytes(b"x" * 90)
+
+    # Patrón desnudo ".venv" matchea la carpeta a cualquier profundidad;
+    # "*.tmp" excluye solo archivos
+    result = await fs_disk_usage_impl(str(base), sec, exclude=[".venv", "*.tmp"])
+    assert "60" in result
+    assert "300" not in result
+    assert "90" not in result
+
+
+@pytest.mark.asyncio
+async def test_disk_usage_no_exclude_identical_to_previous_behavior(temp_home, sec):
+    base = temp_home / "Repos" / "disk_noexcl"
+    (base / "a").mkdir(parents=True)
+    (base / "a" / "f.txt").write_bytes(b"x" * 123)
+
+    with_exclude = await fs_disk_usage_impl(str(base), sec, exclude=None)
+    without_param = await fs_disk_usage_impl(str(base), sec)
+    assert with_exclude == without_param
+    assert "123" in with_exclude
+
+
 # --- fs_compress / fs_extract ---
 
 @pytest.mark.asyncio

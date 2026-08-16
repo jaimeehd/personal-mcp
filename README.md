@@ -44,7 +44,7 @@ Servidor MCP personalizado para orquestación de estaciones de trabajo Windows/L
 | `fs_read_media` | Leer una imagen/binario como base64, con escaneo de secretos en el contenido decodificado |
 | `fs_edit_advanced` | Múltiples reemplazos find/replace en un archivo en una sola llamada, con dry-run |
 | `fs_find_duplicates` | Buscar archivos con contenido idéntico (SHA256) dentro de una carpeta, aunque el nombre difiera — a diferencia de `fs_find`, que busca por nombre/tamaño/antigüedad. Sin límite de cantidad ni tamaño de archivo: agrupa primero por tamaño exacto (gratis, sin leer contenido) y solo calcula hash dentro de esos grupos. Parámetros: `path`, `recursive?` (default `false`), `extensions?` (acepta `".pdf"` o `"pdf"` indistintamente). Solo lectura — no borra nada. |
-| `fs_disk_usage` | Auditoría de espacio en disco: agrupa el tamaño de todos los archivos bajo `path` por carpeta ancestro a `depth` niveles, devuelve las `top_n` que más pesan. Complementa a `fs_find_duplicates` — esa responde "qué está repetido", esta responde "qué carpeta pesa más". Parámetros: `path`, `top_n?` (default `15`), `depth?` (default `1`). Solo lectura. |
+| `fs_disk_usage` | Auditoría de espacio en disco: agrupa el tamaño de todos los archivos bajo `path` por carpeta ancestro a `depth` niveles, devuelve las `top_n` que más pesan, cada una con tamaño, porcentaje y número de archivos. Complementa a `fs_find_duplicates` — esa responde "qué está repetido", esta responde "qué carpeta pesa más". Parámetros: `path`, `top_n?` (default `15`), `depth?` (default `1`), `exclude?` (lista de patrones fnmatch estilo `paths_deny` — ej. `"**/node_modules/**"`, `"node_modules"`, `".venv"` — que PODA los directorios matcheados del recorrido y omite los archivos matcheados; un patrón desnudo como `"node_modules"` matchea cualquier carpeta con ese nombre a cualquier profundidad). Solo lectura. |
 | `fs_compress` | Crear un zip a partir de una lista de archivos/carpetas. Parámetros: `paths` (lista), `output_path` |
 | `fs_extract` | Descomprimir un zip a `output_dir`. Verifica explícitamente que cada archivo del zip caiga dentro de `output_dir` antes de escribirlo (protección contra zip slip) — un miembro con ruta `../../algo` se omite y se reporta, nunca se escribe fuera del destino |
 | `fs_delete_directory` | Borrar una carpeta completa, recursivamente — la única tool de Layer 1 que sí borra directorios. Antes de mostrar el ticket de confirmación, cuenta archivos y tamaño total y lo muestra junto con la solicitud (mismo tipo de preview que el diálogo de Windows al borrar una carpeta). Parámetro: `path` |
@@ -101,15 +101,21 @@ Agrupa por subcarpeta inmediata (`depth=1`), muestra las 15 que más pesan (`top
 ```
 fs_disk_usage(path="C:\\Users\\usuario\\Repos", top_n=5, depth=2)
 ```
-Agrupa dos niveles de profundidad (ej. `Repos\Proyecto\subcarpeta`), muestra solo las 5 más pesadas.
+Agrupa dos niveles de profundidad (ej. `Repos\Proyecto\subcarpeta`), muestra solo las 5 más pesadas. Nota: con `depth>1` los ancestros intermedios NO aparecen como bucket propio — el archivo en `Proyecto\subcarpeta\x` se atribuye a `Proyecto\subcarpeta`, no a `Proyecto`.
+
+```
+fs_disk_usage(path="C:\\Users\\usuario\\Repos", top_n=5, depth=1,
+              exclude=["node_modules", ".venv", ".git"])
+```
+Ignora dependencias y metadatos al decidir "qué carpeta pesa más": los directorios que matchean se podan del recorrido (no se desciende a ellos), así que además de no aparecer, no consumen tiempo de escaneo. Un patrón desnudo como `"node_modules"` matchea cualquier carpeta con ese nombre a cualquier profundidad.
 
 Salida (ejemplo):
 ```
 Uso de disco bajo C:\Users\usuario\Downloads — total 17,038,532,030 bytes (15.87 GB)
 
-   8,542,210,304 B  (  8146.5 MB,  50.1%)  C:\Users\usuario\Downloads\videos
-   3,221,225,472 B  (  3072.0 MB,  18.9%)  C:\Users\usuario\Downloads\instaladores
-     830,472,192 B  (   792.1 MB,   4.9%)  C:\Users\usuario\Downloads\documentos
+   8,542,210,304 B  (  8146.5 MB,  50.1%)  128 archivo(s)  C:\Users\usuario\Downloads\videos
+   3,221,225,472 B  (  3072.0 MB,  18.9%)   42 archivo(s)  C:\Users\usuario\Downloads\instaladores
+     830,472,192 B  (   792.1 MB,   4.9%)  2,311 archivo(s)  C:\Users\usuario\Downloads\documentos
 ... y 12 carpeta(s) más, 4,444,624,062 bytes (4238.5 MB) en total
 ```
 Solo lee — no borra ni mueve nada. Útil junto con `fs_find_duplicates` para decidir dónde limpiar primero.

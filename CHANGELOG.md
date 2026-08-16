@@ -1,3 +1,13 @@
+## [1.4.79] — 2026-08-16
+
+### Changed — `fs_disk_usage` (Layer 1): conteo de archivos por bucket + parámetro `exclude` con poda real del walk
+
+- **Conteo de archivos por bucket (mejora A)**: cada bucket de la salida ahora reporta `N archivo(s)` además del tamaño y el porcentaje. Coste cero — `_disk_usage_sync()` ya itera cada filename del `os.walk`; el conteo se acumula en el mismo pase (el bucket pasa de `(size)` a `(size, file_count)`). Responde la pregunta complementaria de "qué carpeta pesa más": cuántos archivos la componen.
+- **Parámetro `exclude` (mejora B)**: patrones fnmatch estilo `paths_deny` (`"**/node_modules/**"`, `"node_modules"`, `".venv"`, `"*.tmp"`) que excluyen directorios y archivos del análisis. Los directorios matcheados se **podan** del `os.walk` (`dirnames[:]` antes de descender) — excluir `node_modules` sin podar no ahorraría tiempo, y el caso de uso real ("qué carpeta pesa más") casi siempre quiere ignorar dependencias. Default `None` = comportamiento idéntico al previo (verificado por test). Semántica de matching: cada patrón se matchea contra la ruta relativa completa Y contra el nombre desnudo de la entrada; además cada patrón se reduce a su "core" (sin un `**/` inicial ni un `/**` final) — `"**/node_modules/**"` matchea también un `node_modules` de primer nivel, limitación de `paths_deny` que aquí se corrige porque podar es el objetivo mismo de la feature (fnmatch no tiene recursividad real de `**`; ver AGENTS.md).
+- **Semántica de `depth` documentada (mejora C)**: con `depth>1` los ancestros intermedios NO aparecen como bucket propio — con `depth=2` el archivo en `a/b/c/x` se atribuye a `a/b`, no a `a` (los archivos directos de `a` caen a `path` mismo). Ahora documentado en el docstring de la tool y en AGENTS.md, sin cambio de comportamiento.
+- **Tests nuevos**: 4 en `test_filesystem.py` — conteo de archivos por bucket (2 vs 1 archivo), poda real del subárbol (`node_modules` con 400 B nunca se contabiliza: si el walk bajara, el bucket aparecería), patrones desnudos y de archivos (`.venv` + `*.tmp`), y paridad `exclude=None` vs comportamiento previo. Suite completa: 520 passed, 1 skipped.
+- Descartado en diseño: `st_blocks` para "tamaño real en disco" — no existe en Windows (verificado en runtime), la tool corre primariamente en este SO. Subtotales de ancestros intermedios: complicaría la salida y el total sin valor real (decisión 2026-08-16).
+
 ## [1.4.78] — 2026-08-16
 
 ### Added — `fs_edit_batch` (Layer 1): edición de múltiples archivos en una sola llamada, con un solo ticket de batch

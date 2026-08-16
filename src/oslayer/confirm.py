@@ -12,6 +12,34 @@ import threading
 MAX_PREVIEW_FILES = 10
 
 
+def _build_batch_message(files: list[str], operation: str, code: str) -> str:
+    """Batch popup body, shared across platforms (2026-08-16: was duplicated
+    in _show_windows/_show_linux/_show_macos).
+
+    The confirmation code ALWAYS comes first: native dialogs (MessageBoxW,
+    zenity, kdialog) do not scroll, so a long file list above the code would
+    push it off-screen and the user could never authorize anything. The
+    preview is bounded to MAX_PREVIEW_FILES regardless of len(files); the
+    complete list stays available to the agent in the ticket's `resources`
+    field and to the user via the security_pending tool.
+    """
+    total = len(files)
+    shown = files[:MAX_PREVIEW_FILES]
+    file_list = "\n".join(f"  - {r}" for r in shown)
+    if total > MAX_PREVIEW_FILES:
+        file_list += (f"\n  ... y {total - MAX_PREVIEW_FILES} archivo(s) más "
+                      f"(lista completa: tool security_pending)")
+    return (
+        f"Código de confirmación: {code}\n\n"
+        f"Solicitud de permiso pendiente ({total} archivos)\n"
+        f"Operación: {operation}\n\n"
+        f"Archivos (primeros {min(total, MAX_PREVIEW_FILES)} de {total}):\n"
+        f"{file_list}\n\n"
+        f"Este código autoriza exactamente los {total} archivos de la solicitud "
+        f"original, nada más. Úsalo en fs_approve(confirm_code=...) para autorizar."
+    )
+
+
 def _detect_display() -> bool:
     """Check if we have a graphical display available."""
     if sys.platform == "win32":
@@ -27,24 +55,7 @@ def _show_windows(resource: str, operation: str, code: str, batch: bool, files: 
     MB_TOPMOST = 0x00040000
 
     if batch and files:
-        if len(files) <= MAX_PREVIEW_FILES:
-            file_list = "\n".join(f"  - {r}" for r in files)
-        else:
-            shown = files[:MAX_PREVIEW_FILES]
-            remaining = len(files) - MAX_PREVIEW_FILES
-            file_list = "\n".join(f"  - {r}" for r in shown)
-            file_list += f"\n  ... y {remaining} archivo(s) más (lista completa: tool security_pending)"
-
-        message = (
-            f"Solicitud de permiso pendiente ({len(files)} archivos)\n\n"
-            f"Operacion: {operation}\n\n"
-            f"Archivos:\n{file_list}\n\n"
-            f"Codigo de confirmacion: {code}\n\n"
-            f"Este codigo autoriza exactamente los {len(files)} archivos de "
-            f"la solicitud original (ver security_pending para la lista completa "
-            f"si no se muestran todos arriba), nada mas. "
-            f"Usalo en fs_approve(confirm_code=...) para autorizar."
-        )
+        message = _build_batch_message(files, operation, code)
         title = "personal-mcp - Confirmar permiso (lote)"
     else:
         message = (
@@ -68,24 +79,7 @@ def _show_windows(resource: str, operation: str, code: str, batch: bool, files: 
 def _show_linux(resource: str, operation: str, code: str, batch: bool, files: list[str] | None = None) -> None:
     """Linux implementation using zenity, kdialog, notify-send, or file fallback."""
     if batch and files:
-        if len(files) <= MAX_PREVIEW_FILES:
-            file_list = "\n".join(f"  - {r}" for r in files)
-        else:
-            shown = files[:MAX_PREVIEW_FILES]
-            remaining = len(files) - MAX_PREVIEW_FILES
-            file_list = "\n".join(f"  - {r}" for r in shown)
-            file_list += f"\n  ... y {remaining} archivo(s) más (lista completa: tool security_pending)"
-
-        message = (
-            f"Solicitud de permiso pendiente ({len(files)} archivos)\n\n"
-            f"Operación: {operation}\n\n"
-            f"Archivos:\n{file_list}\n\n"
-            f"Código de confirmación: {code}\n\n"
-            f"Este código autoriza exactamente los {len(files)} archivos de "
-            f"la solicitud original (ver security_pending para la lista completa "
-            f"si no se muestran todos arriba), nada más. "
-            f"Úsalo en fs_approve(confirm_code=...) para autorizar."
-        )
+        message = _build_batch_message(files, operation, code)
         title = "personal-mcp - Confirmar permiso (lote)"
     else:
         message = (
@@ -170,24 +164,7 @@ def _show_linux(resource: str, operation: str, code: str, batch: bool, files: li
 def _show_macos(resource: str, operation: str, code: str, batch: bool, files: list[str] | None = None) -> None:
     """macOS implementation using osascript."""
     if batch and files:
-        if len(files) <= MAX_PREVIEW_FILES:
-            file_list = "\n".join(f"  - {r}" for r in files)
-        else:
-            shown = files[:MAX_PREVIEW_FILES]
-            remaining = len(files) - MAX_PREVIEW_FILES
-            file_list = "\n".join(f"  - {r}" for r in shown)
-            file_list += f"\n  ... y {remaining} archivo(s) más (lista completa: tool security_pending)"
-
-        message = (
-            f"Solicitud de permiso pendiente ({len(files)} archivos)\n\n"
-            f"Operación: {operation}\n\n"
-            f"Archivos:\n{file_list}\n\n"
-            f"Código de confirmación: {code}\n\n"
-            f"Este código autoriza exactamente los {len(files)} archivos de "
-            f"la solicitud original (ver security_pending para la lista completa "
-            f"si no se muestran todos arriba), nada más. "
-            f"Úsalo en fs_approve(confirm_code=...) para autorizar."
-        )
+        message = _build_batch_message(files, operation, code)
         title = "personal-mcp - Confirmar permiso (lote)"
     else:
         message = (

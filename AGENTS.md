@@ -44,10 +44,10 @@ código) con la historia del sistema/operación (config, limpiezas, diagnóstico
 versión). El archivo vive en `~/.personal-mcp/data/journal/journal.jsonl` y se crea solo al primer
 uso — no agregar entradas retrospectivas salvo pedido explícito.
 
-## Arquitectura — 6 capas hexagonales, 66 tools (62 activas — las 4 de SSH deshabilitadas por defecto)
+## Arquitectura — 6 capas hexagonales, 68 tools (64 activas — las 4 de SSH deshabilitadas por defecto)
 | Capa | Archivo | Tools | Frontera de seguridad |
 |------|---------|-------|------------------------|
-| 1 Filesystem | `layer1_filesystem.py` | 25 | `resolve_and_validate()` en cada ruta; `fs_extract` verifica contención de rutas contra zip slip |
+| 1 Filesystem | `layer1_filesystem.py` | 27 | `resolve_and_validate()` en cada ruta; `fs_extract` verifica contención de rutas contra zip slip |
 | 2 Shell | `layer2_shell.py` + `shell_resolver.py` | 13 | lista de denegación de comandos + escaneo de rutas + multi-shell (powershell/pwsh/cmd/bash); `sh_spawn` además exige ticket propio de `execute` |
 | 3 SSH | `layer3_ssh.py` | 4 | deshabilitado por defecto (`ssh.enabled: false`) |
 | 4 Personal | `layer4_personal.py` | 9 | diario, notas, escaneo de proyectos, estado git multi-repo |
@@ -75,7 +75,7 @@ uso — no agregar entradas retrospectivas salvo pedido explícito.
 4. El prefijo `working_dir` se resuelve desde `shell_info.workdir_prefix` (por shell: `Set-Location`, `cd /d`, `cd`). **El quoting dentro de ese prefijo debe escaparse por shell, no con un estilo hardcodeado**: `_escape_workdir(working_dir, shell_name)` (`layer2_shell.py`) elige el escape de comillas correcto para el shell resuelto (`` `" `` para powershell/pwsh, `""` para cmd, `\"` para bash). Hasta 2026-07-04 el escape de PowerShell se aplicaba incondicionalmente sin importar el shell destino — un `working_dir` con una `"` literal podía escapar del segmento entrecomillado en `cmd`/`bash` e inyectar más sintaxis de shell. Corregido en v1.4.9 (`INJ-02`, ALTO). **Desde v1.4.64 (C-3, auditoría 2026-08-11)** además escapa los metadatos de sustitución por shell (`$`, backtick; `%`/`^` en cmd) — un `working_dir` con `$(...)` ya no se expande en el prefijo.
 5. Los comandos de shell se escanean en busca de rutas absolutas (`C:\...`, `C:/...`) vía `security.extract_absolute_paths()`
 6. `check_granted()` ahora usa `Dict[str, Set[str]]` — los grants son por operación, "read" != "write"
-7. **Audit log registra BLOCKED (v1.4.61)**: operaciones bloqueadas por tickets se registran como `BLOCKED` en el audit log (antes `OK`). Nuevo metodo `_is_permission_blocked()` distingue bloqueo por tickets (`BLOCKED`) de falla semantica (`FAILED`). `_SEMANTIC_FAILURE_TOOLS` cubre todas las tools destructivas (fs_write, fs_edit, fs_delete, fs_delete_directory, fs_delete_batch, fs_move, fs_create_directory, fs_snapshot, fs_compress, fs_extract, fs_batch, sh_exec, sh_script, sh_session_send, sh_spawn).
+7. **Audit log registra BLOCKED (v1.4.61)**: operaciones bloqueadas por tickets se registran como `BLOCKED` en el audit log (antes `OK`). Nuevo metodo `_is_permission_blocked()` distingue bloqueo por tickets (`BLOCKED`) de falla semantica (`FAILED`). `_SEMANTIC_FAILURE_TOOLS` cubre todas las tools destructivas (fs_write, fs_write_batch, fs_edit, fs_edit_batch, fs_delete, fs_delete_directory, fs_delete_batch, fs_move, fs_create_directory, fs_snapshot, fs_compress, fs_extract, fs_batch, sh_exec, sh_script, sh_session_send, sh_spawn).
 8. **`fs_delete`** usa `operation="delete"`, completamente aislado de `"read"`/`"write"` — un grant de sesión de escritura existente sobre una ruta NO autoriza delete sobre ella. `PermissionManager.approve()` fuerza los tickets de delete a `SINGLE` sin importar el nivel solicitado vía `fs_approve` — no son posibles grants de sesión ni permanentes para delete, por diseño (sin excepciones). `fs_delete` solo soporta archivos individuales, nunca directorios/recursión.
 9. **El wrapper valida, `_impl` nunca re-verifica permisos**: cada closure de `register_filesystem_tools()` llama a `security.validate_tool_path(path, <operación_real>)` antes de invocar su `_impl`. Las funciones `_impl` llaman a `security.resolve_and_validate(path)` **sin** pasar `operation` — el default (`"read"`) omite `check_granted()` completamente, así que la resolución de ruta no re-consume un grant ya gastado por el wrapper. `fs_delete_impl` rompió esta convención hasta 2026-07-04 (ver CHANGELOG 1.4.6): pasaba `"delete"` explícitamente, causando una segunda llamada a `check_granted()` que consumía el mismo grant `SINGLE` dos veces en una misma solicitud, sin ser detectado, manifestándose como una excepción cruda en vez de una respuesta `permission_required`. Cualquier nuevo `_impl` NO debe pasar la operación real a su propia llamada a `resolve_and_validate()` — ese es el trabajo del wrapper, exactamente una vez.
 10. **`fs_approve` gate de confirmación (HMAC) — implementado en v1.4.14**: `fs_approve` ahora exige un `confirm_code` obligatorio, verificado con `hmac.compare_digest()` contra un código generado por `PermissionManager` en el momento del `request()`. La clave secreta (`_confirm_secret`, 32 bytes vía `secrets.token_bytes()`) se genera en memoria al construir cada `PermissionManager` y nunca se persiste a disco ni se expone por ningún tool — es lo único que impide que un agente adivine o derive el código. El código (`_generate_confirm_code()`, 6 dígitos derivados de un HMAC-SHA256 del `ticket_id`) se muestra **solo** vía `src/confirm_popup.py::show_confirmation_code()` — un `MessageBoxW` nativo de Windows, lanzado en un hilo daemon separado para no bloquear el event loop de asyncio del servidor mientras el usuario no está frente a la pantalla. Este es el único canal donde el código es visible; no se devuelve nunca en la respuesta de ningún tool MCP (`fs_request_allow`, `security_pending`, etc.) — si en el futuro alguien lo expone ahí "para depurar", se reabre exactamente el gap que este mecanismo cierra. `show_confirmation_code()` se desactiva bajo pytest (`PYTEST_CURRENT_TEST` en el entorno) para no bloquear la suite con popups reales. **Desde v1.4.67 (M-H3)**: el fallback de Linux sin display ya no imprime el código a stderr (podía filtrarse a `server.log`) — escribe a un archivo `0600` y reporta solo la ruta. En macOS, el mensaje se escapa para AppleScript (M-H4).
@@ -250,6 +250,33 @@ rápido en vez de esperar input que con `stdin=DEVNULL` nunca llega), y
 `shell_subprocess_env()` setea `PAGER=cat`/`GIT_PAGER=cat`/`LESS=-FRX` por
 default (defensa contra un pager forzado vía config que espera input de un TTY
 que no existe). Verificado: `pytest tests/` → 481 passed, 1 skipped.
+
+## Flujo batch recomendado — UN ticket por lote, no uno por archivo (v1.4.78)
+
+`fs_delete_batch`/`fs_write_batch`/`fs_edit_batch` piden **un solo ticket** para
+toda la lista (`validate_tool_paths_batch` → `PermissionManager.request_batch`),
+no un ticket por archivo. Este es el patrón correcto según las guías de
+seguridad MCP (gate server-side, aprobación por operación completa, no por
+ítem). Flujo:
+
+1. El batch devuelve el JSON `permission_required` con `ticket`, el **conteo**
+   y un **preview acotado** (primeros `_BATCH_PREVIEW_MAX=5` paths + "y N más").
+   La lista completa viaja intacta en el campo `resources` — no está en el
+   mensaje a propósito: una lista enorme inundaría el contexto del agente y,
+   en el popup, empujaría el código de confirmación fuera de la ventana.
+2. Para write/edit: `fs_approve(ticket_id=..., confirm_code='<popup>',
+   level='session')` — un solo código autoriza todo el lote por la sesión
+   completa ("ask once, session-scoped"); el mensaje del ticket lo sugiere
+   explícitamente.
+3. Para delete: el mensaje solo ofrece `level='single'` y aclara que delete es
+   siempre single-use — `approve()` lo fuerza (`permissions.py:357`), sugerir
+   session sería llamar con un nivel que el servidor ignora silenciosamente.
+4. Popup (`oslayer/confirm.py`): el **código de confirmación va SIEMPRE
+   primero** en el cuerpo del mensaje batch (`_build_batch_message()`), y la
+   preview de archivos se acota a `MAX_PREVIEW_FILES=10` sin importar el tamaño
+   de la lista — MessageBoxW/zenity no hacen scroll, y un código empujado fuera
+   de la ventana es un usuario que no puede autorizar nada. La lista completa
+   queda disponible vía `security_pending` y en `resources`.
 
 ## Regla obligatoria antes de eliminar cualquier símbolo
 Antes de eliminar una función, clase, método o constante:

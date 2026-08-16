@@ -492,6 +492,63 @@ async def test_sh_spawn_wildcard_grant_is_not_sufficient(temp_home):
 
 
 @pytest.mark.asyncio
+async def test_sh_spawn_chained_interpreter_segment_is_gated(temp_home):
+    """Security review 2026-08-16: _check_spawn_permission used to look only
+    at the FIRST token of the command. `sh_spawn("echo hi; python -c '...'")`
+    therefore asked for a ticket on `spawn:echo` -- and once echo was granted,
+    the python interpreter in the second segment ran with no execute ticket at
+    all, a silent bypass of the interpreter gate that sh_exec does not have.
+    Every segment must be checked, exactly like validate_shell_execution()."""
+    from src.permissions import GrantLevel, PermissionManager
+
+    config = AppConfig(
+        security=SecurityConfig(paths_allow=[str(temp_home / "Repos")]),
+        data_dir=str(temp_home / ".personal-mcp" / "data"),
+        config_path=str(temp_home / ".personal-mcp" / "config.json"),
+    )
+    security = SecurityValidator(config)
+    perm_manager = PermissionManager(config)
+    security.perm_manager = perm_manager
+
+    # Grant the first segment's executable (echo) -- the interpreter in the
+    # second segment must STILL be gated, keyed on the venv python.
+    perm_manager.grant_direct("spawn:echo", "execute", GrantLevel.SESSION)
+
+    result = _check_spawn_permission(
+        'echo hi; python -c "import socket; print(1)"', security
+    )
+    assert result is not None
+    data = json.loads(result)
+    assert data["status"] == "permission_required"
+    assert data["operation"] == "execute"
+    assert data["resource"] == f"spawn:{sys.executable}"
+
+
+@pytest.mark.asyncio
+async def test_sh_spawn_chained_all_segments_granted_passes(temp_home):
+    """Companion: once EVERY segment's executable has its spawn grant, the
+    chained command is allowed -- not just the first token."""
+    from src.permissions import GrantLevel, PermissionManager
+
+    config = AppConfig(
+        security=SecurityConfig(paths_allow=[str(temp_home / "Repos")]),
+        data_dir=str(temp_home / ".personal-mcp" / "data"),
+        config_path=str(temp_home / ".personal-mcp" / "config.json"),
+    )
+    security = SecurityValidator(config)
+    perm_manager = PermissionManager(config)
+    security.perm_manager = perm_manager
+
+    perm_manager.grant_direct("spawn:echo", "execute", GrantLevel.SESSION)
+    perm_manager.grant_direct(f"spawn:{sys.executable}", "execute", GrantLevel.SESSION)
+
+    result = _check_spawn_permission(
+        'echo hi; python -c "import socket; print(1)"', security
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
 async def test_spawn_manager_detects_orphan(sec):
     """Core safety property of SpawnManager: a record whose owner_pid is
     confirmed dead, but whose child process is still alive, must be

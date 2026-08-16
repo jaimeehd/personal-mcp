@@ -209,7 +209,7 @@ Write-Host "Data:         $McpDir\data"
 Write-Host "Claude Config: $ClaudeConfigPath"
 Write-Host ""
 Write-Host "Available tools:" -ForegroundColor White
-Write-Host "  Layer 1 - Filesystem:  fs_read, fs_write, fs_edit, fs_edit_advanced, fs_delete, fs_delete_batch, fs_delete_directory, fs_list, fs_list_with_sizes, fs_list_allowed, fs_tree, fs_search, fs_find, fs_find_duplicates, fs_disk_usage, fs_info, fs_diff, fs_batch, fs_snapshot, fs_create_directory, fs_move, fs_read_multi, fs_read_media, fs_compress, fs_extract"
+Write-Host "  Layer 1 - Filesystem:  fs_read, fs_write, fs_edit, fs_edit_advanced, fs_edit_batch, fs_write_batch, fs_delete, fs_delete_batch, fs_delete_directory, fs_list, fs_list_with_sizes, fs_list_allowed, fs_tree, fs_search, fs_find, fs_find_duplicates, fs_disk_usage, fs_info, fs_diff, fs_batch, fs_snapshot, fs_create_directory, fs_move, fs_read_multi, fs_read_media, fs_compress, fs_extract"
 Write-Host "  Layer 2 - Shell:       sh_exec, sh_session_start, sh_session_list, sh_session_send, sh_session_read, sh_session_interrupt, sh_session_close, sh_script, sh_history, sh_spawn, sh_spawn_read, sh_spawn_kill, sh_spawn_list"
 Write-Host "  Layer 3 - SSH:         ssh_list_hosts, ssh_connect, ssh_exec, ssh_disconnect (if enabled)"
 Write-Host "  Layer 4 - Personal:    journal_add, journal_list, journal_search, journal_stats, journal_export, note_quick, project_scan, project_find, project_git_status"

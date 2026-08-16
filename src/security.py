@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import time
 from collections import deque
 from pathlib import Path
@@ -12,6 +13,12 @@ from src.config import AppConfig
 
 if TYPE_CHECKING:
     from src.permissions import GrantLevel, PermissionManager
+
+# Preview máximo de rutas en el mensaje de un ticket batch: la lista completa
+# viaja en `resources`; el mensaje solo muestra las primeras N + "... y M más"
+# para que ni la respuesta al agente ni el popup crezcan sin límite (ver
+# MAX_PREVIEW_FILES en oslayer/confirm.py, el mismo principio en el popup).
+_BATCH_PREVIEW_MAX = 5
 
 
 class PathNotAllowedError(PermissionError):
@@ -195,7 +202,14 @@ class SecurityValidator:
             first_word_clean = Path(words[0]).stem.lower()
             if first_word_clean not in prefixes_lower:
                 continue
-            exe_path = shutil.which(words[0]) or words[0]
+            # Prefer sys.executable for python invocations so the venv interpreter
+            # matches the grant key -- shutil.which("python") resolves to the system
+            # python, which differs from the venv python the server actually runs as
+            # (fix 2026-08-16, same logic applied in _check_spawn_permission).
+            if first_word_clean == "python":
+                exe_path = sys.executable
+            else:
+                exe_path = shutil.which(words[0]) or words[0]
 
             # If target is python or node and a script path is provided, analyze the script
             if len(words) > 1:
@@ -292,7 +306,14 @@ class SecurityValidator:
         pattern match, or outside paths_allow/data_dir) - that's a config-level
         rejection, not something a ticket can fix, so it short-circuits the
         whole batch rather than silently dropping just that one path.
-        Returns a ticket JSON string if a batch grant is needed.
+        Returns a ticket JSON string if a batch grant is needed. The message
+        shows a BOUNDED preview (first _BATCH_PREVIEW_MAX paths + "y N más");
+        the complete list always travels in `resources` (2026-08-16: a huge
+        list in the message would flood the agent's context and, in the popup,
+        push the confirmation code off-screen -- MessageBoxW does not scroll).
+        For write/edit the hint offers level='session' (ask once for the whole
+        session); delete hints single-only, matching the forced SINGLE in
+        PermissionManager.approve().
         """
         try:
             self._check_rate_limit(operation)
@@ -337,6 +358,30 @@ class SecurityValidator:
 
         from src.permissions import GrantLevel
         ticket = self.perm_manager.request_batch(resolved_paths, operation, GrantLevel.SINGLE)
+        preview_lines = [f"  - {p}" for p in resolved_paths[:_BATCH_PREVIEW_MAX]]
+        if len(resolved_paths) > _BATCH_PREVIEW_MAX:
+            preview_lines.append(
+                f"  ... y {len(resolved_paths) - _BATCH_PREVIEW_MAX} archivo(s) más"
+            )
+        # Delete is ALWAYS forced to SINGLE in PermissionManager.approve() (no
+        # session/permanent grants for delete, by design -- rule 8 AGENTS.md),
+        # so the hint must not suggest a level the server will silently
+        # override. Write/edit batches CAN be authorized for the whole session
+        # with one code -- the "ask once, session-scoped" pattern (2026-08-16).
+        if operation == "delete":
+            approve_hint = (
+                f"Use fs_approve(ticket_id='{ticket.id}', "
+                f"confirm_code='<code from the popup>', level='single') "
+                f"to authorize all of them at once. Delete is always single-use; "
+                f"level='session' is not allowed for delete."
+            )
+        else:
+            approve_hint = (
+                f"Use fs_approve(ticket_id='{ticket.id}', "
+                f"confirm_code='<code from the popup>', level='single') "
+                f"for one-time, or level='session' to authorize all of them "
+                f"for this session."
+            )
         return json.dumps({
             "status": "permission_required",
             "ticket": ticket.id,
@@ -345,11 +390,12 @@ class SecurityValidator:
             "operation": operation,
             "level": ticket.level.value,
             "message": (
-                f"Access to {len(resolved_paths)} files needs {operation} permission. "
-                f"A confirmation code was shown on your screen - it is NOT visible to "
-                f"this agent. Use fs_approve(ticket_id='{ticket.id}', "
-                f"confirm_code='<code from the popup>', level='single') to authorize "
-                f"all of them at once."
+                f"Access to {len(resolved_paths)} files needs {operation} permission:\n"
+                + "\n".join(preview_lines)
+                + "\n\n"
+                + "A confirmation code was shown on your screen - it is NOT visible "
+                + "to this agent. "
+                + approve_hint
             ),
         })
 

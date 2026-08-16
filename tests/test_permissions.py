@@ -465,3 +465,32 @@ def test_approve_max_attempts_stops_reshowing_popup(perm):
     assert mock_show.call_count == PermissionManager._MAX_APPROVE_ATTEMPTS - 1
     assert perm._tickets[ticket.id].status == "denied"
 
+
+# --- _build_batch_message: código siempre visible + preview acotado (2026-08-16) ---
+# Los diálogos nativos (MessageBoxW/zenity) no hacen scroll: una lista larga
+# por encima del código lo empujaría fuera de la ventana y el usuario no
+# podría autorizar nada. El código va SIEMPRE primero; la preview de archivos
+# se acota a MAX_PREVIEW_FILES con la lista completa en `resources`/
+# security_pending.
+
+from src.oslayer.confirm import MAX_PREVIEW_FILES, _build_batch_message
+
+
+def test_batch_popup_code_always_first_and_preview_bounded():
+    files = [f"C:\\Users\\usuario\\Repos\\file{i}.txt" for i in range(15)]
+    msg = _build_batch_message(files, "write", "123456")
+    assert msg.startswith("Código de confirmación: 123456")
+    assert "(15 archivos)" in msg
+    assert "file0.txt" in msg
+    assert f"file{MAX_PREVIEW_FILES - 1}.txt" in msg
+    assert "file14.txt" not in msg
+    assert "archivo(s) más" in msg
+
+
+def test_batch_popup_no_truncation_within_max():
+    files = [f"C:\\Users\\usuario\\Repos\\file{i}.txt" for i in range(3)]
+    msg = _build_batch_message(files, "delete", "000000")
+    assert msg.startswith("Código de confirmación: 000000")
+    assert "file2.txt" in msg
+    assert "archivo(s) más" not in msg
+

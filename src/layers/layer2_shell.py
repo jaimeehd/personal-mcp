@@ -582,24 +582,65 @@ class SpawnManager:
 
 
 def _check_spawn_permission(command: str, security: SecurityValidator) -> str | None:
-    """Gate sh_spawn behind its own 'execute' ticket, keyed by the exact command
-    string -- same operation type already used for python/node/bash via
+    """Gate sh_spawn behind its own 'execute' ticket, keyed by the resolved
+    executable path -- same operation type already used for python/node/bash via
     validate_shell_execution()/approval_required_prefix, reused directly
     rather than duplicated.
+
+    Previously the resource was `spawn:<full command string>`, which meant each
+    distinct script body produced a different resource key and therefore a new
+    ticket -- a session grant for `spawn:python -c "script1"` never covered
+    `spawn:python -c "script2"`. Fixed 2026-08-16: normalize to the resolved
+    executable (same as validate_shell_execution uses exe_path), so a single
+    session grant for the interpreter covers any invocation of it.
+
+    Every segment of a chained command is checked, exactly like
+    validate_shell_execution() (2026-08-16 security review): only looking at
+    the first token meant `sh_spawn("echo hi; python -c '...'")` asked for a
+    ticket on `spawn:echo` -- and once echo was granted, the python interpreter
+    in the second segment ran with NO execute ticket at all, a silent bypass
+    of the interpreter gate that sh_exec does not have. A command is only
+    allowed once every segment's executable has its own spawn grant.
+
+    sys.executable is checked first because the server runs inside a .venv whose
+    python.exe differs from the system python resolved by shutil.which(). A grant
+    approved for the system python would never match the venv python that actually
+    executes the command. Using sys.executable directly avoids the mismatch for
+    the common case (python -c "...") without requiring the user to know the venv path.
 
     operation='execute' is hardcoded in PermissionManager.check_granted() to
     never match a wildcard '*' grant (`operation not in ("delete", "execute")`
     in check_granted) -- this alone satisfies security requirement #3 from
     the original design (AGENTS.md 'Feature diferida'): a background process
     can never be started off a blanket wildcard grant, only an explicit
-    ticket for this exact command. No new code was needed in security.py/
+    ticket for this executable. No new code was needed in security.py/
     permissions.py for this -- the exclusion already existed for the
     python/node/bash execute gate and applies here for free.
+
+    Note: spawn grants use the `spawn:` prefix, so they are intentionally
+    SEPARATE from sh_exec's execute grants (AGENTS.md: sh_spawn exige su
+    propio ticket). A session grant approved via sh_exec for python.exe does
+    NOT cover sh_spawn's check of `spawn:python.exe`, and vice versa -- by
+    design, not an oversight.
     """
-    resource = f"spawn:{command}"
-    if security.perm_manager and security.perm_manager.check_granted(resource, "execute"):
-        return None
-    return security.request_permission(resource, "execute")
+    from src.shell_resolver import split_command_segments
+    for segment in split_command_segments(command) or [command]:
+        words = segment.strip().split()
+        if not words:
+            continue
+        first_token = words[0]
+        # Prefer sys.executable for python invocations so the venv interpreter
+        # matches the grant key -- shutil.which("python") resolves to the system
+        # python, which differs from the venv python the server actually runs as.
+        if Path(first_token).stem.lower() == "python":
+            exe_path = sys.executable
+        else:
+            exe_path = shutil.which(first_token) or first_token
+        resource = f"spawn:{exe_path}"
+        if security.perm_manager and security.perm_manager.check_granted(resource, "execute"):
+            continue
+        return security.request_permission(resource, "execute")
+    return None
 
 
 async def sh_spawn_impl(command: str, security: SecurityValidator, manager: ShellManager,

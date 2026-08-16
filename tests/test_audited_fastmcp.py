@@ -60,6 +60,19 @@ class TestSemanticFailureDetection:
         checker = self._make_checker()
         assert checker._is_semantic_failure("fs_write", "Written 100 chars") is False
 
+    def test_fs_write_batch_blocked_is_semantic_failure(self):
+        # fs_write_batch/fs_edit_batch entraron a _SEMANTIC_FAILURE_TOOLS
+        # en 1.4.78 junto con su registro -- sin esto, un batch bloqueado por
+        # tickets se auditaria como OK.
+        checker = self._make_checker()
+        blocked_json = '{"status": "permission_required", "ticket": "perm_wb"}'
+        assert checker._is_semantic_failure("fs_write_batch", blocked_json) is True
+
+    def test_fs_edit_batch_blocked_is_semantic_failure(self):
+        checker = self._make_checker()
+        blocked_json = '{"status": "permission_required", "ticket": "perm_eb"}'
+        assert checker._is_semantic_failure("fs_edit_batch", blocked_json) is True
+
     def test_fs_edit_blocked_is_semantic_failure(self):
         checker = self._make_checker()
         blocked_json = '{"status": "permission_required", "ticket": "perm_y"}'
@@ -185,3 +198,26 @@ class TestAccessDeniedDetection:
     def test_access_denied_not_detected_for_empty(self):
         checker = self._make_checker()
         assert checker._is_access_denied(None) is False
+
+
+# --- build_server_instructions() (2026-08-15) ---
+# Campo `instructions` del protocolo MCP, para que la convencion de
+# journal_add al cerrar sesion llegue al agente sin depender de que lea
+# AGENTS.md por su cuenta.
+
+from src.server import build_server_instructions
+
+
+def test_instructions_present_when_journal_enabled():
+    result = build_server_instructions(journal_enabled=True)
+    assert result is not None
+    assert "journal_add" in result
+    assert "AGENTS.md" in result
+
+
+def test_instructions_none_when_journal_disabled():
+    # Layer 4 completo (incluido journal_add) no se registra si journal
+    # esta deshabilitado -- instruir sobre una tool inexistente seria peor
+    # que no decir nada.
+    assert build_server_instructions(journal_enabled=False) is None
+

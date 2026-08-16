@@ -1349,6 +1349,25 @@ def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None
             return err
         return await fs_write_batch_impl(deduped, security)
 
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False, destructiveHint=True))
+    async def fs_edit_batch(edits: list[dict]) -> str:
+        if not edits:
+            return "Error: empty edits list"
+        # Same reasoning as fs_write_batch: identical repeated edits dedupe
+        # silently, conflicting repeated edits are rejected up front.
+        deduped, conflicts = _dedupe_edits(edits)
+        if conflicts:
+            return (
+                "Error: conflicting old_string/new_string for the same path(s) "
+                "in this batch (each path can appear once, or repeated with an "
+                "identical edit): " + ", ".join(conflicts)
+            )
+        paths = [e.get("path", "") for e in deduped]
+        err = security.validate_tool_paths_batch(paths, "write")
+        if err:
+            return err
+        return await fs_edit_batch_impl(deduped, security)
+
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def fs_read_multi(paths: list[str], encoding: str = "utf-8",
                              max_size_mb: int = 0) -> str:

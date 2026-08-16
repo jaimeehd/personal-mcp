@@ -6,7 +6,7 @@ Servidor MCP personalizado para orquestación de estaciones de trabajo Windows/L
 
 ```
 6 capas, diseño hexagonal:
-  Capa 1: Filesystem      — 25 tools (read, write, edit, delete, delete-batch, delete-directory, list, tree, search, find, find-duplicates, disk-usage, info, diff, batch, snapshot, create-dir, move, read-multi, list-allowed, list-with-sizes, read-media, edit-advanced, compress, extract)
+  Capa 1: Filesystem      — 27 tools (read, write, edit, edit-batch, write-batch, delete, delete-batch, delete-directory, list, tree, search, find, find-duplicates, disk-usage, info, diff, batch, snapshot, create-dir, move, read-multi, list-allowed, list-with-sizes, read-media, edit-advanced, compress, extract)
   Capa 2: Shell           — 13 tools (exec, sesiones persistentes, ejecución de scripts, historial, shell configurable, procesos en background)
   Capa 3: SSH             — 4 tools (listar hosts, conectar, ejecutar, desconectar) [deshabilitado por defecto]
   Capa 4: Personal        — 9 tools (journal CRUD, notas rápidas, escaneo de proyectos, búsqueda en proyectos, estado git multi-repo)
@@ -14,7 +14,7 @@ Servidor MCP personalizado para orquestación de estaciones de trabajo Windows/L
   Capa 6: Permissions     — 6 tools (aprobar, denegar, pre-autorizar, listar pendientes, revocar, estadísticas)
 ```
 
-66 tools en total, 62 activas (las 4 de SSH deshabilitadas por defecto).
+68 tools en total, 64 activas (las 4 de SSH deshabilitadas por defecto).
 
 ## Tools
 
@@ -23,7 +23,9 @@ Servidor MCP personalizado para orquestación de estaciones de trabajo Windows/L
 |------|-------------|
 | `fs_read` | Leer contenido de archivo (detección automática de binarios) |
 | `fs_write` | Escribir contenido en archivo |
+| `fs_write_batch` | Escribir varios archivos en una sola llamada, con un solo ticket/código de confirmación para la lista completa. Misma ruta repetida con contenido idéntico dedup sin error; con contenido distinto, el batch completo se rechaza antes de tocar el disco. Resumen `N/M files written` con resultados y fallos por archivo |
 | `fs_edit` | Reemplazar texto en archivo con vista previa de diff |
+| `fs_edit_batch` | Editar `old_string`→`new_string` en varios archivos en una sola llamada, con un solo ticket/código de confirmación para la lista completa. Misma ruta repetida con `(old_string, new_string)` idéntico dedup sin error; con un par distinto, el batch completo se rechaza antes de tocar el disco (instrucción ambigua). Resumen `N/M files edited` con resultados y fallos por archivo; archivo inexistente reporta "does not exist", no el engañoso "old_string not found" |
 | `fs_delete` | Eliminar un solo archivo (sin directorios/recursión — usar `fs_delete_directory` para borrar una carpeta completa). Los tickets `delete` son siempre de un solo uso — no se permiten grants de sesión ni permanentes, por diseño |
 | `fs_delete_batch` | Eliminar múltiples archivos listados explícitamente bajo un solo ticket/código de confirmación, en vez de un popup por archivo. Tampoco borra directorios — usar `fs_delete_directory`. Misma regla de solo-uso-único que `fs_delete` |
 | `fs_list` | Listar directorio con filtros |

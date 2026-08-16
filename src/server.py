@@ -64,7 +64,9 @@ class AuditedFastMCP(FastMCP):
         "fs_approve",
         "fs_deny",
         "fs_write",
+        "fs_write_batch",
         "fs_edit",
+        "fs_edit_batch",
         "fs_delete",
         "fs_delete_directory",
         "fs_delete_batch",
@@ -193,6 +195,33 @@ class AuditedFastMCP(FastMCP):
             raise
 
 
+def build_server_instructions(journal_enabled: bool) -> str | None:
+    """Construye el campo `instructions` del protocolo MCP (2026-08-15).
+
+    Alternativa a depender de que el agente lea AGENTS.md por su cuenta --
+    no hay garantia de que lo haga (confirmado en vivo: una convencion
+    agregada a AGENTS.md a mitad de una sesion nunca fue vista por el agente,
+    que solo consultaba el archivo con grep puntual sobre otros temas).
+
+    Corto a proposito, no vuelca AGENTS.md completo (150+ lineas, denso,
+    pensado para lectura bajo demanda) -- apunta al archivo en vez de
+    reemplazarlo. Condicional a journal_enabled: si esta deshabilitado,
+    Layer 4 entero (incluido journal_add) no se registra -- instruir sobre
+    una tool inexistente seria peor que no decir nada.
+
+    Funcion pura, separada de create_app(), para poder testearla sin pasar
+    por la carga de config real ni los efectos secundarios de create_app()
+    (configura logging, crea directorios).
+    """
+    if not journal_enabled:
+        return None
+    return (
+        "Al cerrar tu sesion de trabajo en este repo, considera journal_add() "
+        "con un resumen de 1-3 lineas (que se hizo, decision clave, version). "
+        "Ver AGENTS.md para el resto de las convenciones del proyecto."
+    )
+
+
 def create_app() -> FastMCP:
     config = AppConfig.load()
     config.data_dir = str(Path.home() / ".personal-mcp" / "data")
@@ -210,7 +239,10 @@ def create_app() -> FastMCP:
         persist_path=Path(config.data_dir) / "audit.json"
     )
 
-    app = AuditedFastMCP("personal-mcp", audit_log=audit_log, logger=logger)
+    app = AuditedFastMCP(
+        "personal-mcp", audit_log=audit_log, logger=logger,
+        instructions=build_server_instructions(config.journal.enabled),
+    )
 
     register_filesystem_tools(app, security)
     shell_info = resolve_shell(config.shell.default_shell, config.shell.shell_map)

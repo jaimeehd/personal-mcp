@@ -352,7 +352,7 @@ def test_symlink_inside_allowed_allowed(strict_security, temp_home):
 # --- validate_shell_execution: risky-script ticket resource key (2026-08-08 fix) ---
 
 import json
-import shutil
+import sys
 
 
 def test_risky_script_ticket_uses_clean_resource_key(strict_security, temp_home):
@@ -364,8 +364,10 @@ def test_risky_script_ticket_uses_clean_resource_key(strict_security, temp_home)
     assert result is not None
 
     payload = json.loads(result)
-    expected_exe = shutil.which("python") or "python"
-    assert payload["resource"] == expected_exe
+    # 2026-08-16: python resolves to sys.executable (the venv interpreter the
+    # server runs as), not shutil.which("python") which finds the system python
+    # -- a grant keyed on the system python never matched the actual process.
+    assert payload["resource"] == sys.executable
     assert "Script Risks Detected" not in payload["resource"]
     assert "script_risk_warning" in payload
     assert "NETWORK" in payload["script_risk_warning"]
@@ -386,7 +388,7 @@ def test_risky_script_approval_actually_grants_access(strict_security, temp_home
     )
     assert ok
 
-    expected_exe = shutil.which("python") or "python"
+    expected_exe = sys.executable
     assert strict_security.perm_manager.check_granted(expected_exe, "execute") is True
 
 
@@ -428,6 +430,66 @@ def test_batch_delete_blocks_deny_excepted_path(exception_security, temp_home):
     err = exception_security.validate_tool_paths_batch([str(dll_path)], "delete")
     assert err is not None
     assert "Access denied" in err
+
+
+# --- Mensaje de ticket batch: hint de sesión + preview acotado (2026-08-16) ---
+
+def _batch_security(strict_config):
+    """SecurityValidator con PermissionManager pero SIN grants previos —
+    strict_security auto-otorga session a paths_allow y no generaría tickets."""
+    validator = SecurityValidator(strict_config)
+    validator.perm_manager = PermissionManager(strict_config)
+    return validator
+
+
+def test_batch_write_ticket_suggests_session_level(strict_config, temp_home):
+    security = _batch_security(strict_config)
+    repo = temp_home / "Repos"
+    err = security.validate_tool_paths_batch(
+        [str(repo / "a.txt"), str(repo / "b.txt")], "write"
+    )
+    payload = json.loads(err)
+    assert payload["status"] == "permission_required"
+    # write/edit admiten el patron "ask once": un codigo autoriza todo el
+    # lote por la sesion (paralelo al hint que request_permission ya daba).
+    assert "level='single'" in payload["message"]
+    assert "level='session'" in payload["message"]
+    assert "for this session" in payload["message"]
+
+
+def test_batch_delete_ticket_never_suggests_session(strict_config, temp_home):
+    security = _batch_security(strict_config)
+    repo = temp_home / "Repos"
+    err = security.validate_tool_paths_batch(
+        [str(repo / "a.txt"), str(repo / "b.txt")], "delete"
+    )
+    payload = json.loads(err)
+    assert payload["status"] == "permission_required"
+    # delete es SIEMPRE single-use (forzado en approve()) — sugerir session
+    # seria llamar a fs_approve con un nivel que el servidor ignora. El
+    # literal "level='session'" si aparece, pero solo para DECIR que no se
+    # permite; lo que no debe estar es la sugerencia "or level='session'".
+    assert "or level='session'" not in payload["message"]
+    assert "single-use" in payload["message"]
+    assert "level='single'" in payload["message"]
+
+
+def test_batch_ticket_message_preview_is_bounded(strict_config, temp_home):
+    security = _batch_security(strict_config)
+    repo = temp_home / "Repos"
+    paths = [str(repo / f"f{i}.txt") for i in range(8)]
+    err = security.validate_tool_paths_batch(paths, "write")
+    payload = json.loads(err)
+    # Preview acotado: solo los primeros _BATCH_PREVIEW_MAX paths en el mensaje
+    assert "  - " in payload["message"]
+    assert all(f"f{i}.txt" in payload["message"] for i in range(5))
+    assert "f5.txt" not in payload["message"]
+    assert "y 3 archivo(s) más" in payload["message"]
+    # La lista completa sigue viajando intacta en `resources` para fs_approve
+    assert len(payload["resources"]) == 8
+    assert all(
+        any(f"f{i}.txt" in r for r in payload["resources"]) for i in range(8)
+    )
 
 
 # --- M-S6 (auditoría 2026-08-11): command rate limit enforced on shell ---

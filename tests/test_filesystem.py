@@ -16,6 +16,7 @@ from src.layers.layer1_filesystem import (
     fs_diff_impl,
     fs_disk_usage_impl,
     fs_edit_advanced_impl,
+    fs_edit_batch_impl,
     fs_edit_impl,
     fs_extract_impl,
     fs_find_duplicates_impl,
@@ -1199,6 +1200,178 @@ async def test_edit_advanced_refunds_single_grant_on_empty_edits(temp_home):
     text = app._result_text(result)
     assert "Applied 1 edit" in text
     assert f.read_text() == "changed"
+
+
+# --- fs_edit_batch (2026-08-15) ---
+
+@pytest.mark.asyncio
+async def test_edit_batch_basic(temp_home, sec):
+    a = temp_home / "Repos" / "eb_a.txt"
+    b = temp_home / "Repos" / "eb_b.txt"
+    a.write_text("hello alpha")
+    b.write_text("hello beta")
+    result = await fs_edit_batch_impl(
+        [
+            {"path": str(a), "old_string": "hello", "new_string": "goodbye"},
+            {"path": str(b), "old_string": "hello", "new_string": "goodbye"},
+        ],
+        sec,
+    )
+    assert "2/2 files edited" in result
+    assert a.read_text() == "goodbye alpha"
+    assert b.read_text() == "goodbye beta"
+
+
+@pytest.mark.asyncio
+async def test_edit_batch_nonexistent_file_reports_clear_error(temp_home, sec):
+    """Same M-F1 reasoning as fs_edit_impl: a nonexistent file must report
+    'does not exist', not the misleading 'old_string not found'."""
+    missing = temp_home / "Repos" / "eb_missing.txt"
+    result = await fs_edit_batch_impl(
+        [{"path": str(missing), "old_string": "x", "new_string": "y"}], sec
+    )
+    assert "0/1 files edited" in result
+    assert "not a file or does not exist" in result
+
+
+@pytest.mark.asyncio
+async def test_edit_batch_old_string_not_found(temp_home, sec):
+    a = temp_home / "Repos" / "eb_mismatch.txt"
+    a.write_text("actual content")
+    result = await fs_edit_batch_impl(
+        [{"path": str(a), "old_string": "wrong text", "new_string": "y"}], sec
+    )
+    assert "0/1 files edited" in result
+    assert "old_string not found" in result
+    assert a.read_text() == "actual content"
+
+
+@pytest.mark.asyncio
+async def test_edit_batch_logs_individual_failures(temp_home, sec):
+    """Companion to test_delete_batch_logs_individual_failures /
+    test_write_batch_logs_individual_failures."""
+    import io
+    import logging
+
+    logger = logging.getLogger("personal-mcp.layer1_filesystem")
+    logger.handlers.clear()
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+    ok = temp_home / "Repos" / "eb_ok.txt"
+    ok.write_text("keep me")
+    outside = temp_home / "Outside" / "eb_denied.txt"
+
+    result = await fs_edit_batch_impl(
+        [
+            {"path": str(ok), "old_string": "keep", "new_string": "changed"},
+            {"path": str(outside), "old_string": "x", "new_string": "y"},
+        ],
+        sec,
+    )
+
+    text = stream.getvalue()
+    assert "1/2 files edited" in result
+    assert ok.read_text() == "changed me"
+    assert f"fs_edit_batch FAIL path={outside}" in text
+
+
+@pytest.mark.asyncio
+async def test_edit_batch_dedup_identical_edit_no_error(temp_home, sec):
+    """Same path repeated with an IDENTICAL (old_string, new_string) pair
+    dedupes silently -- same reasoning as fs_delete_batch/fs_write_batch."""
+    import logging
+
+    from src.audit import AuditLog
+    from src.layers.layer1_filesystem import register_filesystem_tools
+    from src.server import AuditedFastMCP
+
+    a = temp_home / "Repos" / "eb_dup_same.txt"
+    a.write_text("hello world")
+
+    app = AuditedFastMCP("test", audit_log=AuditLog(max_entries=10),
+                          logger=logging.getLogger("test-edit-batch-dedup"))
+    register_filesystem_tools(app, sec)
+
+    edit = {"path": str(a), "old_string": "hello", "new_string": "goodbye"}
+    result = await app.call_tool("fs_edit_batch", {"edits": [edit, edit]})
+    text = app._result_text(result)
+
+    assert "1/1 files edited" in text
+    assert a.read_text() == "goodbye world"
+
+
+@pytest.mark.asyncio
+async def test_edit_batch_conflicting_edits_rejected(temp_home, sec):
+    """Same design gap as fs_write_batch: same path with a DIFFERENT
+    (old_string, new_string) pair is an ambiguous instruction, not a
+    duplicate -- the whole batch is rejected before touching the filesystem.
+    """
+    import logging
+
+    from src.audit import AuditLog
+    from src.layers.layer1_filesystem import register_filesystem_tools
+    from src.server import AuditedFastMCP
+
+    a = temp_home / "Repos" / "eb_conflict.txt"
+    a.write_text("original content")
+
+    app = AuditedFastMCP("test", audit_log=AuditLog(max_entries=10),
+                          logger=logging.getLogger("test-edit-batch-conflict"))
+    register_filesystem_tools(app, sec)
+
+    result = await app.call_tool(
+        "fs_edit_batch",
+        {"edits": [
+            {"path": str(a), "old_string": "original", "new_string": "version A"},
+            {"path": str(a), "old_string": "original", "new_string": "version B"},
+        ]},
+    )
+    text = app._result_text(result)
+
+    assert "Error" in text
+    assert "conflicting" in text
+    assert a.read_text() == "original content"
+
+
+@pytest.mark.asyncio
+async def test_edit_batch_diff_timeout_does_not_block_batch(monkeypatch, temp_home, sec):
+    """Core design point from the original review: fs_edit_batch must reuse
+    _diff_or_timeout_note() per file, not call difflib directly -- otherwise
+    it reopens the exact hang that cost fs_edit 4+ minutes twice (2026-08-08).
+    """
+    import time as time_module
+
+    import src.layers.layer1_filesystem as layer1
+
+    monkeypatch.setattr(layer1, "_DIFF_TIMEOUT_SECONDS", 0.05)
+
+    def slow_diff(*args, **kwargs):
+        time_module.sleep(0.3)
+        return "some diff"
+
+    monkeypatch.setattr(layer1, "_unified_diff_sync", slow_diff)
+
+    slow = temp_home / "Repos" / "eb_slow_diff.txt"
+    fast = temp_home / "Repos" / "eb_fast.txt"
+    slow.write_text("hello slow")
+    fast.write_text("hello fast")
+
+    result = await fs_edit_batch_impl(
+        [
+            {"path": str(slow), "old_string": "hello", "new_string": "goodbye"},
+            {"path": str(fast), "old_string": "hello", "new_string": "goodbye"},
+        ],
+        sec,
+    )
+
+    assert "2/2 files edited" in result
+    assert "timed out" in result
+    assert slow.read_text() == "goodbye slow"
+    assert fast.read_text() == "goodbye fast"
 
 
 @pytest.mark.asyncio

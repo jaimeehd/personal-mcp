@@ -784,6 +784,69 @@ async def test_disk_usage_no_exclude_identical_to_previous_behavior(temp_home, s
     assert "123" in with_exclude
 
 
+@pytest.mark.asyncio
+async def test_disk_usage_empty_files_excluded(temp_home, sec):
+    # Same always-on rule as fs_find_duplicates (v1.4.80): empty files are
+    # noise, not space. The count means "files that occupy space".
+    base = temp_home / "Repos" / "disk_empty"
+    (base / "a").mkdir(parents=True)
+    (base / "a" / "empty1.txt").write_text("")
+    (base / "a" / "empty2.txt").write_text("")
+    (base / "a" / "real.txt").write_bytes(b"x" * 100)
+    result = await fs_disk_usage_impl(str(base), sec)
+    assert "1 archivo(s)" in result
+    assert "100" in result
+    assert "2 archivo(s)" not in result
+
+
+@pytest.mark.asyncio
+async def test_disk_usage_min_size_filters(temp_home, sec):
+    base = temp_home / "Repos" / "disk_min"
+    (base / "a").mkdir(parents=True)
+    (base / "a" / "small.txt").write_bytes(b"x" * 50)
+    (base / "a" / "big.txt").write_bytes(b"x" * 2000)
+    result = await fs_disk_usage_impl(str(base), sec, min_size=1024)
+    assert "2,000" in result
+    assert "50" not in result
+    assert "1 archivo(s)" in result
+
+
+@pytest.mark.asyncio
+async def test_disk_usage_max_size_filters(temp_home, sec):
+    base = temp_home / "Repos" / "disk_max"
+    (base / "a").mkdir(parents=True)
+    (base / "a" / "small.txt").write_bytes(b"x" * 50)
+    (base / "a" / "big.txt").write_bytes(b"x" * 2000)
+    result = await fs_disk_usage_impl(str(base), sec, max_size=100)
+    assert "50" in result
+    assert "2000" not in result
+    assert "1 archivo(s)" in result
+
+
+@pytest.mark.asyncio
+async def test_disk_usage_size_range_combined(temp_home, sec):
+    base = temp_home / "Repos" / "disk_range"
+    (base / "a").mkdir(parents=True)
+    (base / "a" / "tiny.txt").write_bytes(b"x" * 50)
+    (base / "a" / "mid.txt").write_bytes(b"x" * 2000)
+    (base / "a" / "huge.txt").write_bytes(b"x" * 5000)
+    result = await fs_disk_usage_impl(str(base), sec, min_size=1024, max_size=3000)
+    assert "2,000" in result
+    assert "50" not in result
+    assert "5,000" not in result
+    assert "1 archivo(s)" in result
+
+
+@pytest.mark.asyncio
+async def test_disk_usage_invalid_size_values(temp_home, sec):
+    base = temp_home / "Repos" / "disk_invalid"
+    base.mkdir(parents=True)
+    result = await fs_disk_usage_impl(str(base), sec, min_size=-1)
+    assert "Error" in result and "min_size" in result
+    result = await fs_disk_usage_impl(str(base), sec, min_size=100, max_size=50)
+    assert "Error" in result and "max_size" in result
+
+
 # --- fs_compress / fs_extract ---
 
 @pytest.mark.asyncio

@@ -987,7 +987,9 @@ async def fs_find_duplicates_impl(path: str, security: SecurityValidator,
     return "\n".join(lines).rstrip()
 
 
-def _disk_usage_sync(base: Path, depth: int, exclude: list[str] | None = None) -> list[tuple[Path, int, int]]:
+def _disk_usage_sync(base: Path, depth: int, exclude: list[str] | None = None,
+                     min_size: int = 0,
+                     max_size: int | None = None) -> list[tuple[Path, int, int]]:
     """Single pass over the tree: attribute every file's size to its ancestor
     directory exactly `depth` levels under `base` (or to `base` itself if the
     file lives shallower than `depth`). One os.walk() over the whole tree
@@ -1007,6 +1009,19 @@ def _disk_usage_sync(base: Path, depth: int, exclude: list[str] | None = None) -
     purpose of the common use case (ignoring dependencies when answering
     "which folder weighs most"). Empty/None means no exclusion, exactly the
     pre-v1.4.79 behavior.
+
+    `min_size`/`max_size` (2026-08-16, v1.4.81, same semantics as
+    fs_find_duplicates): files outside the [min_size, max_size] range are
+    skipped before they count toward any bucket — the report answers "which
+    folder weighs most *within these bounds*" (e.g. max_size to ignore
+    known multi-GB ISOs when hunting the rest of the space). Unlike
+    duplicates, these filters save no I/O (the walk stats every file
+    regardless) — they only change what the totals/counts mean. Empty files
+    (size 0) are ALWAYS skipped, same rule as fs_find_duplicates: the count
+    means "files that occupy space". Research note (rmlint manpage): empty
+    files/dirs are a separate lint category there (emptyfiles/emptydirs),
+    never mixed into space audits — surfacing empty DIRECTORIES would be a
+    different tool, not this one.
 
     No cap on the number of buckets computed or files scanned (2026-08-01,
     same reasoning as fs_find_duplicates/project_git_status): the real cost
@@ -1035,10 +1050,17 @@ def _disk_usage_sync(base: Path, depth: int, exclude: list[str] | None = None) -
             if patterns and _excluded_by_patterns(base, current, fname, patterns):
                 continue
             try:
-                total += (current / fname).stat().st_size
-                count += 1
+                size = (current / fname).stat().st_size
             except (OSError, PermissionError):
                 continue
+            if size == 0:
+                continue
+            if min_size and size < min_size:
+                continue
+            if max_size is not None and size > max_size:
+                continue
+            total += size
+            count += 1
         if total:
             prev_total, prev_count = buckets.get(ancestor, (0, 0))
             buckets[ancestor] = (prev_total + total, prev_count + count)
@@ -1104,13 +1126,21 @@ def _excluded_by_patterns(base: Path, dirpath: Path, name: str,
 
 async def fs_disk_usage_impl(path: str, security: SecurityValidator,
                               top_n: int = 15, depth: int = 1,
-                              exclude: list[str] | None = None) -> str:
+                              exclude: list[str] | None = None,
+                              min_size: int = 0,
+                              max_size: int | None = None) -> str:
     rpath = security.resolve_and_validate(path)
     if not rpath.is_dir():
         return f"Error: not a directory: {rpath}"
-    buckets = await asyncio.to_thread(_disk_usage_sync, rpath, depth, exclude)
-    logger.info("fs_disk_usage path=%s depth=%d buckets=%d exclude=%s",
-                path, depth, len(buckets), exclude)
+    if min_size < 0:
+        return f"Error: min_size must be >= 0, got {min_size}"
+    if max_size is not None and max_size < min_size:
+        return f"Error: max_size ({max_size}) must be >= min_size ({min_size})"
+    buckets = await asyncio.to_thread(
+        _disk_usage_sync, rpath, depth, exclude, min_size, max_size
+    )
+    logger.info("fs_disk_usage path=%s depth=%d buckets=%d exclude=%s min_size=%d max_size=%s",
+                path, depth, len(buckets), exclude, min_size, max_size)
     if not buckets:
         return "No files found"
     total = sum(size for _, size, _ in buckets)
@@ -1576,7 +1606,9 @@ def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def fs_disk_usage(path: str, top_n: int = 15, depth: int = 1,
-                             exclude: list[str] | None = None) -> str:
+                             exclude: list[str] | None = None,
+                             min_size: int = 0,
+                             max_size: int | None = None) -> str:
         """Uso de disco por carpeta bajo `path`, agrupado a `depth` niveles.
 
         Cada archivo se atribuye a su carpeta ancestro exactamente `depth`
@@ -1597,13 +1629,30 @@ def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None
         omiten del conteo. Default None: nada se excluye (comportamiento
         previo a v1.4.79).
 
+        Filtros de tamaño opt-in (v1.4.81, misma semántica que
+        fs_find_duplicates; el default conserva el comportamiento histórico):
+        - `min_size` (default 0): ignora archivos de tamaño < min_size.
+          Los archivos VACÍOS (size 0) se ignoran SIEMPRE — el conteo por
+          bucket significa "archivos que ocupan espacio" (mismo criterio que
+          fs_find_duplicates, consenso jdupes/rmlint; en rmlint los vacíos
+          son una categoría aparte, emptyfiles/emptydirs, no parte de la
+          auditoría de espacio). Nota: encontrar carpetas vacías sería una
+          tool distinta, no esta.
+        - `max_size` (default None): ignora archivos de tamaño > max_size —
+          responde "qué pesa más, dentro de estos límites" (ej. ignorar ISOs
+          de varios GB ya conocidos al cazar el resto del espacio).
+        A diferencia de duplicados, estos filtros NO ahorran I/O (el walk
+        igualmente stastea cada archivo) — solo cambian el significado del
+        total y los conteos.
+
         Solo lectura; sin límite de carpetas ni de archivos escaneados — solo
         la salida (top_n) se trunca.
         """
         err = security.validate_tool_path(path, "read")
         if err:
             return err
-        return await fs_disk_usage_impl(path, security, top_n, depth, exclude)
+        return await fs_disk_usage_impl(path, security, top_n, depth, exclude,
+                                        min_size, max_size)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=True, destructiveHint=False))
     async def fs_compress(paths: list[str], output_path: str) -> str:

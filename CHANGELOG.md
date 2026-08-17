@@ -1,3 +1,13 @@
+## [1.4.81] — 2026-08-16
+
+### Changed — `fs_disk_usage` (Layer 1): límites de tamaño opt-in `min_size`/`max_size` + archivos vacíos siempre excluidos
+
+- **`min_size` (default `0`) / `max_size` (default `None`)**: mismos filtros opt-in que `fs_find_duplicates` v1.4.80, aplicados tras el `stat()` en el loop de filenames — un archivo fuera del rango no cuenta en su bucket ni en el total. `max_size` responde "qué pesa más, dentro de estos límites" (ej. ignorar ISOs de varios GB ya conocidos al cazar el resto del espacio); `min_size` elimina el ruido de miles de archivos diminutos del conteo. El default conserva el comportamiento histórico (paridad verificada por test). **Nota de diseño**: a diferencia de duplicados, estos filtros NO ahorran I/O (el walk ya stastea cada archivo) — solo cambian el significado del total y los conteos.
+- **Archivos vacíos (size 0) siempre fuera del análisis**: mismo criterio que `fs_find_duplicates` (decisión 2026-08-16, con el usuario) — el conteo por bucket pasa a significar "archivos que ocupan espacio". Decisión respaldada por investigación (manpage rmlint): los vacíos son una categoría de lint aparte (`emptyfiles`/`emptydirs`), nunca parte de la auditoría de espacio; inventariar **carpetas vacías** (restos de desinstalaciones — la parte realmente útil) sería una tool distinta, no esta.
+- **Validación idéntica a duplicados**: `min_size < 0` y `max_size < min_size` devuelven `Error: ...`. Firma del wrapper: `(path, top_n=15, depth=1, exclude=None, min_size=0, max_size=None)` — params nuevos al final, compatibilidad total.
+- **Docstring del wrapper actualizado**: documenta los tres filtros (exclude, min_size, max_size), la exclusión siempre-activa de vacíos y la nota rmlint de categorías separadas.
+- **Tests nuevos**: 5 en `test_filesystem.py` — vacíos excluidos (2 vacíos + 1 real → "1 archivo(s)"), `min_size` filtra, `max_size` filtra, rango combinado, validación de valores inválidos. Suite completa: 534 passed, 1 skipped.
+
 ## [1.4.80] — 2026-08-16
 
 ### Changed — `fs_find_duplicates` (Layer 1): `exclude` con poda real del walk, filtros de tamaño `min_size`/`max_size` opt-in, archivos vacíos fuera del reporte

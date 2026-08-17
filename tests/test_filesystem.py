@@ -522,7 +522,144 @@ async def test_find_duplicates_recursive(temp_home, sec):
 async def test_find_duplicates_not_a_directory(sample_file, sec):
     result = await fs_find_duplicates_impl(str(sample_file), sec)
     assert "Error" in result
-    assert "not a directory" in result
+
+
+@pytest.mark.asyncio
+async def test_find_duplicates_exclude_prunes_subtree(temp_home, sec):
+    # Duplicates inside a pruned subtree must not appear, and the walk must
+    # not descend into it at all (the pair inside node_modules is noise —
+    # dependency copies, not user garbage).
+    base = temp_home / "Repos" / "dupes_exclude_dir"
+    (base / "node_modules").mkdir(parents=True)
+    (base / "src").mkdir()
+    (base / "src" / "a.txt").write_text("real duplicate content")
+    (base / "src" / "b.txt").write_text("real duplicate content")
+    (base / "node_modules" / "x.js").write_text("dep duplicate")
+    (base / "node_modules" / "y.js").write_text("dep duplicate")
+    result = await fs_find_duplicates_impl(str(base), sec, recursive=True,
+                                           exclude=["**/node_modules/**"])
+    assert "real duplicate content" in result or "a.txt" in result
+    assert "node_modules" not in result
+
+
+@pytest.mark.asyncio
+async def test_find_duplicates_exclude_bare_name_and_files(temp_home, sec):
+    # Bare pattern matches any directory of that name at any depth (the
+    # fnmatch "**" limitation workaround); file patterns skip matching files.
+    base = temp_home / "Repos" / "dupes_exclude_bare"
+    (base / "sub" / "node_modules").mkdir(parents=True)
+    (base / "a.txt").write_text("keep me")
+    (base / "b.txt").write_text("keep me")
+    (base / "c.tmp").write_text("temp dup")
+    (base / "d.tmp").write_text("temp dup")
+    (base / "sub" / "node_modules" / "x.txt").write_text("keep me")
+    result = await fs_find_duplicates_impl(str(base), sec, recursive=True,
+                                           exclude=["node_modules", "*.tmp"])
+    assert "a.txt" in result
+    assert "b.txt" in result
+    assert "c.tmp" not in result
+    assert "node_modules" not in result
+
+
+@pytest.mark.asyncio
+async def test_find_duplicates_exclude_none_parity(temp_home, sec):
+    # exclude=None must be byte-identical to the pre-v1.4.80 behavior: with
+    # no patterns, everything is scanned (same fixture as the basic test).
+    base = temp_home / "Repos" / "dupes_parity"
+    base.mkdir()
+    (base / "a.txt").write_text("identical content")
+    (base / "b_copy.txt").write_text("identical content")
+    (base / "unique.txt").write_text("something else entirely")
+    result = await fs_find_duplicates_impl(str(base), sec, exclude=None)
+    assert "1 duplicate group" in result
+    assert "a.txt" in result
+    assert "b_copy.txt" in result
+
+
+@pytest.mark.asyncio
+async def test_find_duplicates_empty_files_excluded(temp_home, sec):
+    # Empty files (size 0) are always skipped — the jdupes/rmlint consensus
+    # default: they are noise, not recoverable space. Only the real pair
+    # must appear.
+    base = temp_home / "Repos" / "dupes_empty"
+    base.mkdir()
+    for name in ("empty1.txt", "empty2.txt", "empty3.txt"):
+        (base / name).write_text("")
+    (base / "a.txt").write_text("real pair")
+    (base / "b.txt").write_text("real pair")
+    result = await fs_find_duplicates_impl(str(base), sec)
+    assert "1 duplicate group" in result
+    assert "a.txt" in result
+    assert "empty1.txt" not in result
+    assert "empty2.txt" not in result
+    assert "empty3.txt" not in result
+
+
+@pytest.mark.asyncio
+async def test_find_duplicates_min_size_filters(temp_home, sec):
+    base = temp_home / "Repos" / "dupes_min_size"
+    base.mkdir()
+    (base / "small_a.txt").write_text("tiny")
+    (base / "small_b.txt").write_text("tiny")
+    (base / "big_a.txt").write_text("x" * 2000)
+    (base / "big_b.txt").write_text("x" * 2000)
+    result = await fs_find_duplicates_impl(str(base), sec, min_size=1024)
+    assert "big_a.txt" in result
+    assert "big_b.txt" in result
+    assert "small_a.txt" not in result
+
+
+@pytest.mark.asyncio
+async def test_find_duplicates_min_size_zero_includes_small(temp_home, sec):
+    # min_size=0 (default) must keep small non-empty duplicates — parity
+    # with the pre-v1.4.80 behavior for files above 0 bytes.
+    base = temp_home / "Repos" / "dupes_min_zero"
+    base.mkdir()
+    (base / "a.txt").write_text("tiny")
+    (base / "b.txt").write_text("tiny")
+    result = await fs_find_duplicates_impl(str(base), sec, min_size=0)
+    assert "1 duplicate group" in result
+    assert "a.txt" in result
+
+
+@pytest.mark.asyncio
+async def test_find_duplicates_max_size_filters(temp_home, sec):
+    base = temp_home / "Repos" / "dupes_max_size"
+    base.mkdir()
+    (base / "small_a.txt").write_text("x" * 50)
+    (base / "small_b.txt").write_text("x" * 50)
+    (base / "big_a.txt").write_text("x" * 2000)
+    (base / "big_b.txt").write_text("x" * 2000)
+    result = await fs_find_duplicates_impl(str(base), sec, max_size=100)
+    assert "small_a.txt" in result
+    assert "big_a.txt" not in result
+
+
+@pytest.mark.asyncio
+async def test_find_duplicates_size_range_combined(temp_home, sec):
+    base = temp_home / "Repos" / "dupes_range"
+    base.mkdir()
+    (base / "tiny1.txt").write_text("tiny")
+    (base / "tiny2.txt").write_text("tiny")
+    (base / "mid1.txt").write_text("x" * 2000)
+    (base / "mid2.txt").write_text("x" * 2000)
+    (base / "huge1.txt").write_text("x" * 5000)
+    (base / "huge2.txt").write_text("x" * 5000)
+    result = await fs_find_duplicates_impl(str(base), sec,
+                                           min_size=1024, max_size=3000)
+    assert "mid1.txt" in result
+    assert "tiny1.txt" not in result
+    assert "huge1.txt" not in result
+
+
+@pytest.mark.asyncio
+async def test_find_duplicates_invalid_size_values(temp_home, sec):
+    base = temp_home / "Repos" / "dupes_invalid"
+    base.mkdir()
+    result = await fs_find_duplicates_impl(str(base), sec, min_size=-1)
+    assert "Error" in result and "min_size" in result
+    result = await fs_find_duplicates_impl(str(base), sec, min_size=100, max_size=50)
+    assert "Error" in result and "max_size" in result
 
 
 # --- fs_disk_usage ---

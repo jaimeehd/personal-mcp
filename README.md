@@ -43,7 +43,7 @@ Servidor MCP personalizado para orquestación de estaciones de trabajo Windows/L
 | `fs_list_with_sizes` | Listar entradas de directorio con tamaños, ordenable |
 | `fs_read_media` | Leer una imagen/binario como base64, con escaneo de secretos en el contenido decodificado |
 | `fs_edit_advanced` | Múltiples reemplazos find/replace en un archivo en una sola llamada, con dry-run |
-| `fs_find_duplicates` | Buscar archivos con contenido idéntico (SHA256) dentro de una carpeta, aunque el nombre difiera — a diferencia de `fs_find`, que busca por nombre/tamaño/antigüedad. Sin límite de cantidad ni tamaño de archivo: agrupa primero por tamaño exacto (gratis, sin leer contenido) y solo calcula hash dentro de esos grupos. Parámetros: `path`, `recursive?` (default `false`), `extensions?` (acepta `".pdf"` o `"pdf"` indistintamente). Solo lectura — no borra nada. |
+| `fs_find_duplicates` | Buscar archivos con contenido idéntico (SHA256) dentro de una carpeta, aunque el nombre difiera — a diferencia de `fs_find`, que busca por nombre/tamaño/antigüedad. Sin límite de cantidad ni tamaño de archivo por defecto: agrupa primero por tamaño exacto (gratis, sin leer contenido) y solo calcula hash dentro de esos grupos; los archivos vacíos (size 0) se ignoran siempre. Parámetros: `path`, `recursive?` (default `false`), `extensions?` (acepta `".pdf"` o `"pdf"` indistintamente), `exclude?` (patrones fnmatch estilo `paths_deny` — ej. `"**/node_modules/**"`, `"node_modules"`, `".venv"`, `"*.tmp"` — que PODA los directorios matcheados del recorrido y omite los archivos matcheados), `min_size?` (default `0` — ignora archivos menores; pasa `1024` para filtrar todo lo inferior a 1 KB), `max_size?` (default `None` — ignora archivos mayores, sin tope por defecto). Solo lectura — no borra nada. |
 | `fs_disk_usage` | Auditoría de espacio en disco: agrupa el tamaño de todos los archivos bajo `path` por carpeta ancestro a `depth` niveles, devuelve las `top_n` que más pesan, cada una con tamaño, porcentaje y número de archivos. Complementa a `fs_find_duplicates` — esa responde "qué está repetido", esta responde "qué carpeta pesa más". Parámetros: `path`, `top_n?` (default `15`), `depth?` (default `1`), `exclude?` (lista de patrones fnmatch estilo `paths_deny` — ej. `"**/node_modules/**"`, `"node_modules"`, `".venv"` — que PODA los directorios matcheados del recorrido y omite los archivos matcheados; un patrón desnudo como `"node_modules"` matchea cualquier carpeta con ese nombre a cualquier profundidad). Solo lectura. |
 | `fs_compress` | Crear un zip a partir de una lista de archivos/carpetas. Parámetros: `paths` (lista), `output_path` |
 | `fs_extract` | Descomprimir un zip a `output_dir`. Verifica explícitamente que cada archivo del zip caiga dentro de `output_dir` antes de escribirlo (protección contra zip slip) — un miembro con ruta `../../algo` se omite y se reporta, nunca se escribe fuera del destino |
@@ -63,6 +63,16 @@ fs_find_duplicates(
 )
 ```
 Igual, pero recorriendo subcarpetas y limitado a `.pdf`/`.docx`.
+
+```
+fs_find_duplicates(
+    path="C:\\Users\\usuario\\Repos\\MiProyecto",
+    recursive=True,
+    exclude=["node_modules", ".venv", ".git"],
+    min_size=1024
+)
+```
+Busca duplicados reales en un proyecto sin el ruido de las dependencias: los directorios que matchean se podan del recorrido (no se desciende a ellos — no se pierde tiempo hasheando miles de librerías repetidas), y `min_size=1024` ignora todo lo inferior a 1 KB. Los archivos vacíos (size 0) se ignoran siempre. Para acotar archivos enormes (ej. imágenes de VM de varios GB), pasar `max_size`.
 
 Salida (ejemplo):
 ```

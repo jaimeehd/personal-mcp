@@ -854,32 +854,67 @@ def _normalize_extensions(extensions: list[str] | None) -> set[str] | None:
     return normalized or None
 
 
-def _find_duplicates_sync(rpath: Path, recursive: bool, extensions: set[str] | None) -> list[dict]:
-    """Two-phase exact-duplicate search, deliberately with no file-count or
-    file-size cap (2026-07-31 design discussion): walking + stat() is cheap
-    even over thousands of files (measured: 232 files in 240ms on this
-    machine), so a max_files limit would only exclude legitimate large
-    directories like a real Downloads folder without saving meaningful time.
-    A max_file_size limit would defeat the actual use case (finding files
-    that waste the most disk space), so instead of size caps, cost is
-    controlled by only hashing when it can possibly matter: two files can
-    only be byte-identical if they are already the same size, so phase 1
-    groups by exact size (near-free, no file content read) and phase 2 only
-    hashes files that already share a size with at least one other file.
-    A unique-sized file, however large, is never hashed.
+def _find_duplicates_sync(rpath: Path, recursive: bool, extensions: set[str] | None,
+                          exclude: list[str] | None = None,
+                          min_size: int = 0,
+                          max_size: int | None = None) -> list[dict]:
+    """Two-phase exact-duplicate search. No default file-count or file-size
+    cap (2026-07-31 design discussion): walking + stat() is cheap even over
+    thousands of files (measured: 232 files in 240ms on this machine), so a
+    max_files limit would only exclude legitimate large directories like a
+    real Downloads folder without saving meaningful time. Instead of caps,
+    cost is controlled by only hashing when it can possibly matter: two
+    files can only be byte-identical if they are already the same size, so
+    phase 1 groups by exact size (near-free, no file content read) and
+    phase 2 only hashes files that already share a size with at least one
+    other file. A unique-sized file, however large, is never hashed.
+
+    Since v1.4.80 the caps are OPT-IN instead of nonexistent:
+    - `exclude`: fnmatch patterns (paths_deny style, same helpers as
+      fs_disk_usage) — matching directories are PRUNED from the walk
+      (dirnames[:] filter, before descending) and matching files skipped.
+      None means nothing is excluded, exactly the pre-v1.4.80 behavior.
+    - `min_size` (default 0): files smaller than min_size are skipped
+      before grouping. Empty files (size 0) are ALWAYS skipped regardless
+      of min_size — the consensus default of jdupes/rmlint (empty files
+      are noise, not recoverable space).
+    - `max_size` (default None): files larger than max_size are skipped —
+      bounds hashing cost on huge files (e.g. duplicated multi-GB VM
+      images) when the caller needs it. None means no cap, the
+      pre-v1.4.80 behavior.
+    Both filters run in phase 1, so filtered files are neither grouped nor
+    hashed — the saving is real, not just cosmetic.
     """
+    patterns = _normalize_exclude_patterns(exclude)
     size_groups: dict[int, list[Path]] = {}
-    iterator = rpath.rglob("*") if recursive else rpath.iterdir()
-    for entry in iterator:
-        try:
-            if not entry.is_file():
+    for dirpath, dirnames, filenames in os.walk(rpath):
+        current = Path(dirpath)
+        if patterns:
+            dirnames[:] = [
+                d for d in dirnames
+                if not _excluded_by_patterns(rpath, current, d, patterns)
+            ]
+        if not recursive:
+            dirnames[:] = []
+        for fname in filenames:
+            if patterns and _excluded_by_patterns(rpath, current, fname, patterns):
                 continue
-            if extensions and entry.suffix.lower() not in extensions:
+            f = current / fname
+            try:
+                if not f.is_file():
+                    continue
+                if extensions and f.suffix.lower() not in extensions:
+                    continue
+                size = f.stat().st_size
+            except (PermissionError, OSError):
                 continue
-            size = entry.stat().st_size
-            size_groups.setdefault(size, []).append(entry)
-        except (PermissionError, OSError):
-            continue
+            if size == 0:
+                continue
+            if min_size and size < min_size:
+                continue
+            if max_size is not None and size > max_size:
+                continue
+            size_groups.setdefault(size, []).append(f)
 
     hash_groups: dict[str, list[tuple[Path, int]]] = {}
     for size, files in size_groups.items():
@@ -917,14 +952,24 @@ def _find_duplicates_sync(rpath: Path, recursive: bool, extensions: set[str] | N
 
 
 async def fs_find_duplicates_impl(path: str, security: SecurityValidator,
-                                   recursive: bool = False,
-                                   extensions: list[str] | None = None) -> str:
+                                  recursive: bool = False,
+                                  extensions: list[str] | None = None,
+                                  exclude: list[str] | None = None,
+                                  min_size: int = 0,
+                                  max_size: int | None = None) -> str:
     rpath = security.resolve_and_validate(path)
     if not rpath.is_dir():
         return f"Error: not a directory: {rpath}"
+    if min_size < 0:
+        return f"Error: min_size must be >= 0, got {min_size}"
+    if max_size is not None and max_size < min_size:
+        return f"Error: max_size ({max_size}) must be >= min_size ({min_size})"
     ext_set = _normalize_extensions(extensions)
-    duplicates = await asyncio.to_thread(_find_duplicates_sync, rpath, recursive, ext_set)
-    logger.info("fs_find_duplicates path=%s recursive=%s groups=%d", path, recursive, len(duplicates))
+    duplicates = await asyncio.to_thread(
+        _find_duplicates_sync, rpath, recursive, ext_set, exclude, min_size, max_size
+    )
+    logger.info("fs_find_duplicates path=%s recursive=%s groups=%d exclude=%s min_size=%d max_size=%s",
+                path, recursive, len(duplicates), exclude, min_size, max_size)
     if not duplicates:
         return "No exact duplicates found"
     total_wasted = sum(d["size"] * (d["count"] - 1) for d in duplicates)
@@ -1483,11 +1528,51 @@ def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def fs_find_duplicates(path: str, recursive: bool = False,
-                                  extensions: list[str] | None = None) -> str:
+                                  extensions: list[str] | None = None,
+                                  exclude: list[str] | None = None,
+                                  min_size: int = 0,
+                                  max_size: int | None = None) -> str:
+        """Busca archivos con contenido idéntico (SHA256) bajo `path` — la
+        respuesta "qué está repetido" (complementa a `fs_disk_usage`, que
+        responde "qué carpeta pesa más").
+
+        Dos fases: primero agrupa por tamaño exacto (stat, sin leer
+        contenido — un archivo de tamaño único, por grande que sea, nunca se
+        hashea), y solo hashea los grupos con 2+ archivos del mismo tamaño.
+        Cada grupo reporta N copias, tamaño, SHA256 (12 chars), el ORIGINAL
+        (el más viejo por st_ctime) y los duplicados, ordenado por espacio
+        desperdiciado (size * (copias - 1)) descendente.
+
+        `recursive` (default false): solo archivos directos de `path`; true
+        recorre subcarpetas. `extensions` (default None): filtrar por
+        extensión — acepta ".pdf" o "pdf", case-insensitive.
+
+        Filtros opcionales (v1.4.80, todos opt-in — el default es el
+        comportamiento histórico sin ellos):
+        - `exclude`: patrones fnmatch estilo paths_deny ("**/node_modules/**",
+          "node_modules", ".venv", "*.tmp"). Las carpetas que matchean se
+          PODAN del recorrido (no se desciende a ellas — excluir node_modules
+          sin podar no ahorraría el tiempo de hashear miles de dependencias
+          repetidas); los archivos que matchean se omiten. Un patrón desnudo
+          como "node_modules" matchea cualquier carpeta con ese nombre a
+          cualquier profundidad. Default None: nada se excluye.
+        - `min_size` (default 0): ignora archivos de tamaño < min_size.
+          Los archivos VACÍOS (size 0) se ignoran siempre, sin importar este
+          valor — el consenso de jdupes/rmlint: los vacíos son ruido, no
+          espacio recuperable. Pasar min_size=1024 filtra todo lo menor a 1 KB.
+        - `max_size` (default None): ignora archivos de tamaño > max_size —
+          acota el coste de hashear archivos enormes (ej. imágenes de VM de
+          varios GB duplicadas) cuando hace falta. None = sin tope.
+
+        Solo lectura — no borra nada. Sin límite de archivos escaneados;
+        para limpiar, pasar las rutas marcadas `duplicate:` a
+        `fs_delete_batch` siguiendo el flujo de ticket/confirm_code.
+        """
         err = security.validate_tool_path(path, "read")
         if err:
             return err
-        return await fs_find_duplicates_impl(path, security, recursive, extensions)
+        return await fs_find_duplicates_impl(path, security, recursive,
+                                             extensions, exclude, min_size, max_size)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def fs_disk_usage(path: str, top_n: int = 15, depth: int = 1,

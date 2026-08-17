@@ -195,7 +195,7 @@ Ejemplo de configuración:
   reiniciar, formatear discos, borrar todo de forma forzada, y modificar
   cuentas de usuario/administradores.
 
-  💡 **Ya aplicado en la config oficial (agregado 2026-07-05):** si usas `python` o `node`, patrones específicos de operaciones peligrosas que esos programas pueden ejecutar por dentro ya están sumados al `deny` — por ejemplo `os.system`,
+  💡 **Ya aplicado en la config oficial (agregado 2026-07-05, ampliado después):** si usas `python` o `node`, patrones específicos de operaciones peligrosas que esos programas pueden ejecutar por dentro ya están sumados al `deny` — por ejemplo `os.system`,
   `subprocess.run`, `shutil.rmtree`, `child_process`. La idea, tomada del
   mismo enfoque que usa Desktop Commander (otro asistente similar): no es una
   protección perfecta — alguien decidido a evadirla puede reescribir el código
@@ -203,9 +203,10 @@ Ejemplo de configuración:
   honesto, que es el riesgo más probable en el uso diario. Estos son los patrones
   que ya están en el `deny` real de este equipo:
   ```json
-  "os.system", "subprocess.run", "subprocess.Popen", "subprocess.call",
-  "shutil.rmtree", "child_process", "require('fs').unlink", "curl * | ",
-  "wget * | ", "iex (", "Invoke-Expression"
+  "shutil.rmtree", "os.remove", "os.system",
+  "subprocess.run", "subprocess.Popen", "subprocess.call",
+  "child_process", "require('fs').unlink", "require('child_process')",
+  "curl * | ", "wget * | ", "iex (", "Invoke-Expression"
   ```
   Si estás configurando una instalación **nueva** desde `install.ps1`, revisa si estos
   patrones ya están en tu `deny` — el instalador no los agrega automáticamente todavía,

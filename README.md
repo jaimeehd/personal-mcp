@@ -166,6 +166,46 @@ Contains 14,832 file(s), 287,450,112 bytes (274.1 MB)
 ```
 El conteo aparece **antes** de que confirmes — igual que el diálogo de Windows al borrar una carpeta. Tras aprobar el ticket con el código del popup y repetir la misma llamada, borra la carpeta completa y confirma cuántos archivos se eliminaron.
 
+**Ejemplos de uso — herramientas básicas:**
+```
+fs_edit(
+    path="C:\\Users\\usuario\\Repos\\MiProyecto\\README.md",
+    old_string="version 1.0",
+    new_string="version 1.1"
+)
+```
+Reemplazo de texto con vista previa de diff. Sin grant activo, devuelve un ticket de escritura (ver "Flujo de aprobación" abajo) en vez de ejecutar.
+
+```
+fs_batch(
+    operations=[
+        {"action": "copy", "source": "C:\\Users\\usuario\\Repos\\A\\a.txt", "destination": "C:\\Users\\usuario\\Repos\\B\\a.txt"},
+        {"action": "move", "source": "C:\\Users\\usuario\\Repos\\A\\b.txt", "destination": "C:\\Users\\usuario\\Repos\\B\\b.txt"}
+    ],
+    dry_run=True
+)
+```
+Copiar/mover/renombrar en lote. `dry_run=True` valida la lista sin tocar nada — ejecutar después sin el flag.
+
+```
+fs_list(path="C:\\Users\\usuario\\Repos", pattern="*.py", max_results=10)
+fs_search(path="C:\\Users\\usuario\\Repos", pattern="def main", extensions=[".py"])
+fs_find(path="C:\\Users\\usuario\\Repos", pattern="*test*", recursive=True)
+```
+Trío rápido de inspección: listar entradas, buscar contenido (grep con regex, omite archivos >10 MB) y buscar por nombre.
+
+```
+fs_edit_advanced(
+    path="C:\\Users\\usuario\\Repos\\MiProyecto\\config.yaml",
+    edits=[
+        {"old_string": "debug: false", "new_string": "debug: true"},
+        {"old_string": "port: 8080", "new_string": "port: 9090"}
+    ],
+    dry_run=True
+)
+```
+Múltiples reemplazos find/replace en una sola llamada; `dry_run=True` previsualiza el diff completo antes de escribir.
+
 ### Capa 2 — Shell (ejecución multi-shell, cambio de shell en runtime)
 | Tool | Descripción |
 |------|-------------|
@@ -177,6 +217,7 @@ El conteo aparece **antes** de que confirmes — igual que el diálogo de Window
 | `sh_session_interrupt` | Enviar Ctrl+C a sesión |
 | `sh_session_close` | Cerrar sesión |
 | `sh_script` | Ejecutar script multi-línea desde archivo temporal. Parámetros: `script`, `timeout`, `working_dir?`, `shell?` |
+| `sh_history` | Historial de sesiones activas: `session_id` (truncado), comandos ejecutados y uptime de cada una |
 | `sh_spawn` | Arrancar un proceso de larga duración en background (dev server, watcher) — a diferencia de `sh_exec`, que muere al cumplirse el timeout. Devuelve `spawn_id`. Exige su propio ticket de `execute` (nunca satisfecho por un grant wildcard `"*"`, igual que `python`/`node`/`bash`). Parámetros: `command`, `working_dir?`, `shell?` |
 | `sh_spawn_read` | Leer el output acumulado de un proceso en background (buffer circular de las últimas 500 líneas). Parámetros: `spawn_id`, `n?` (default `100`) |
 | `sh_spawn_kill` | Terminar un proceso en background y su árbol de procesos hijos |
@@ -211,6 +252,32 @@ Salida (ejemplo, con un huérfano detectado de un servidor anterior):
 ```
 ⚠️ Un proceso huérfano sigue corriendo de verdad — no se mata solo. Si aparece uno que ya no necesitas, usa `sh_spawn_kill` con su `spawn_id` para pararlo.
 
+**Ejemplos de uso — `sh_exec` / `sh_script` / `sh_session`:**
+```
+sh_exec(command="git status", working_dir="C:\\Users\\usuario\\Repos\\MiProyecto", timeout=30)
+```
+Comando one-shot en el directorio indicado; si excede el timeout se mata el árbol de procesos (con su salida parcial). `python`/`node`/`bash` exigen además un ticket de `execute` antes de arrancar (ver "Flujo de aprobación" abajo). ⚠️ `cd` no está en la whitelist — `working_dir` es el único canal correcto para cambiar de directorio.
+
+```
+sh_script(
+    script="""$files = Get-ChildItem *.py
+$files | ForEach-Object { $_.Length }""",
+    working_dir="C:\\Users\\usuario\\Repos\\MiProyecto",
+    timeout=30
+)
+```
+Script multi-línea ejecutado desde un archivo temporal (`.ps1`/`.bat`/`.sh` según el shell). Cada línea se valida segmento por segmento contra la whitelist de solo lectura — una línea que intente mutar algo rechaza el script completo antes de ejecutarse.
+
+```
+sh_session_start(shell="powershell")        # → {"session_id": "ses_..."}
+sh_session_send(session_id="ses_...", command="npm run dev",
+                working_dir="C:\\Users\\usuario\\Repos\\MiProyecto")
+sh_session_read(session_id="ses_...")       # lee la salida pendiente
+sh_session_interrupt(session_id="ses_...")  # Ctrl+C
+sh_session_close(session_id="ses_...")
+```
+Sesión persistente: el estado (directorio, variables) sobrevive entre comandos. ⚠️ Limitación conocida: PowerShell en modo sesión bufferiza stdout — para dev servers de larga duración usar `sh_spawn` (arriba) en vez de depender de `sh_session_read`. `sh_history()` lista las sesiones activas con su uptime y conteo de comandos.
+
 ### Capa 3 — SSH (condicional, deshabilitado por defecto)
 | Tool | Descripción |
 |------|-------------|
@@ -218,6 +285,8 @@ Salida (ejemplo, con un huérfano detectado de un servidor anterior):
 | `ssh_connect` | Abrir sesión SSH |
 | `ssh_exec` | Ejecutar comando en host remoto |
 | `ssh_disconnect` | Cerrar sesión SSH |
+
+> Nota: la capa SSH está **deshabilitada por defecto** (`ssh.enabled: false`). Sin ejemplos de uso hasta habilitarla y endurecer el host remoto.
 
 ### Capa 4 — Personal
 | Tool | Descripción |
@@ -252,6 +321,27 @@ Pasa un path puntual dentro de las rutas permitidas, ej.: project_git_status(pat
 ```
 Ese mensaje no es un error de la tool: es el guard de seguridad por diseño. Reintenta con un `path` puntual.
 
+**Ejemplos de uso — diario y notas:**
+```
+journal_add(content="Instalado el nuevo SSD en el portátil", tags=["hardware", "mantenimiento"])
+journal_list(tag="hardware", limit=10)
+journal_search(query="SSD")
+journal_stats()                     # estadísticas por tag/categoría
+journal_export(format="markdown")   # o "json"
+```
+Diario con tags, búsqueda full-text y exportación.
+
+```
+note_quick(content="Comprar cable HDMI para la oficina")
+```
+Nota rápida al archivo inbox — la forma más corta de guardar algo sin estructura.
+
+```
+project_scan()
+project_find(pattern="*.env.example")
+```
+Escaneo de repos (rama, cambios sin commitear) y búsqueda de archivos en todos los repos permitidos.
+
 ### Capa 5 — Health y Diagnóstico
 | Tool | Descripción |
 |------|-------------|
@@ -265,6 +355,16 @@ Ese mensaje no es un error de la tool: es el guard de seguridad por diseño. Rei
 | `mcp_benchmark` | Benchmarks de rendimiento |
 | `mcp_log` | Leer el archivo de log del servidor, filtrable por nivel |
 
+**Ejemplos de uso — diagnóstico:**
+```
+health_check()                    # resumen completo de salud del sistema
+health_disk()                     # uso de disco de las rutas configuradas
+health_processes(top=5)           # top procesos por CPU
+mcp_log(level="WARNING", n=50)    # últimas 50 líneas de log, filtradas por nivel
+mcp_audit_log(n=20)               # últimas 20 operaciones auditadas
+mcp_list_tools()                  # inventario de las tools registradas
+```
+
 ### Capa 6 — Permissions
 | Tool | Descripción |
 |------|-------------|
@@ -274,6 +374,25 @@ Ese mensaje no es un error de la tool: es el guard de seguridad por diseño. Rei
 | `security_pending` | Listar todas las solicitudes de permiso pendientes |
 | `security_revoke` | Revocar un grant activo de sesión/permanente |
 | `security_stats` | Estadísticas del sistema de permisos |
+
+**Flujo de aprobación — tickets + popup (ejemplo completo):**
+```
+fs_write(path="C:\\Users\\usuario\\Repos\\MiProyecto\\notas.txt", content="...")
+```
+Primera llamada (sin grant activo) devuelve un ticket — no ejecuta nada:
+```
+{"status": "permission_required", "ticket": "perm_...", "operation": "write",
+ "message": "fs_approve(ticket_id='perm_...', level='session'|'single', confirm_code='<popup>')"}
+```
+En paralelo, un popup nativo muestra el código de confirmación de 6 dígitos — el **único** canal donde es visible; nunca viene en la respuesta de ninguna tool. Confirmas con:
+```
+fs_approve(ticket_id="perm_...", confirm_code="123456", level="session")
+```
+- `level='session'`: autoriza el directorio (con subdirectorios) para toda la sesión — "ask once, session-scoped". Recomendado para write/edit.
+- `level='single'`: autoriza una sola operación.
+- Los borrados (`fs_delete*`) son **siempre** `single` por diseño — nunca session ni permanente.
+
+Tras aprobar, repites la llamada original y se ejecuta. Para un lote de rutas (`fs_delete_batch`/`fs_write_batch`/`fs_edit_batch`) se genera **un solo ticket** para toda la lista, con preview acotado — la lista completa viaja en el campo `resources`, no en el mensaje. Regla de oro: pedir siempre el código del popup antes de aprobar — nunca aprobar con un código inventado.
 
 ## Seguridad
 

@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import time
 from collections import deque
 from pathlib import Path
@@ -66,7 +67,12 @@ class AuditEntry:
         if isinstance(value, dict):
             result: dict[str, Any] = {}
             for k, v in value.items():
-                if any(s in str(k).lower() for s in sensitive_keys):
+                # F6 (v1.4.84): token exacto, no substring — "monkey_id" no se
+                # redacta; "apiKey"/"db_password" sí. Paridad con log.py.
+                if any(
+                    p.lower() in sensitive_keys
+                    for p in re.split(r"(?<=[a-z0-9])(?=[A-Z])|[^a-zA-Z0-9]+", str(k))
+                ):
                     result[k] = "***"
                     continue
                 result[k] = AuditEntry._redact(v)
@@ -93,10 +99,17 @@ class AuditEntry:
 
 
 class AuditLog:
+    # P1.1: poda en disco. El deque solo acota RAM; sin esto audit.json crece
+    # sin cota y cada reinicio lo re-lee entero (AuditLog.load). Compactar
+    # cuando supere este tamaño, conservando las últimas max_entries líneas.
+    _COMPACT_BYTES = 5 * 1024 * 1024
+    _COMPACT_CHECK_EVERY = 100
+
     def __init__(self, max_entries: int = 10000, persist_path: Path | None = None):
         self.max_entries = max_entries
         self.persist_path = persist_path
         self._entries: deque = deque(maxlen=max_entries)
+        self._appends_since_check = 0
 
     def record(self, tool: str, args: dict[str, Any], success: bool,
                duration_ms: float, error: str | None = None) -> AuditEntry:
@@ -134,6 +147,30 @@ class AuditLog:
             self.persist_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self.persist_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry.to_dict(), ensure_ascii=False) + "\n")
+            self._appends_since_check += 1
+            if self._appends_since_check >= self._COMPACT_CHECK_EVERY:
+                self._appends_since_check = 0
+                self._maybe_compact()
+        except Exception:
+            pass
+
+    def _maybe_compact(self) -> None:
+        """Reescribir audit.json conservando las últimas max_entries líneas si supera el umbral."""
+        try:
+            import os
+
+            if not self.persist_path or not self.persist_path.exists():
+                return
+            if self.persist_path.stat().st_size <= self._COMPACT_BYTES:
+                return
+            with open(self.persist_path, encoding="utf-8", errors="replace") as f:
+                lines = [ln for ln in f if ln.strip()]
+            keep = lines[-self.max_entries:] if self.max_entries else lines
+            tmp = self.persist_path.with_suffix(".tmp")
+            # reescritura atómica (temp + os.replace); normalizar \n final.
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.writelines(ln if ln.endswith("\n") else ln + "\n" for ln in keep)
+            os.replace(tmp, self.persist_path)
         except Exception:
             pass
 

@@ -23,6 +23,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 REPO_ROOT = Path(__file__).parent.parent
+# P1.4: legacy constant kept for compat, but smokes must NOT touch the real
+# data dir (shared server.log/audit.json across all live servers + pytest
+# churn). Fixtures below build an isolated HOME per test instead.
 DATA_DIR = Path.home() / ".personal-mcp" / "data"
 
 # How long to wait for a line on stdout before declaring the server dead
@@ -120,9 +123,57 @@ class MCPClient:
 # Fixtures
 # ===================================================================
 
-def _start_server():
-    """Start the server subprocess, handshake, return (MCPClient, Popen)."""
+def _start_server(home: Path | None = None):
+    """Start the server subprocess, handshake, return (MCPClient, Popen).
+
+    P1.4: when `home` is given, the child gets an isolated HOME/USERPROFILE
+    so its data_dir (Path.home()/".personal-mcp"/"data", see
+    server.create_app) is a temp dir — never the real user data dir.
+    """
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    if home is not None:
+        home = Path(home)
+        data = home / ".personal-mcp" / "data"
+        data.mkdir(parents=True, exist_ok=True)
+        # El tmp de pytest vive bajo AppData/Temp, que el deny default
+        # (**/AppData/**) bloquearía incluso dentro del data_dir aislado
+        # (el deny se evalúa antes que el auto-allow de data_dir). Pre-escribir
+        # un config mínimo sin ese patrón para el HOME aislado.
+        cfg_path = home / ".personal-mcp" / "config.json"
+        if not cfg_path.exists():
+            cfg_path.write_text(
+                json.dumps({
+                    "security": {
+                        "paths_allow": [str(home)],
+                        "paths_deny": ["**/node_modules/**", "**/.git/**"],
+                        "paths_deny_exceptions": [],
+                        "paths_deny_exception_extensions": [".dll", ".exe", ".pdb"],
+                        "commands": {
+                            "allow_prefix": ["git", "npm", "python", "ls", "pytest", "echo"],
+                            "readonly_prefix": ["git status", "ls", "echo", "cat"],
+                            "deny": [],
+                            "require_flag_approval": [],
+                            "approval_required_prefix": [],
+                        },
+                        "rate_limit_commands_per_minute": 0,
+                        "rate_limit_files_per_operation": 10000,
+                        "secret_scanning_enabled": False,
+                    },
+                    "shell": {"enabled": True, "default_shell": "powershell" if os.name == "nt" else "bash",
+                              "shell_map": {}, "session_timeout_seconds": 60,
+                              "command_timeout_seconds": 30, "max_timeout_seconds": 60,
+                              "max_sessions": 10, "max_spawns": 10},
+                    "ssh": {"enabled": False, "remote_allow_prefix": []},
+                    "log": {"level": "INFO", "max_bytes": 1048576, "backup_count": 1,
+                            "mcp_log_max_lines": 1000, "mcp_log_max_bytes": 2097152},
+                    "journal": {"enabled": False, "path": str(data / "journal")},
+                    "audit_max_entries": 100,
+                    "data_dir": str(data),
+                }, indent=2),
+                encoding="utf-8",
+            )
+        env["HOME"] = str(home)
+        env["USERPROFILE"] = str(home)  # Path.home() on Windows
     proc = subprocess.Popen(
         [sys.executable, "-m", "src.server"],
         stdin=subprocess.PIPE,
@@ -168,13 +219,23 @@ def _start_server():
 
 
 @pytest.fixture(scope="function")
-def mcp_server():
+def smoke_home(tmp_path):
+    """Isolated HOME for one smoke server (P1.4: no tocar el data_dir real)."""
+    home = tmp_path / "fakehome"
+    (home / ".personal-mcp" / "data").mkdir(parents=True, exist_ok=True)
+    return home
+
+
+@pytest.fixture(scope="function")
+def mcp_server(smoke_home):
     """Spawn a fresh MCP server per test function.
 
     Function-scoped so a hanging tool (Bug #1 / Bug #3) only kills its own
     test and a fresh server starts for the next one.  ~2 s overhead per test.
+    P1.4: servidor con HOME aislado (smoke_home), no contamina server.log
+    ni audit.json reales.
     """
-    client, proc = _start_server()
+    client, proc = _start_server(smoke_home)
     try:
         yield client
     finally:
@@ -188,13 +249,15 @@ def mcp_server():
 
 
 @pytest.fixture(scope="function")
-def smoke_dir():
-    """Create a temporary directory under data_dir for read-only file tests.
+def smoke_dir(smoke_home):
+    """Create a temporary directory under the isolated data_dir.
 
     data_dir is auto-allowed by the server, so no permission grants needed.
+    P1.4: bajo smoke_home (HOME aislado del servidor), nunca DATA_DIR real.
     """
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = Path(tempfile.mkdtemp(dir=str(DATA_DIR), prefix=".smoke_"))
+    data_dir = smoke_home / ".personal-mcp" / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(dir=str(data_dir), prefix=".smoke_"))
     (tmp / "hello.txt").write_text("Hello, smoke test!")
     (tmp / "sub").mkdir()
     (tmp / "sub" / "nested.txt").write_text("nested content")
@@ -480,9 +543,9 @@ class TestPermissionRequired:
         text = _extract_text(result)
         assert "Access denied" in text
 
-    def test_fs_read_inside_data_dir_no_grant_succeeds(self, mcp_server):
+    def test_fs_read_inside_data_dir_no_grant_succeeds(self, mcp_server, smoke_home):
         """Read inside data_dir works without grant."""
-        target = str(Path.home() / ".personal-mcp" / "data" / ".smoke_no_access.txt")
+        target = str(smoke_home / ".personal-mcp" / "data" / ".smoke_no_access.txt")
         Path(target).parent.mkdir(parents=True, exist_ok=True)
         Path(target).write_text("no grant test")
         try:

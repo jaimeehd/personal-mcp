@@ -10,13 +10,24 @@ jobs:
   test:
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.11", "3.12"]
         include:
-          # Test latest Python on both OS
+          # Test latest Python on every supported OS
           - os: ubuntu-latest
             python-version: "3.13"
           - os: windows-latest
+            python-version: "3.13"
+          - os: macos-latest
+            python-version: "3.13"
+        exclude:
+          # Skip the 3.13 Python on every OS below; the include section
+          # covers it on each one (avoids running the same combo twice).
+          - os: ubuntu-latest
+            python-version: "3.13"
+          - os: windows-latest
+            python-version: "3.13"
+          - os: macos-latest
             python-version: "3.13"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -57,7 +68,7 @@ jobs:
           python-version: "3.11"
       - name: Install linting tools
         run: |
-          pip install ruff
+          pip install "ruff>=0.9.0"
       - name: Run ruff
         run: |
           ruff check src/ tests/

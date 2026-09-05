@@ -112,6 +112,26 @@ def test_script_readonly_allows_comment_and_blank_lines():
     assert ok is True
 
 
+# --- P3.1: readonly match por palabras, no startswith crudo ---
+
+def test_script_readonly_rejects_prefix_impersonation():
+    policy = CommandPolicy()
+    ok, _ = policy.is_script_readonly("typeperf \\")
+    assert ok is False
+    ok, _ = policy.is_script_readonly("docker psx")
+    assert ok is False
+    ok, _ = policy.is_script_readonly("echox hi")
+    assert ok is False
+
+
+def test_script_readonly_allows_prefix_with_args():
+    policy = CommandPolicy()
+    ok, _ = policy.is_script_readonly("type C:\\x.txt")
+    assert ok is True
+    ok, _ = policy.is_script_readonly("git status --short")
+    assert ok is True
+
+
 # --- A-6 (auditoría 2026-08-11): AppData deny default must be recursive ---
 
 def test_default_paths_deny_appdata_wildcard():

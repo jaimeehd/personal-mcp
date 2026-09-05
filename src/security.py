@@ -40,6 +40,50 @@ class RateLimitError(Exception):
     pass
 
 
+def format_deny_suffix(denied_counter) -> str:
+    """Build the '[skipped N denied file(s) ...]' suffix (P0.1/F4).
+
+    denied_counter: dict/Counter {pattern: count}. Returns "" when empty,
+    otherwise a single line with total + per-pattern breakdown, no paths
+    (conteo por patrón, sin rutas = sin oráculo de existencia).
+    """
+    try:
+        total = sum(denied_counter.values())
+    except Exception:
+        return ""
+    if not total:
+        return ""
+    try:
+        parts = ", ".join(
+            f"{pat}×{n}" for pat, n in sorted(
+                denied_counter.items(), key=lambda kv: -kv[1]
+            )
+        )
+    except Exception:
+        parts = ""
+    return f"\n[skipped {total} denied file(s) by paths_deny: {parts}]"
+
+
+def is_denied_entry(security, path, operation: str = "read") -> str | None:
+    """Thin wrapper so sync walks don't crash when security is None (tests)."""
+    if security is None:
+        return None
+    try:
+        return security.is_denied_fast(path, operation)
+    except Exception:
+        return None
+
+
+def is_denied_entry_dir(security, path) -> str | None:
+    """Thin wrapper for is_denied_fast_dir (None-tolerant, M2 v1.4.85)."""
+    if security is None:
+        return None
+    try:
+        return security.is_denied_fast_dir(path)
+    except Exception:
+        return None
+
+
 class SecurityValidator:
     def __init__(self, config: AppConfig):
         self.config = config
@@ -112,6 +156,58 @@ class SecurityValidator:
             if fnmatch.fnmatch(candidate, normalized):
                 return True
         return False
+
+    def is_denied_fast(self, candidate: str | Path, operation: str = "read") -> str | None:
+        """Fast per-file deny check for recursive walks (P0.1).
+
+        Unlike resolve_and_validate(), this does NO resolve(), NO realpath(),
+        NO allowlist check and NO grant consumption — only the paths_deny
+        match + read-only exception. Cheap enough to call per file inside
+        os.walk loops (fnmatch only). Returns the matched deny pattern or
+        None if allowed (or exception applies).
+        """
+        p = candidate if isinstance(candidate, Path) else Path(candidate)
+        denied = self._matched_deny_pattern(p)
+        if not denied:
+            return None
+        if self._deny_exception_applies(p, operation):
+            return None
+        return denied
+
+    def is_denied_fast_dir(self, candidate: str | Path) -> str | None:
+        """Like is_denied_fast but also matches a DIRECTORY by the "core" of a
+        deny pattern (M2, v1.4.85).
+
+        fnmatch has no real recursive `**`, so `**/node_modules/**` matches the
+        dir's CONTENTS but never the dir itself (no trailing slash) — walks
+        descended into node_modules/.venv/.git and filtered each file, wasting
+        I/O. A dir whose bare name matches a pattern's core (pattern with a
+        leading `**/` and trailing `/**` stripped, e.g. -> "node_modules") is
+        pruned wholesale and counted once.
+
+        Respects the read-only deny exception (`_deny_exception_applies`): a
+        `bin` dir under a configured exception (e.g. MiProyecto build output)
+        is NOT pruned — its contents keep being filtered per-file with the
+        exception applied.
+        """
+        p = candidate if isinstance(candidate, Path) else Path(candidate)
+        if not p.is_dir():
+            return None
+        direct = self.is_denied_fast(p, "read")
+        if direct:
+            return direct
+        if self._deny_exception_applies(p, "read"):
+            return None
+        name = p.name
+        for pattern in self.config.security.paths_deny:
+            core = pattern.replace("\\", "/").strip()
+            core = core.removeprefix("**/")
+            core = core.removesuffix("/**")
+            if not core or "/" in core:
+                continue
+            if fnmatch.fnmatch(name, core):
+                return pattern
+        return None
 
     def resolve_and_validate(self, raw_path: str, operation: str = "read",
                              deny_operation: str | None = None) -> Path:

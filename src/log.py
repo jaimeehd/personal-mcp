@@ -1,5 +1,6 @@
 import logging
 import logging.handlers
+import re
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -17,6 +18,18 @@ LOW_MEMORY_THRESHOLD_PCT = 25.0
 
 # Lista de claves que siempre deben ser enmascaradas
 SENSITIVE_KEYS = {"password", "token", "secret", "key", "api_key", "auth", "cookie", "bearer"}
+
+
+def _key_has_sensitive_token(key: str) -> bool:
+    """True if `key` contains a sensitive word as a TOKEN, not as a substring.
+
+    F6 (v1.4.84): the previous substring match redacted false positives like
+    `monkey_id` (contains "key"). Tokenize the key name by separators AND camel
+    humps, then check exact tokens: "db_password"→redacted, "apiKey"→redacted
+    (token "key"), "monkey_id"→not ("monkey","id"), "author"→not.
+    """
+    parts = re.split(r"(?<=[a-z0-9])(?=[A-Z])|[^a-zA-Z0-9]+", key)
+    return any(p.lower() in SENSITIVE_KEYS for p in parts)
 
 # Mismo tope que audit.py::_AUDIT_SCAN_CHAR_CAP -- acota el costo del escaneo
 # de contenido en un valor de string grande, sin garantizar cobertura mas
@@ -49,7 +62,10 @@ def scrub_sensitive_data(data: Any) -> Any:
     if isinstance(data, dict):
         result = {}
         for k, v in data.items():
-            if k.lower() in SENSITIVE_KEYS:
+            # P3.2/F6: redactar por token en el nombre de clave (substring
+            # falso-positivo "monkey_id"; token exacto "apiKey"/"db_password").
+            kl = str(k)
+            if _key_has_sensitive_token(kl):
                 result[k] = "***"
             elif isinstance(v, str) and v:
                 findings = scan_text(v[:_LOG_SCAN_CHAR_CAP])

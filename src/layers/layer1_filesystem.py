@@ -18,13 +18,59 @@ from mcp.types import ToolAnnotations
 
 from src.log import get_logger, timed
 from src.secretscanner import format_findings, scan_text
-from src.security import PathNotAllowedError, SecurityValidator
+from src.security import (
+    PathNotAllowedError,
+    SecurityValidator,
+    format_deny_suffix,
+    is_denied_entry,
+    is_denied_entry_dir,
+)
 
 logger = get_logger("layer1_filesystem")
 
+# F4 (v1.4.84): helpers compartidos viven en src/security.py para que Layer 4
+# (project_find) use los mismos sin duplicar. Alias delgados para compat de
+# llamadas internas existentes.
+_deny_suffix = format_deny_suffix
+_is_denied = is_denied_entry
+
+
+def _ensure_parent_dir_sync(rpath: Path) -> str | None:
+    """mkdir parents; None on success, an 'Error: ...' string on failure."""
+    try:
+        rpath.parent.mkdir(parents=True, exist_ok=True)
+        return None
+    except OSError as e:
+        return f"Error: cannot create directory {rpath.parent}: {e}"
+
+
+def _write_text_sync(rpath: Path, content: str, encoding: str = "utf-8") -> str | None:
+    """Write content; None on success, an 'Error: ...' string on failure.
+
+    O2 (v1.4.86): un OSError/PermissionError de escritura debe ser un resultado
+    limpio para el agente, no una excepción cruda que llega como error JSON-RPC
+    y que además pierde el grant single ya consumido por el wrapper. En Windows
+    un archivo con el atributo read-only falla SIEMPRE — se sugiere attrib -r.
+    """
+    try:
+        rpath.write_text(content, encoding=encoding)
+        return None
+    except PermissionError:
+        hint = ""
+        if os.name == "nt":
+            hint = (
+                " — el archivo parece tener el atributo de solo-lectura; "
+                f"quitarlo con: attrib -r \"{rpath}\""
+            )
+        return f"Error: cannot write {rpath}: Permission denied.{hint}"
+    except OSError as e:
+        return f"Error: cannot write {rpath}: {e}"
+
+
 async def fs_read_impl(path: str, security: SecurityValidator, encoding: str = "utf-8",
                        max_size_mb: int = 0,
-                       head: int | None = None, tail: int | None = None) -> str:
+                       head: int | None = None, tail: int | None = None,
+                       include_scan: bool = True) -> str:
     rpath = security.resolve_and_validate(path)
     exists = await asyncio.to_thread(rpath.is_file)
     if not exists:
@@ -45,11 +91,19 @@ async def fs_read_impl(path: str, security: SecurityValidator, encoding: str = "
         elif tail is not None:
             lines = content.splitlines()
             content = "\n".join(lines[-tail:])
-        if security.config.security.secret_scanning_enabled:
-            findings = scan_text(content)
+        if include_scan and security.config.security.secret_scanning_enabled:
+            # O1 (v1.4.85): el scan corre FUERA del event loop (scan_text es
+            # síncrono y pesa ~850ms en un archivo de 4MB) y acotado a los
+            # primeros 1MB (mismo trade-off que audit/log con su cap de 100k).
+            from src.secretscanner import SCAN_MAX_CHARS
+            truncated = len(content) > SCAN_MAX_CHARS
+            findings = await asyncio.to_thread(scan_text, content, None, SCAN_MAX_CHARS)
             if findings:
                 content += format_findings(findings)
                 logger.warning("SECRET_SCAN findings=%d path=%s", len(findings), path)
+            elif truncated:
+                content += ("\n[secret scan limited to the first 1MB of file "
+                            "content — file is larger]")
         return content
     except UnicodeDecodeError:
         h = hashlib.sha256()
@@ -65,14 +119,22 @@ async def fs_read_impl(path: str, security: SecurityValidator, encoding: str = "
 async def fs_write_impl(path: str, content: str, security: SecurityValidator, encoding: str = "utf-8",
                         max_size_mb: int = 0) -> str:
     rpath = security.resolve_and_validate(path)
-    size_bytes = len(content.encode(encoding))
+    try:
+        size_bytes = len(content.encode(encoding))
+    except (UnicodeEncodeError, LookupError) as e:
+        # encoding inválido o contenido no encodable: error limpio, no excepción.
+        return f"Error: cannot encode content with '{encoding}': {e}"
     if max_size_mb and size_bytes > max_size_mb * 1024 * 1024:
         return f"Error: content too large ({size_bytes / 1024 / 1024:.1f}MB). Max: {max_size_mb}MB"
     logger.info("fs_write path=%s size=%d", str(rpath), size_bytes)
     with timed("mkdir", path=str(rpath.parent)):
-        await asyncio.to_thread(rpath.parent.mkdir, parents=True, exist_ok=True)
+        mkdir_err = await asyncio.to_thread(_ensure_parent_dir_sync, rpath)
+    if mkdir_err:
+        return mkdir_err
     with timed("write_text", path=str(rpath), size=size_bytes):
-        await asyncio.to_thread(rpath.write_text, content, encoding=encoding)
+        write_err = await asyncio.to_thread(_write_text_sync, rpath, content, encoding)
+    if write_err:
+        return write_err
     return f"Written {len(content)} chars ({size_bytes:,} bytes) to {rpath}"
 
 
@@ -83,25 +145,51 @@ async def fs_edit_impl(path: str, old_string: str, new_string: str, security: Se
     # rather than raising). Report the real problem instead.
     if not await asyncio.to_thread(rpath.is_file):
         return f"Error: not a file or does not exist: {rpath}"
-    content = await fs_read_impl(path, security)
+    # O1 (v1.4.85): leer SIN el footer de security scan — antes fs_read_impl
+    # anexaba "--- Security Scan ---" al contenido y fs_edit lo escribía de
+    # vuelta al archivo (corrupción). include_scan=False = lectura cruda.
+    content = await fs_read_impl(path, security, include_scan=False)
     if old_string not in content:
         return f"Error: old_string not found in {path}"
     new_content = content.replace(old_string, new_string, 1)
-    await fs_write_impl(path, new_content, security)
+    # O2 (v1.4.86): fs_write_impl ahora devuelve 'Error: ...' en vez de lanzar
+    # (archivo read-only/ACL/bloqueado) — propagar ese error en lugar de
+    # reportar "Applied edit" falso (antes se descartaba el return).
+    write_result = await fs_write_impl(path, new_content, security)
+    if write_result.startswith("Error:"):
+        return write_result
     diff = await _diff_or_timeout_note(content, new_content)
     return f"Applied edit. Diff:\n{diff}"
 
 
 def _fs_list_sync(rpath: Path, pattern: str | None, max_results: int | None,
-                  recursive: bool) -> list[dict]:
+                  recursive: bool, security=None) -> tuple[list[dict], dict]:
+    from collections import Counter
+    denied_counter: Counter[str] = Counter()
     entries = []
     if recursive:
-        for root, dirs, files in os.walk(rpath):
+        for root, dirs, files in os.walk(rpath, followlinks=False):
+            # P0.1: podar dirs denied + no seguir symlinks
+            dirs[:] = [d for d in dirs if not (Path(root) / d).is_symlink()]
+            pruned = []
+            for d in dirs:
+                dp = _is_denied(security, Path(root) / d, "read")
+                if dp:
+                    denied_counter[dp] += 1
+                else:
+                    pruned.append(d)
+            dirs[:] = pruned
             root_rel = Path(root).relative_to(rpath)
             for name in sorted(dirs + files):
                 if pattern and not fnmatch.fnmatch(name, pattern):
                     continue
                 full = Path(root) / name
+                if full.is_symlink():
+                    continue
+                deny_pat = _is_denied(security, full, "read")
+                if deny_pat:
+                    denied_counter[deny_pat] += 1
+                    continue
                 is_dir = name in dirs
                 info = full.stat()
                 rel = str(root_rel / name) if str(root_rel) != "." else name
@@ -114,15 +202,22 @@ def _fs_list_sync(rpath: Path, pattern: str | None, max_results: int | None,
                     ).isoformat(),
                 })
                 if max_results and len(entries) >= max_results:
-                    return entries
+                    return entries, denied_counter
     else:
         with os.scandir(rpath) as it:
             scan_entries = sorted(it, key=lambda e: e.name)
             for scan_entry in scan_entries:
                 if pattern and not fnmatch.fnmatch(scan_entry.name, pattern):
                     continue
+                deny_pat = _is_denied(security, Path(scan_entry.path), "read")
+                if deny_pat:
+                    denied_counter[deny_pat] += 1
+                    continue
                 is_dir = scan_entry.is_dir()
-                info = scan_entry.stat()
+                try:
+                    info = scan_entry.stat()
+                except (OSError, PermissionError):
+                    continue
                 entries.append({
                     "name": scan_entry.name,
                     "type": "dir" if is_dir else "file",
@@ -132,8 +227,8 @@ def _fs_list_sync(rpath: Path, pattern: str | None, max_results: int | None,
                     ).isoformat(),
                 })
                 if max_results and len(entries) >= max_results:
-                    return entries
-    return entries
+                    return entries, denied_counter
+    return entries, denied_counter
 
 
 async def fs_list_impl(path: str, security: SecurityValidator, pattern: str | None = None,
@@ -143,8 +238,9 @@ async def fs_list_impl(path: str, security: SecurityValidator, pattern: str | No
         return f"Error: not a directory: {rpath}"
     # M-F3 (auditoría 2026-08-11): os.walk/scandir + stat per entry was blocking I/O
     # on the event loop; move the whole walk off to a thread.
+    # P0.1: filtro deny por archivo + sufijo de conteo.
     try:
-        entries = await asyncio.to_thread(_fs_list_sync, rpath, pattern, max_results, recursive)
+        entries, denied_counter = await asyncio.to_thread(_fs_list_sync, rpath, pattern, max_results, recursive, security)
     except PermissionError as e:
         return f"Permission denied: {e}"
     lines = []
@@ -152,10 +248,15 @@ async def fs_list_impl(path: str, security: SecurityValidator, pattern: str | No
         tag = "dir" if e["type"] == "dir" else "file"
         size_str = f"{e['size']:,}B" if e["size"] < 1024 else f"{e['size']/1024:.1f}KB"
         lines.append(f"{tag:4s} {e['name']:40s} {size_str:10s} {e['modified'][:19]}")
-    return "\n".join(lines) if lines else "(empty directory)"
+    base = "\n".join(lines) if lines else "(empty directory)"
+    return base + _deny_suffix(denied_counter)
 
 
-def _fs_tree_sync(rpath: Path, max_depth: int, exclude_patterns: list[str] | None) -> str:
+def _fs_tree_sync(rpath: Path, max_depth: int, exclude_patterns: list[str] | None,
+                  security=None) -> str:
+    from collections import Counter
+    denied_counter: Counter[str] = Counter()
+
     def _should_exclude(name: str) -> bool:
         if not exclude_patterns:
             return False
@@ -165,11 +266,24 @@ def _fs_tree_sync(rpath: Path, max_depth: int, exclude_patterns: list[str] | Non
         if depth > max_depth:
             return [f"{prefix}└── ..."]
         lines = []
-        entries = sorted(dir_path.iterdir())
-        for i, entry in enumerate(entries):
-            if _should_exclude(entry.name):
+        try:
+            entries = sorted(dir_path.iterdir())
+        except (OSError, PermissionError):
+            return lines
+        # P0.1: filtrar denied antes de numerar (evita conectores rotos)
+        visible = []
+        for e in entries:
+            if _should_exclude(e.name):
                 continue
-            is_last = i == len(entries) - 1
+            if e.is_symlink():
+                continue
+            dp = _is_denied(security, e, "read")
+            if dp:
+                denied_counter[dp] += 1
+                continue
+            visible.append(e)
+        for i, entry in enumerate(visible):
+            is_last = i == len(visible) - 1
             connector = "└── " if is_last else "├── "
             lines.append(f"{prefix}{connector}{entry.name}/" if entry.is_dir() else f"{prefix}{connector}{entry.name}")
             if entry.is_dir():
@@ -179,7 +293,7 @@ def _fs_tree_sync(rpath: Path, max_depth: int, exclude_patterns: list[str] | Non
 
     result = [f"{rpath.name}/"]
     result.extend(_tree(rpath))
-    return "\n".join(result)
+    return "\n".join(result) + _deny_suffix(denied_counter)
 
 
 async def fs_tree_impl(path: str, security: SecurityValidator, max_depth: int = 3,
@@ -189,7 +303,8 @@ async def fs_tree_impl(path: str, security: SecurityValidator, max_depth: int = 
         return f"Error: not a directory: {rpath}"
     # M-F3 (auditoría 2026-08-11): recursive iterdir() was blocking I/O on the
     # event loop; move the whole traversal off to a thread.
-    return await asyncio.to_thread(_fs_tree_sync, rpath, max_depth, exclude_patterns)
+    # P0.1: filtro deny por archivo.
+    return await asyncio.to_thread(_fs_tree_sync, rpath, max_depth, exclude_patterns, security)
 
 
 # ReDoS mitigation: a single catastrophic regex.search() call cannot be interrupted
@@ -241,8 +356,8 @@ async def _diff_or_timeout_note(content_from: str, content_to: str,
                 f"completed successfully; only this diff preview is unavailable.]")
 
 
-def _walk_files_no_symlinks(root: Path):
-    """Yield regular files under root without following symlinks/junctions.
+def _walk_files_no_symlinks(root: Path, include_dirs: bool = False):
+    """Yield entries under root without following symlinks/junctions.
 
     A-1 (auditoría 2026-08-11): `Path.rglob()` follows intermediate symlinks, so a
     junction placed inside a `paths_allow` directory could reach content outside it
@@ -250,9 +365,17 @@ def _walk_files_no_symlinks(root: Path):
     paths_deny/paths_allow checks. `os.walk(followlinks=False)` does not recurse
     into symlinked directories; the extra `is_symlink()` filter covers symlinked
     files, which os.walk still lists in `filenames` regardless of `followlinks`.
+
+    include_dirs (F1, v1.4.84): also yield directories (already pruned of
+    symlinks via dirnames[:]) so callers like fs_find can match both files and
+    folders, matching the pre-P0.1 `rglob` behavior. Each dir is yielded once,
+    at the level where os.walk visits it.
     """
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         dirnames[:] = [d for d in dirnames if not (Path(dirpath) / d).is_symlink()]
+        if include_dirs:
+            for d in dirnames:
+                yield Path(dirpath) / d
         for name in filenames:
             filepath = Path(dirpath) / name
             if filepath.is_symlink():
@@ -260,11 +383,55 @@ def _walk_files_no_symlinks(root: Path):
             yield filepath
 
 
+def _walk_files_prune_denied(root: Path, security, denied_counter, include_dirs: bool = False):
+    """Like _walk_files_no_symlinks but PRUNES paths_deny directories (M2).
+
+    `**/node_modules/**` matches the dir's contents but never the dir itself
+    (fnmatch has no real `**`), so plain walks descend into node_modules/.venv/
+    .git and filter each file — wasted I/O on huge trees. Here each directory
+    is checked with SecurityValidator.is_denied_fast_dir() (direct match OR
+    pattern-core match on the bare name) and pruned wholesale from dirnames
+    before descending, counting 1 per pruned dir in denied_counter. Files are
+    still filtered per-entry via is_denied_entry.
+
+    The read-only deny exception is respected: a `bin` dir under a configured
+    paths_deny_exception is NOT pruned (its contents keep being filtered, and
+    e.g. .dll build artifacts stay readable).
+    """
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        pruned = []
+        for d in dirnames:
+            dp = Path(dirpath) / d
+            if dp.is_symlink():
+                continue
+            deny_pat = is_denied_entry_dir(security, dp)
+            if deny_pat:
+                denied_counter[deny_pat] += 1
+                continue
+            pruned.append(d)
+        dirnames[:] = pruned
+        if include_dirs:
+            for d in pruned:
+                yield Path(dirpath) / d
+        for name in filenames:
+            f = Path(dirpath) / name
+            if f.is_symlink():
+                continue
+            deny_pat = _is_denied(security, f, "read")
+            if deny_pat:
+                denied_counter[deny_pat] += 1
+                continue
+            yield f
+
+
 def _fs_search_sync(rpath: Path, regex: "re.Pattern", glob_pattern: str | None,
-                     max_results: int, exclude_patterns: list[str] | None) -> str:
+                     max_results: int, exclude_patterns: list[str] | None,
+                     security=None) -> str:
+    from collections import Counter
     matches = []
+    denied_counter: Counter[str] = Counter()
     try:
-        for filepath in _walk_files_no_symlinks(rpath):
+        for filepath in _walk_files_prune_denied(rpath, security, denied_counter):
             if glob_pattern and glob_pattern != "*":
                 rel_glob = filepath.relative_to(rpath).as_posix()
                 if not fnmatch.fnmatch(rel_glob, glob_pattern.replace("\\", "/")):
@@ -287,7 +454,8 @@ def _fs_search_sync(rpath: Path, regex: "re.Pattern", glob_pattern: str | None,
                 continue
     except PermissionError as e:
         return f"Permission denied: {e}"
-    return "\n".join(matches) if matches else "No matches found"
+    base = "\n".join(matches) if matches else "No matches found"
+    return base + _deny_suffix(denied_counter)
 
 
 async def fs_search_impl(path: str, pattern: str, security: SecurityValidator,
@@ -303,7 +471,7 @@ async def fs_search_impl(path: str, pattern: str, security: SecurityValidator,
         return f"Error: invalid regex pattern: {e}"
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(_fs_search_sync, rpath, regex, glob_pattern, max_results, exclude_patterns),
+            asyncio.to_thread(_fs_search_sync, rpath, regex, glob_pattern, max_results, exclude_patterns, security),
             timeout=_SEARCH_TIMEOUT_SECONDS,
         )
     except TimeoutError:
@@ -314,10 +482,19 @@ async def fs_search_impl(path: str, pattern: str, security: SecurityValidator,
 
 def _fs_find_sync(rpath: Path, name: str | None, min_size: int | None,
                   max_size: int | None, days_old: int | None,
-                  max_results: int | None) -> str:
+                  max_results: int | None, security=None) -> str:
+    from collections import Counter
     results = []
+    denied_counter: Counter[str] = Counter()
     now = time.time()
-    for entry in rpath.rglob(name or "*"):
+    glob_name = name or "*"
+    for entry in _walk_files_no_symlinks(rpath, include_dirs=True):
+        if not fnmatch.fnmatch(entry.name, glob_name):
+            continue
+        deny_pat = _is_denied(security, entry, "read")
+        if deny_pat:
+            denied_counter[deny_pat] += 1
+            continue
         if max_results and len(results) >= max_results:
             break
         try:
@@ -333,7 +510,8 @@ def _fs_find_sync(rpath: Path, name: str | None, min_size: int | None,
             results.append(f"{entry} ({stat.st_size:,}B, {datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M')})")
         except (PermissionError, OSError):
             continue
-    return "\n".join(results) if results else "No files found"
+    base = "\n".join(results) if results else "No files found"
+    return base + _deny_suffix(denied_counter)
 
 
 async def fs_find_impl(path: str, security: SecurityValidator, name: str | None = None,
@@ -345,8 +523,9 @@ async def fs_find_impl(path: str, security: SecurityValidator, name: str | None 
         return f"Error: not a directory: {rpath}"
     # M-F3 (auditoría 2026-08-11): rglob() traversal was blocking I/O on the event
     # loop; move the whole scan off to a thread.
+    # P0.1: _walk_files_no_symlinks (no sigue symlinks, fix A-1) + filtro deny por archivo.
     return await asyncio.to_thread(
-        _fs_find_sync, rpath, name, min_size, max_size, days_old, max_results,
+        _fs_find_sync, rpath, name, min_size, max_size, days_old, max_results, security,
     )
 
 
@@ -365,8 +544,13 @@ def _fs_info_sync(rpath: Path) -> str:
         # M-F11 (auditoría 2026-08-11): reading a huge file into memory for
         # sha256 was an OOM vector. Skip the hash for files above this threshold
         # (same reasoning as fs_read's large-file warning).
+        # P2: hash por chunks (antes read_bytes() de golpe hasta 100MB).
         if stat.st_size <= 100 * 1024 * 1024:
-            info["sha256"] = hashlib.sha256(rpath.read_bytes()).hexdigest()
+            h = hashlib.sha256()
+            with open(rpath, "rb") as f:
+                while chunk := f.read(65536):
+                    h.update(chunk)
+            info["sha256"] = h.hexdigest()
         else:
             info["sha256"] = "(skipped: file too large to hash)"
         info["extension"] = rpath.suffix
@@ -388,12 +572,12 @@ async def fs_diff_impl(path_a: str, path_b: str | None, security: SecurityValida
     # not a file..." string into the diff, fabricating a fake diff. Fail early.
     if not await asyncio.to_thread(rpath_a.is_file):
         return f"Error: not a file or does not exist: {rpath_a}"
-    content_a = await fs_read_impl(path_a, security)
+    content_a = await fs_read_impl(path_a, security, include_scan=False)
     if path_b:
         rpath_b = security.resolve_and_validate(path_b)
         if not await asyncio.to_thread(rpath_b.is_file):
             return f"Error: not a file or does not exist: {rpath_b}"
-        content_b = await fs_read_impl(path_b, security)
+        content_b = await fs_read_impl(path_b, security, include_scan=False)
     else:
         backup = Path(path_a).with_suffix(Path(path_a).suffix + ".bak")
         # M-F2: the backup is read through the same resolve_and_validate boundary
@@ -417,9 +601,20 @@ async def fs_batch_impl(path: str, operation: str, target: str, security: Securi
     if operation == "rename" and not pattern:
         return "Error: rename requires a non-empty pattern (the substring to replace)."
     if pattern:
-        files = [f for f in rpath.iterdir() if f.is_file() and f.match(pattern)]
+        files = [f for f in rpath.iterdir() if f.is_file() and not f.is_symlink() and f.match(pattern)]
     else:
-        files = [f for f in rpath.iterdir() if f.is_file()]
+        files = [f for f in rpath.iterdir() if f.is_file() and not f.is_symlink()]
+    # P0.1: omitir orígenes denied (no basta validar el dir base).
+    from collections import Counter
+    denied_counter: Counter[str] = Counter()
+    visible = []
+    for f in files:
+        dp = _is_denied(security, f, "read")
+        if dp:
+            denied_counter[dp] += 1
+            continue
+        visible.append(f)
+    files = visible
     security.validate_file_count(len(files))
     logger.info("fs_batch path=%s operation=%s files=%d dry_run=%s", path, operation, len(files), dry_run)
     target_path = Path(target)
@@ -447,24 +642,63 @@ async def fs_batch_impl(path: str, operation: str, target: str, security: Securi
                 results.append(f"{operation} {f.name} -> {dest.name}")
             except OSError as e:
                 results.append(f"Error {operation} {f.name}: {e}")
-    return "\n".join(results)
+    base = "\n".join(results) if results else "(no files)"
+    return base + _deny_suffix(denied_counter)
 
 
-def _fs_snapshot_sync(rpath: Path) -> tuple[dict, Path]:
-    snapshot = {}
-    for entry in sorted(rpath.rglob("*")):
-        try:
-            stat = entry.stat()
-            snapshot[str(entry.relative_to(rpath))] = {
-                "size": stat.st_size,
-                "modified": stat.st_mtime,
-            }
-        except (PermissionError, OSError):
-            continue
+def _fs_snapshot_sync(rpath: Path, security=None) -> tuple[dict, Path, dict]:
+    """Snapshot the tree as {relpath: {size, modified}} in a SINGLE os.walk.
+
+    F2 (v1.4.84): the previous two-pass version (files via
+    _walk_files_no_symlinks + dirs via a second os.walk) cost 2x I/O on large
+    trees and inflated the deny counter (a denied dir counted 1 plus every
+    denied file inside it counted N). One walk: prune denied dirs, snapshot
+    non-denied dirs (size 0) and files, all deny-checked per entry.
+    """
+    from collections import Counter
+    denied_counter: Counter[str] = Counter()
+    snapshot: dict[str, dict] = {}
+    for dirpath, dirnames, filenames in os.walk(rpath, followlinks=False):
+        current = Path(dirpath)
+        pruned = []
+        for d in dirnames:
+            dp = current / d
+            if dp.is_symlink():
+                continue
+            deny_pat = _is_denied(security, dp, "read")
+            if deny_pat:
+                denied_counter[deny_pat] += 1
+                continue
+            pruned.append(d)
+            try:
+                st = dp.stat()
+                snapshot[str(dp.relative_to(rpath))] = {
+                    "size": 0,
+                    "modified": st.st_mtime,
+                }
+            except (PermissionError, OSError):
+                continue
+        dirnames[:] = pruned
+        for name in filenames:
+            f = current / name
+            if f.is_symlink():
+                continue
+            deny_pat = _is_denied(security, f, "read")
+            if deny_pat:
+                denied_counter[deny_pat] += 1
+                continue
+            try:
+                st = f.stat()
+                snapshot[str(f.relative_to(rpath))] = {
+                    "size": st.st_size,
+                    "modified": st.st_mtime,
+                }
+            except (PermissionError, OSError):
+                continue
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     snapshot_path = rpath / f".snapshot_{ts}.json"
     snapshot_path.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False), encoding="utf-8")
-    return snapshot, snapshot_path
+    return snapshot, snapshot_path, denied_counter
 
 
 async def fs_snapshot_impl(path: str, security: SecurityValidator) -> str:
@@ -473,8 +707,9 @@ async def fs_snapshot_impl(path: str, security: SecurityValidator) -> str:
         return f"Error: not a directory: {rpath}"
     # M-F3 (auditoría 2026-08-11): rglob + stat per entry was blocking I/O on the
     # event loop; move the whole scan + write off to a thread.
-    snapshot, snapshot_path = await asyncio.to_thread(_fs_snapshot_sync, rpath)
-    return f"Snapshot saved: {snapshot_path} ({len(snapshot)} entries)"
+    # P0.1: walk sin symlinks + filtro deny por archivo.
+    snapshot, snapshot_path, denied_counter = await asyncio.to_thread(_fs_snapshot_sync, rpath, security)
+    return f"Snapshot saved: {snapshot_path} ({len(snapshot)} entries)" + _deny_suffix(denied_counter)
 
 
 async def fs_create_directory_impl(path: str, security: SecurityValidator) -> str:
@@ -660,7 +895,10 @@ def _write_batch_sync(writes: list[dict], security: SecurityValidator,
             rpath = security.resolve_and_validate(p)
             rpath.parent.mkdir(parents=True, exist_ok=True)
             size_bytes = len(content.encode(encoding))
-            rpath.write_text(content, encoding=encoding)
+            # O2 (v1.4.86): helper con hint de read-only en Windows.
+            write_err = _write_text_sync(rpath, content, encoding)
+            if write_err:
+                raise OSError(write_err)
             written += 1
             results.append(f"Written {len(content)} chars ({size_bytes:,} bytes) to {rpath}")
         except Exception as e:
@@ -708,7 +946,8 @@ def _dedupe_edits(edits: list[dict]) -> tuple[list[dict], list[str]]:
     return deduped, []
 
 
-async def fs_edit_batch_impl(edits: list[dict], security: SecurityValidator) -> str:
+async def fs_edit_batch_impl(edits: list[dict], security: SecurityValidator,
+                              grant_keys: dict[str, str] | None = None) -> str:
     """Unlike _delete_batch_sync/_write_batch_sync (whole loop off-thread in one
     asyncio.to_thread call), this loop stays in the async function: each
     iteration needs to await _diff_or_timeout_note() (itself async, wrapping
@@ -727,7 +966,19 @@ async def fs_edit_batch_impl(edits: list[dict], security: SecurityValidator) -> 
     reasoning as fs_delete_batch_impl/fs_write_batch_impl: the wrapper already
     consumed the batch "write" grant via validate_tool_paths_batch(), so
     resolve_and_validate() here uses the default operation="read".
+
+    grant_keys (2026-08-16): {path: key} from the wrapper's has_single_grant()
+    peek, taken *before* validate_tool_paths_batch() consumed anything -- None
+    for a path whose access came from a session/permanent grant, meaning
+    nothing was consumed for it and there is nothing to refund. Only refunded
+    on the two failure branches below where the file is provably untouched
+    (not found, old_string absent). The bare `except Exception` branch is
+    deliberately NOT refunded: write_text() may have already succeeded before
+    _diff_or_timeout_note() or something else downstream raised, so we cannot
+    tell from here whether the file was actually modified -- refunding on an
+    ambiguous failure risks fabricating access to a file that did change.
     """
+    grant_keys = grant_keys or {}
     results = []
     edited = 0
     for e in edits:
@@ -739,14 +990,26 @@ async def fs_edit_batch_impl(edits: list[dict], security: SecurityValidator) -> 
             if not await asyncio.to_thread(rpath.is_file):
                 logger.warning("fs_edit_batch FAIL path=%s error=not_found", p)
                 results.append(f"Error: not a file or does not exist: {rpath}")
+                if grant_keys.get(p):
+                    security.refund_single(p, grant_keys[p])
                 continue
             content = await asyncio.to_thread(rpath.read_text, encoding="utf-8")
             if old_s not in content:
                 logger.warning("fs_edit_batch FAIL path=%s error=old_string_not_found", p)
                 results.append(f"Error: old_string not found in {p}")
+                if grant_keys.get(p):
+                    security.refund_single(p, grant_keys[p])
                 continue
             new_content = content.replace(old_s, new_s, 1)
-            await asyncio.to_thread(rpath.write_text, new_content, encoding="utf-8")
+            # O2 (v1.4.86): escritura como string de error (no excepción);
+            # si falló la escritura, el archivo quedó intacto → reembolsar.
+            write_err = await asyncio.to_thread(_write_text_sync, rpath, new_content, "utf-8")
+            if write_err:
+                logger.warning("fs_edit_batch FAIL path=%s error=%s", p, write_err)
+                results.append(write_err)
+                if grant_keys.get(p):
+                    security.refund_single(p, grant_keys[p])
+                continue
             diff = await _diff_or_timeout_note(content, new_content)
             edited += 1
             results.append(f"Edited {rpath}:\n{diff}")
@@ -759,11 +1022,25 @@ async def fs_edit_batch_impl(edits: list[dict], security: SecurityValidator) -> 
 
 async def fs_read_multi_impl(paths: list[str], security: SecurityValidator,
                               encoding: str = "utf-8", max_size_mb: int = 0) -> str:
+    # P2: límite de archivos (reusa rate_limit_files_per_operation) + acumulado.
+    try:
+        security.validate_file_count(len(paths))
+    except ValueError as e:
+        return f"Error: {e}"
+    try:
+        max_total = int(security.config.security.max_read_multi_bytes)
+    except Exception:
+        max_total = 20 * 1024 * 1024
     results = []
+    total = 0
     for p in paths:
         try:
             content = await fs_read_impl(p, security, encoding, max_size_mb)
+            total += len(content.encode(encoding, errors="replace"))
             results.append(f"--- {p} ---\n{content}")
+            if total > max_total:
+                results.append(f"[truncated: cumulative limit {max_total:,} bytes exceeded]")
+                break
         except Exception as e:
             results.append(f"--- {p} ---\nError: {e}")
     return "\n\n".join(results)
@@ -782,9 +1059,19 @@ async def fs_list_with_sizes_impl(path: str, security: SecurityValidator,
     rpath = security.resolve_and_validate(path)
     if not rpath.is_dir():
         return f"Error: not a directory: {rpath}"
+    from collections import Counter
+    denied_counter: Counter[str] = Counter()
     entries = []
     with os.scandir(rpath) as it:
         for entry in it:
+            # F3 (v1.4.84): filtrar deny por entrada — un .env/id_rsa no debe
+            # revelar su nombre/tamaño vía este listado.
+            if entry.is_symlink():
+                continue
+            deny_pat = _is_denied(security, Path(entry.path), "read")
+            if deny_pat:
+                denied_counter[deny_pat] += 1
+                continue
             is_dir = entry.is_dir()
             info = entry.stat()
             entries.append({
@@ -810,7 +1097,8 @@ async def fs_list_with_sizes_impl(path: str, security: SecurityValidator,
             total_files += 1
         total_size += e["size"]
     summary = f"\n{'─' * 60}\n{total_files} files, {total_dirs} dirs, {total_size:,} bytes"
-    return "\n".join(lines) + summary if lines else "(empty directory)"
+    base = "\n".join(lines) + summary if lines else "(empty directory)"
+    return base + _deny_suffix(denied_counter)
 
 
 async def fs_read_media_impl(path: str, security: SecurityValidator) -> str:
@@ -821,11 +1109,25 @@ async def fs_read_media_impl(path: str, security: SecurityValidator) -> str:
     if not mime_type or not (mime_type.startswith(("image/", "audio/"))):
         return (f"Error: not a supported media file (only image/* and audio/*): "
                 f"{mime_type or 'unknown'}")
+    # P2: tope antes de leer+base64 (stat barato, evita OOM).
+    try:
+        max_media = int(security.config.security.max_media_bytes)
+    except Exception:
+        max_media = 20 * 1024 * 1024
+    try:
+        size = rpath.stat().st_size
+    except (OSError, PermissionError):
+        size = 0
+    if size > max_media:
+        return f"Error: media file too large ({size:,} bytes, max {max_media:,} bytes)"
     data = await asyncio.to_thread(rpath.read_bytes)
     findings = None
     if security.config.security.secret_scanning_enabled:
-        text_content = data.decode("utf-8", errors="replace")
-        findings = scan_text(text_content)
+        # O1 (v1.4.85): scan en thread + acotado a 1MB (el decode de un media
+        # de 20MB completo pesaba en el event loop).
+        from src.secretscanner import SCAN_MAX_CHARS
+        text_content = data.decode("utf-8", errors="replace")[:SCAN_MAX_CHARS]
+        findings = await asyncio.to_thread(scan_text, text_content)
         if findings:
             logger.warning("SECRET_SCAN findings=%d path=%s", len(findings), path)
     b64 = base64.b64encode(data).decode("ascii")
@@ -857,7 +1159,7 @@ def _normalize_extensions(extensions: list[str] | None) -> set[str] | None:
 def _find_duplicates_sync(rpath: Path, recursive: bool, extensions: set[str] | None,
                           exclude: list[str] | None = None,
                           min_size: int = 0,
-                          max_size: int | None = None) -> list[dict]:
+                          max_size: int | None = None, security=None) -> tuple[list[dict], dict]:
     """Two-phase exact-duplicate search. No default file-count or file-size
     cap (2026-07-31 design discussion): walking + stat() is cheap even over
     thousands of files (measured: 232 files in 240ms on this machine), so a
@@ -886,20 +1188,39 @@ def _find_duplicates_sync(rpath: Path, recursive: bool, extensions: set[str] | N
     hashed — the saving is real, not just cosmetic.
     """
     patterns = _normalize_exclude_patterns(exclude)
+    from collections import Counter
+    denied_counter: Counter[str] = Counter()
     size_groups: dict[int, list[Path]] = {}
-    for dirpath, dirnames, filenames in os.walk(rpath):
+    for dirpath, dirnames, filenames in os.walk(rpath, followlinks=False):
         current = Path(dirpath)
-        if patterns:
-            dirnames[:] = [
-                d for d in dirnames
-                if not _excluded_by_patterns(rpath, current, d, patterns)
-            ]
+        dirnames[:] = [d for d in dirnames if not (current / d).is_symlink()]
+        # P0.1/M2: podar dirs denied (directo + core-match de patrón, para que
+        # **/node_modules/** pode el dir node_modules en sí, no solo su contenido)
+        kept = []
+        for d in dirnames:
+            dp = current / d
+            if dp.is_symlink():
+                continue
+            dp_denied = _is_denied(security, dp, "read") or is_denied_entry_dir(security, dp)
+            if dp_denied:
+                denied_counter[dp_denied] += 1
+                continue
+            if patterns and _excluded_by_patterns(rpath, current, d, patterns):
+                continue
+            kept.append(d)
+        dirnames[:] = kept
         if not recursive:
             dirnames[:] = []
         for fname in filenames:
             if patterns and _excluded_by_patterns(rpath, current, fname, patterns):
                 continue
             f = current / fname
+            if f.is_symlink():
+                continue
+            dp = _is_denied(security, f, "read")
+            if dp:
+                denied_counter[dp] += 1
+                continue
             try:
                 if not f.is_file():
                     continue
@@ -948,7 +1269,7 @@ def _find_duplicates_sync(rpath: Path, recursive: bool, extensions: set[str] | N
             "files": [str(f) for f, _ in entries_sorted],
         })
     duplicates.sort(key=lambda d: -(d["size"] * (d["count"] - 1)))
-    return duplicates
+    return duplicates, denied_counter
 
 
 async def fs_find_duplicates_impl(path: str, security: SecurityValidator,
@@ -965,13 +1286,13 @@ async def fs_find_duplicates_impl(path: str, security: SecurityValidator,
     if max_size is not None and max_size < min_size:
         return f"Error: max_size ({max_size}) must be >= min_size ({min_size})"
     ext_set = _normalize_extensions(extensions)
-    duplicates = await asyncio.to_thread(
-        _find_duplicates_sync, rpath, recursive, ext_set, exclude, min_size, max_size
+    duplicates, denied_counter = await asyncio.to_thread(
+        _find_duplicates_sync, rpath, recursive, ext_set, exclude, min_size, max_size, security
     )
     logger.info("fs_find_duplicates path=%s recursive=%s groups=%d exclude=%s min_size=%d max_size=%s",
                 path, recursive, len(duplicates), exclude, min_size, max_size)
     if not duplicates:
-        return "No exact duplicates found"
+        return "No exact duplicates found" + _deny_suffix(denied_counter)
     total_wasted = sum(d["size"] * (d["count"] - 1) for d in duplicates)
     lines = [
         (f"{len(duplicates)} duplicate group(s) found. "
@@ -984,12 +1305,12 @@ async def fs_find_duplicates_impl(path: str, security: SecurityValidator,
         for f in d["files"][1:]:
             lines.append(f"    duplicate: {f}")
         lines.append("")
-    return "\n".join(lines).rstrip()
+    return "\n".join(lines).rstrip() + _deny_suffix(denied_counter)
 
 
 def _disk_usage_sync(base: Path, depth: int, exclude: list[str] | None = None,
                      min_size: int = 0,
-                     max_size: int | None = None) -> list[tuple[Path, int, int]]:
+                     max_size: int | None = None, security=None) -> tuple[list[tuple[Path, int, int]], dict]:
     """Single pass over the tree: attribute every file's size to its ancestor
     directory exactly `depth` levels under `base` (or to `base` itself if the
     file lives shallower than `depth`). One os.walk() over the whole tree
@@ -1030,15 +1351,32 @@ def _disk_usage_sync(base: Path, depth: int, exclude: list[str] | None = None,
     is truncated.
     """
     patterns = _normalize_exclude_patterns(exclude)
+    from collections import Counter
+    denied_counter: Counter[str] = Counter()
     buckets: dict[Path, tuple[int, int]] = {}
     base_depth = len(base.parts)
-    for dirpath, dirnames, filenames in os.walk(base):
+    for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
         current = Path(dirpath)
-        if patterns:
+        # P0.1/M2: no seguir symlinks + podar dirs denied (directo + core-match)
+        dirnames[:] = [d for d in dirnames if not (current / d).is_symlink()]
+        pruned = []
+        for d in dirnames:
+            dp = current / d
+            dp_denied = _is_denied(security, dp, "read") or is_denied_entry_dir(security, dp)
+            if dp_denied:
+                denied_counter[dp_denied] += 1
+            elif patterns and _excluded_by_patterns(base, current, d, patterns):
+                continue
+            else:
+                pruned.append(d)
+        # compat: cuando no hay security ni patterns, comportamiento idéntico
+        if patterns and security is None:
             dirnames[:] = [
-                d for d in dirnames
+                d for d in pruned
                 if not _excluded_by_patterns(base, current, d, patterns)
             ]
+        else:
+            dirnames[:] = pruned
         rel_depth = len(current.parts) - base_depth
         if rel_depth >= depth:
             ancestor = Path(*current.parts[:base_depth + depth])
@@ -1047,10 +1385,17 @@ def _disk_usage_sync(base: Path, depth: int, exclude: list[str] | None = None,
         total = 0
         count = 0
         for fname in filenames:
+            fpath = current / fname
+            if fpath.is_symlink():
+                continue
+            dp = _is_denied(security, fpath, "read")
+            if dp:
+                denied_counter[dp] += 1
+                continue
             if patterns and _excluded_by_patterns(base, current, fname, patterns):
                 continue
             try:
-                size = (current / fname).stat().st_size
+                size = fpath.stat().st_size
             except (OSError, PermissionError):
                 continue
             if size == 0:
@@ -1064,10 +1409,11 @@ def _disk_usage_sync(base: Path, depth: int, exclude: list[str] | None = None,
         if total:
             prev_total, prev_count = buckets.get(ancestor, (0, 0))
             buckets[ancestor] = (prev_total + total, prev_count + count)
-    return sorted(
+    ranked = sorted(
         ((p, s, c) for p, (s, c) in buckets.items()),
         key=lambda kv: -kv[1],
     )
+    return ranked, denied_counter
 
 
 def _normalize_exclude_patterns(exclude: list[str] | None) -> list[tuple[str, str]]:
@@ -1092,11 +1438,7 @@ def _normalize_exclude_patterns(exclude: list[str] | None) -> list[tuple[str, st
         pat = pat.strip().replace("\\", "/")
         if not pat:
             continue
-        core = pat
-        if core.startswith("**/"):
-            core = core[3:]
-        if core.endswith("/**"):
-            core = core[:-3]
+        core = pat.removeprefix("**/").removesuffix("/**")
         normalized.append((pat, core))
     return normalized
 
@@ -1136,8 +1478,8 @@ async def fs_disk_usage_impl(path: str, security: SecurityValidator,
         return f"Error: min_size must be >= 0, got {min_size}"
     if max_size is not None and max_size < min_size:
         return f"Error: max_size ({max_size}) must be >= min_size ({min_size})"
-    buckets = await asyncio.to_thread(
-        _disk_usage_sync, rpath, depth, exclude, min_size, max_size
+    buckets, denied_counter = await asyncio.to_thread(
+        _disk_usage_sync, rpath, depth, exclude, min_size, max_size, security
     )
     logger.info("fs_disk_usage path=%s depth=%d buckets=%d exclude=%s min_size=%d max_size=%s",
                 path, depth, len(buckets), exclude, min_size, max_size)
@@ -1163,10 +1505,12 @@ async def fs_disk_usage_impl(path: str, security: SecurityValidator,
             f"... y {remaining} carpeta(s) más, "
             f"{other_total:,} bytes ({other_total / 1024 / 1024:.1f} MB) en total"
         )
-    return "\n".join(lines)
+    return "\n".join(lines) + _deny_suffix(denied_counter)
 
 
-def _compress_sync(rpaths: list[Path], routput: Path) -> list[str]:
+def _compress_sync(rpaths: list[Path], routput: Path, security=None) -> tuple[list[str], dict]:
+    from collections import Counter
+    denied_counter: Counter[str] = Counter()
     added = []
     # M-F8 (auditoría 2026-08-11): when routput lives inside one of the paths
     # being compressed, the zip was written to disk first (ZipFile "w" mode) and
@@ -1178,16 +1522,20 @@ def _compress_sync(rpaths: list[Path], routput: Path) -> list[str]:
             if rpath.is_file():
                 if rpath.resolve() == routput_resolved:
                     continue
+                dp = _is_denied(security, rpath, "read")
+                if dp:
+                    denied_counter[dp] += 1
+                    continue
                 zf.write(rpath, arcname=rpath.name)
                 added.append(str(rpath))
             elif rpath.is_dir():
-                for f in _walk_files_no_symlinks(rpath):
+                for f in _walk_files_prune_denied(rpath, security, denied_counter):
                     if f.resolve() == routput_resolved:
                         continue
                     arcname = str(Path(rpath.name) / f.relative_to(rpath))
                     zf.write(f, arcname=arcname)
                     added.append(str(f))
-    return added
+    return added, denied_counter
 
 
 async def fs_compress_impl(paths: list[str], output_path: str, security: SecurityValidator) -> str:
@@ -1198,13 +1546,13 @@ async def fs_compress_impl(paths: list[str], output_path: str, security: Securit
             return f"Error: path does not exist: {rp}"
         rpaths.append(rp)
     routput = security.resolve_and_validate(output_path)
-    added = await asyncio.to_thread(_compress_sync, rpaths, routput)
+    added, denied_counter = await asyncio.to_thread(_compress_sync, rpaths, routput, security)
     logger.info("fs_compress output=%s files=%d", str(routput), len(added))
     size = routput.stat().st_size
-    return f"Created {routput} ({size:,} bytes, {len(added)} file(s))"
+    return f"Created {routput} ({size:,} bytes, {len(added)} file(s))" + _deny_suffix(denied_counter)
 
 
-def _safe_extract_sync(rzip: Path, routput: Path) -> tuple[list[str], list[str], list[str]]:
+def _safe_extract_sync(rzip: Path, routput: Path, security=None) -> tuple[list[str], list[str], list[str]]:
     """Extract a zip, verifying every member's resolved destination stays
     within routput BEFORE writing it (zip slip / CVE-2007-4559-style attack:
     a member named e.g. '../../../Windows/System32/evil.dll' or with an
@@ -1216,19 +1564,40 @@ def _safe_extract_sync(rzip: Path, routput: Path) -> tuple[list[str], list[str],
     Any member that fails this check is skipped, not silently renamed or
     partially applied.
 
+    P0.2: pre-chequeo zip-bomb por header (archivos, bytes, ratio) + corte
+    acumulado durante la escritura (el header puede mentir). Límites desde
+    SecurityConfig cuando security se provee; defaults P0.2 si no.
+
     Returns (extracted, skipped, failed): `skipped` are zip-slip rejections,
     `failed` are members that passed containment but hit an OSError while
     writing (permission, dest is a directory, disk full) — caught per member
     so one bad entry doesn't abort the whole extraction (M-F5, 2026-08-11).
+    Raises ValueError with "Error: ..." message when bomb limits trip
+    (el caller lo convierte en respuesta, sin escribir nada más).
     """
+    if security is not None:
+        cfg = security.config.security
+        max_files, max_bytes, max_ratio = cfg.max_extract_files, cfg.max_extract_bytes, cfg.max_extract_ratio
+    else:
+        max_files, max_bytes, max_ratio = 5000, 500 * 1024 * 1024, 100.0
     routput_resolved = routput.resolve()
     extracted = []
     skipped = []
     failed = []
     with zipfile.ZipFile(rzip, "r") as zf:
-        for info in zf.infolist():
-            if info.is_dir():
-                continue
+        infos = [i for i in zf.infolist() if not i.is_dir()]
+        if len(infos) > max_files:
+            raise ValueError(f"Error: zip has {len(infos)} files (max {max_files})")
+        total_c = sum(i.compress_size for i in infos)
+        total_u = sum(i.file_size for i in infos)
+        if total_u > max_bytes:
+            raise ValueError(f"Error: zip uncompressed size {total_u:,} bytes (max {max_bytes:,} bytes)")
+        if total_c > 0 and (total_u / total_c) > max_ratio:
+            raise ValueError(
+                f"Error: zip ratio suspicious ({total_u / total_c:.1f}x, max {max_ratio:.0f}x) — possible zip-bomb"
+            )
+        written = 0
+        for info in infos:
             member = info.filename
             dest = (routput_resolved / member).resolve()
             try:
@@ -1238,8 +1607,19 @@ def _safe_extract_sync(rzip: Path, routput: Path) -> tuple[list[str], list[str],
                 continue
             try:
                 dest.parent.mkdir(parents=True, exist_ok=True)
+                # F5 (v1.4.84): contar bytes REALES escritos, no el tamaño
+                # declarado en el header (un zip con metadata falsificada no
+                # debe evadir el abort). zipfile acota las lecturas de
+                # ZipExtFile al tamaño declarado, así que el desfase es teórico;
+                # el contador por chunks es defensa en profundidad barata.
                 with zf.open(info) as src, open(dest, "wb") as out:
-                    shutil.copyfileobj(src, out)
+                    while chunk := src.read(1024 * 1024):
+                        out.write(chunk)
+                        written += len(chunk)
+                        if written > max_bytes:
+                            raise ValueError(
+                                f"Error: extraction exceeds {max_bytes:,} bytes — aborted (possible zip-bomb)"
+                            )
                 extracted.append(member)
             except OSError as e:
                 failed.append(f"{member} ({e})")
@@ -1253,9 +1633,12 @@ async def fs_extract_impl(zip_path: str, output_dir: str, security: SecurityVali
     routput = security.resolve_and_validate(output_dir)
     await asyncio.to_thread(routput.mkdir, parents=True, exist_ok=True)
     try:
-        extracted, skipped, failed = await asyncio.to_thread(_safe_extract_sync, rzip, routput)
+        extracted, skipped, failed = await asyncio.to_thread(_safe_extract_sync, rzip, routput, security)
     except zipfile.BadZipFile:
         return f"Error: not a valid zip file: {rzip}"
+    except ValueError as e:
+        # P0.2: límites zip-bomb — mensaje "Error: ..." sin escribir más.
+        return str(e)
     logger.info("fs_extract zip=%s output=%s extracted=%d skipped=%d failed=%d",
                 str(rzip), str(routput), len(extracted), len(skipped), len(failed))
     lines = [f"Extracted {len(extracted)} file(s) to {routput}"]
@@ -1284,7 +1667,8 @@ async def fs_edit_advanced_impl(path: str, edits: list[dict[str, str]],
     # problem instead.
     if not await asyncio.to_thread(rpath.is_file):
         return f"Error: not a file or does not exist: {rpath}"
-    content = await fs_read_impl(path, security)
+    # O1 (v1.4.85): lectura cruda, sin footer de security scan (corrupción).
+    content = await fs_read_impl(path, security, include_scan=False)
     new_content = content
     match_info = []
     for i, edit in enumerate(edits):
@@ -1301,7 +1685,10 @@ async def fs_edit_advanced_impl(path: str, edits: list[dict[str, str]],
         diff = await _diff_or_timeout_note(content, new_content)
         return (f"Dry run - would apply {len(edits)} edit(s):\n"
                 + "\n".join(match_info) + "\n\nDiff:\n" + diff)
-    await fs_write_impl(path, new_content, security)
+    # O2 (v1.4.86): propagar 'Error: ...' de la escritura (read-only/ACL).
+    write_result = await fs_write_impl(path, new_content, security)
+    if write_result.startswith("Error:"):
+        return write_result
     diff = await _diff_or_timeout_note(content, new_content)
     return (f"Applied {len(edits)} edit(s).\n"
             + "\n".join(match_info) + f"\n\nDiff:\n{diff}")
@@ -1457,13 +1844,14 @@ def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None
         rpath = security.resolve_and_validate(path)
         if not rpath.is_dir():
             return f"Error: not a directory: {rpath}"
-        file_count, total_size = await asyncio.to_thread(_count_dir_contents_sync, rpath)
-        err = security.validate_tool_path(path, "delete")
-        if err:
+        # P2: validar delete ANTES del walk costoso (antes se contaba con solo
+        # grant read). Sin grant delete → preview sin conteo + ticket.
+        # Con grant → el impl cuenta y borra (conteo único, sin doble walk).
+        derr = security.validate_tool_path(path, "delete")
+        if derr:
             return (
                 f"About to delete directory: {rpath}\n"
-                f"Contains {file_count:,} file(s), {total_size:,} bytes "
-                f"({total_size / 1024 / 1024:.1f} MB)\n\n" + err
+                f"Contains: unknown (approve first to preview)\n\n" + derr
             )
         return await fs_delete_directory_impl(path, security)
 
@@ -1524,10 +1912,15 @@ def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None
                 "identical edit): " + ", ".join(conflicts)
             )
         paths = [e.get("path", "") for e in deduped]
+        # Peek before validate_tool_paths_batch() consumes anything (2026-08-16,
+        # same reasoning as fs_edit/fs_edit_advanced/fs_write): a stale
+        # old_string on any single path in the batch must not cost that path's
+        # grant if nothing was actually written for it.
+        grant_keys = {p: security.has_single_grant(p, "write") for p in paths}
         err = security.validate_tool_paths_batch(paths, "write")
         if err:
             return err
-        return await fs_edit_batch_impl(deduped, security)
+        return await fs_edit_batch_impl(deduped, security, grant_keys)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def fs_read_multi(paths: list[str], encoding: str = "utf-8",

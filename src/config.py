@@ -161,7 +161,17 @@ class CommandPolicy(BaseModel):
                 seg_lower = segment.strip().lower()
                 if not seg_lower:
                     continue
-                if not any(seg_lower.startswith(p.lower()) for p in self.readonly_prefix):
+                # P3.1: match por palabras, no startswith crudo — "typeperf"
+                # no debe pasar por el prefijo "type", ni "docker psx" por
+                # "docker ps". El prefijo debe cubrir las primeras N palabras.
+                seg_words = seg_lower.split()
+                matched = False
+                for p in self.readonly_prefix:
+                    pre_words = p.lower().split()
+                    if seg_words[:len(pre_words)] == pre_words:
+                        matched = True
+                        break
+                if not matched:
                     return False, (
                         f"Line {i} is not in the read-only whitelist: '{segment.strip()[:60]}'"
                     )
@@ -188,6 +198,13 @@ class SecurityConfig(BaseModel):
     rate_limit_commands_per_minute: int = 60
     rate_limit_files_per_operation: int = 100
     secret_scanning_enabled: bool = True
+    # P0.2/P2 — cotas anti-DoS configurables (defaults seguros, config vieja
+    # carga con defaults vía pydantic, sin migración manual).
+    max_extract_bytes: int = Field(default=500 * 1024 * 1024, ge=1)
+    max_extract_files: int = Field(default=5000, ge=1)
+    max_extract_ratio: float = Field(default=100.0, ge=1.0)
+    max_media_bytes: int = Field(default=20 * 1024 * 1024, ge=1)
+    max_read_multi_bytes: int = Field(default=20 * 1024 * 1024, ge=1)
 
 
 class ShellConfig(BaseModel):
@@ -196,6 +213,10 @@ class ShellConfig(BaseModel):
     shell_map: dict[str, str] = Field(default_factory=dict)
     session_timeout_seconds: int = 600
     command_timeout_seconds: int = 120
+    # P2 — cotas shell configurables.
+    max_timeout_seconds: int = Field(default=300, ge=1)
+    max_sessions: int = Field(default=10, ge=1)
+    max_spawns: int = Field(default=20, ge=1)
 
 
 class SSHConfig(BaseModel):
@@ -210,6 +231,9 @@ class LogConfig(BaseModel):
     level: str = "INFO"
     max_bytes: int = 10 * 1024 * 1024
     backup_count: int = 3
+    # P1.2 — cotas de mcp_log (cola, no archivo completo).
+    mcp_log_max_lines: int = Field(default=1000, ge=1)
+    mcp_log_max_bytes: int = Field(default=2 * 1024 * 1024, ge=1024)
 
 
 class JournalConfig(BaseModel):

@@ -144,3 +144,17 @@ def test_scrub_recurses_into_list():
     assert result[0]["password"] == "***"
     assert result[1]["note"] == "fine"
 
+
+def test_scrub_redacts_substring_keys():
+    # P3.2: paridad con audit.py::_redact (substring, no exacto).
+    result = scrub_sensitive_data({"db_password": "x", "apiKey": "y"})
+    assert result["db_password"] == "***"
+    assert result["apiKey"] == "***"
+
+
+def test_scrub_does_not_redact_token_embedded_keys():
+    # F6: token exacto, no substring — "monkey_id" no se redacta.
+    result = scrub_sensitive_data({"monkey_id": "42", "author": "x"})
+    assert result["monkey_id"] == "42"
+    assert result["author"] == "x"
+

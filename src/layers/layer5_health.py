@@ -96,6 +96,17 @@ async def _dispatch_processes(top: int = 10) -> str:
         return await asyncio.to_thread(_fetch_processes_linux, top)
 
 
+# P1.3: cache corta para health_processes (lanza un powershell/ps por llamada,
+# medido ~1.9s en vivo). TTL 15s por defecto, clave por `top`.
+_PROCESS_CACHE_TTL = 15.0
+_process_cache: dict[int, tuple[float, str]] = {}
+
+# M1 (v1.4.85): cache de los probes de versión de mcp_diag (4 subprocess por
+# llamada). TTL 60s — la versión de node/npm/git/ssh casi no cambia en runtime.
+_DIAG_CACHE_TTL = 60.0
+_diag_versions_cache: tuple[float, dict] | None = None
+
+
 def register_health_tools(mcp: FastMCP, config: AppConfig,
                           audit_log: AuditLog) -> None:
 
@@ -154,7 +165,18 @@ def register_health_tools(mcp: FastMCP, config: AppConfig,
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     async def health_processes(top: int = 10) -> str:
-        return await _dispatch_processes(top)
+        try:
+            top = int(top)
+        except (TypeError, ValueError):
+            top = 10
+        top = max(1, min(top, 50))
+        now = time.time()
+        hit = _process_cache.get(top)
+        if hit and (now - hit[0]) < _PROCESS_CACHE_TTL:
+            return hit[1]
+        out = await _dispatch_processes(top)
+        _process_cache[top] = (now, out)
+        return out
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     async def health_config() -> str:
@@ -171,10 +193,21 @@ def register_health_tools(mcp: FastMCP, config: AppConfig,
         # M-H1 (auditoría 2026-08-11): _get_version runs a blocking subprocess
         # (up to 5s each, 4 calls = up to 20s). Wrapped in to_thread so the event
         # loop isn't stalled while probing tool versions.
-        diag["node"] = await asyncio.to_thread(_get_version, "node", "--version")
-        diag["npm"] = await asyncio.to_thread(_get_version, "npm", "--version")
-        diag["git"] = await asyncio.to_thread(_get_version, "git", "--version")
-        diag["ssh"] = await asyncio.to_thread(_get_version, "ssh", "-V")
+        # M1 (v1.4.85): cache de 60s — solo los probes; timestamp/demás se
+        # recalculan por llamada.
+        global _diag_versions_cache
+        now = time.time()
+        if _diag_versions_cache and (now - _diag_versions_cache[0]) < _DIAG_CACHE_TTL:
+            versions = _diag_versions_cache[1]
+        else:
+            versions = {
+                "node": await asyncio.to_thread(_get_version, "node", "--version"),
+                "npm": await asyncio.to_thread(_get_version, "npm", "--version"),
+                "git": await asyncio.to_thread(_get_version, "git", "--version"),
+                "ssh": await asyncio.to_thread(_get_version, "ssh", "-V"),
+            }
+            _diag_versions_cache = (now, versions)
+        diag.update(versions)
         diag["config_path"] = str(config.default_path())
         diag["config_exists"] = config.default_path().exists()
         diag["data_dir"] = config.data_dir
@@ -246,13 +279,35 @@ def register_health_tools(mcp: FastMCP, config: AppConfig,
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
     async def mcp_log(lines: int = 50, level: str = "INFO") -> str:
+        # P1.2: clamp + lectura por cola (no read_text completo de hasta 10MB).
+        try:
+            lines = int(lines)
+        except (TypeError, ValueError):
+            lines = 50
+        max_lines = getattr(config.log, "mcp_log_max_lines", 1000)
+        max_bytes = getattr(config.log, "mcp_log_max_bytes", 2 * 1024 * 1024)
+        lines = max(1, min(lines, max_lines))
+        if not level:
+            level = "INFO"
         log_path = Path(config.data_dir) / "server.log"
         exists = await asyncio.to_thread(log_path.exists)
         if not exists:
             return "No log file found"
-        # read_text is blocking I/O — wrap in to_thread to avoid stalling the event loop
-        # on large log files (up to max_bytes=10MB per LogConfig default).
-        content = await asyncio.to_thread(log_path.read_text, encoding="utf-8", errors="replace")
-        level_prefix = level[0]
-        filtered = [l for l in content.splitlines() if f"[{level_prefix}" in l]
-        return "\n".join(filtered[-lines:])
+
+        def _tail() -> str:
+            level_prefix = level[0]
+            try:
+                size = log_path.stat().st_size
+            except OSError:
+                return "No log file found"
+            with open(log_path, "rb") as f:
+                if size > max_bytes:
+                    f.seek(size - max_bytes)
+                    # descartar primera línea parcial
+                    f.readline()
+                data = f.read()
+            content = data.decode("utf-8", errors="replace")
+            filtered = [l for l in content.splitlines() if f"[{level_prefix}" in l]
+            return "\n".join(filtered[-lines:])
+
+        return await asyncio.to_thread(_tail)

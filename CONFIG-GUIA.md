@@ -263,6 +263,26 @@ credenciales de bases de datos y otros secretos. Si encuentra algo, lo avisa
 pero NO bloquea la lectura. Si no quieres esta función, puedes ponerla en
 false.
 
+### Cotas anti-DoS (opcional, defaults seguros)
+
+Desde v1.4.83 estos campos controlan los topes que `fs_extract`, `fs_read_media`,
+`fs_read_multi`, `sh_exec`/`sh_session_send`/`sh_script` y `mcp_log` aplican
+sobre entradas grandes o ataques. Si tu config viejo no los tiene, pydantic
+aplica los defaults automáticamente — no hay que migrar nada.
+
+| Campo | Default | Efecto |
+|---|---|---|
+| `max_extract_bytes` | 500 MB | Tope total descomprimido por zip en `fs_extract` |
+| `max_extract_files` | 5000 | Tope de miembros por zip |
+| `max_extract_ratio` | 100.0 | Ratio `uncompressed/compressed` máximo antes de abortar (defensa contra zip-bomb) |
+| `max_media_bytes` | 20 MB | Tope de tamaño para `fs_read_media` (antes de leer+base64) |
+| `max_read_multi_bytes` | 20 MB | Acumulado de bytes leídos en `fs_read_multi` antes de truncar |
+| `shell.max_timeout_seconds` | 300 | Clamp del `timeout` que el cliente pide; valores mayores se acotan aquí |
+| `shell.max_sessions` | 10 | Máximo de sesiones shell simultáneas |
+| `shell.max_spawns` | 20 | Máximo de procesos `sh_spawn` simultáneos |
+| `log.mcp_log_max_lines` | 1000 | Tope de líneas devueltas por `mcp_log` (defensa contra vuelco accidental) |
+| `log.mcp_log_max_bytes` | 2 MB | Ventana de cola leída del log (no el archivo completo) |
+
 ---
 
 ## Sección shell (la terminal que usa el asistente)

@@ -27,6 +27,19 @@ logger = get_logger("layer2_shell")
 
 MAX_CAPTURE_BYTES: int = 1_048_576
 
+
+def _clamp_timeout(timeout, security) -> int:
+    """P2: clamp de timeout del cliente a [1, max_timeout_seconds]."""
+    try:
+        t = int(timeout)
+    except (TypeError, ValueError):
+        t = 30
+    try:
+        mx = int(security.config.shell.max_timeout_seconds)
+    except Exception:
+        mx = 300
+    return max(1, min(t, mx))
+
 # _read_stream_capped() poll cadence: idle reads are bounded so the loop can
 # notice a stop_event (process exited while a detached grandchild holds the
 # pipe) instead of blocking on read() forever. Once stop_event is set, the
@@ -724,6 +737,7 @@ async def sh_spawn_list_impl(spawn_manager: SpawnManager) -> str:
 async def sh_exec_impl(command: str, security: SecurityValidator, timeout: int = 30,
                        working_dir: str | None = None,
                        shell_info: ShellInfo | None = None) -> str:
+    timeout = _clamp_timeout(timeout, security)
     security.validate_command(command)
     logger.info("sh_exec command=%.200s shell=%s timeout=%d", sanitize_log_value(command), shell_info.name if shell_info else "default", timeout)
     proc_kwargs = {
@@ -903,6 +917,7 @@ async def sh_session_list_impl(manager: ShellManager) -> str:
 async def sh_session_send_impl(session_id: str, command: str, manager: ShellManager,
                                security: SecurityValidator, timeout: int = 30,
                                working_dir: str | None = None) -> str:
+    timeout = _clamp_timeout(timeout, security)
     security.validate_command(command)
     session = manager.get_session(session_id)
     if not session:
@@ -935,6 +950,7 @@ async def sh_session_close_impl(session_id: str, manager: ShellManager) -> str:
 async def sh_script_impl(script: str, security: SecurityValidator, timeout: int = 60,
                          working_dir: str | None = None,
                          shell_info: ShellInfo | None = None) -> str:
+    timeout = _clamp_timeout(timeout, security)
     readonly_ok, readonly_reason = security.config.security.commands.is_script_readonly(script)
     if not readonly_ok:
         raise CommandNotAllowedError(
@@ -1027,6 +1043,11 @@ def register_shell_tools(mcp: FastMCP, security: SecurityValidator,
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
     async def sh_session_start(timeout: int | None = None,
                                 shell: str | None = None) -> str:
+        try:
+            if manager.get_session_count() >= int(security.config.shell.max_sessions):
+                return json.dumps({"error": f"Too many active shell sessions (max {security.config.shell.max_sessions})"})
+        except Exception:
+            pass
         if shell:
             try:
                 si = await asyncio.to_thread(manager.resolve_shell, shell)
@@ -1091,6 +1112,11 @@ def register_shell_tools(mcp: FastMCP, security: SecurityValidator,
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
     async def sh_spawn(command: str, working_dir: str | None = None,
                        shell: str | None = None) -> str:
+        try:
+            if len(spawn_manager._spawned) >= int(security.config.shell.max_spawns):
+                return f"Error: too many spawned processes (max {security.config.shell.max_spawns})"
+        except Exception:
+            pass
         if working_dir:
             err = security.validate_tool_path(working_dir)
             if err:

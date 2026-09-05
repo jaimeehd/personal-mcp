@@ -13,7 +13,12 @@ from mcp.types import ToolAnnotations
 from src.config import AppConfig
 from src.log import get_logger
 from src.secretscanner import scan_and_warn
-from src.security import PathNotAllowedError, SecurityValidator
+from src.security import (
+    PathNotAllowedError,
+    SecurityValidator,
+    format_deny_suffix,
+    is_denied_entry,
+)
 
 logger = get_logger("layer4_personal")
 
@@ -382,26 +387,49 @@ async def project_scan_impl(security: SecurityValidator, path: str | None = None
 
 
 
-def _find_files_sync(base: Path, filename: str) -> list[str]:
+def _find_files_sync(base: Path, filename: str, security=None) -> tuple[list[str], dict]:
     """Walk base for filename (blocking I/O) — must run via asyncio.to_thread().
 
     M-P5 (auditoría 2026-08-11): previously used base.rglob(filename), which
     descends into node_modules/.venv/etc. before the exclusion filter could even
     apply. Now os.walk() with in-place dirnames pruning (same exclusion set as
     _discover_git_repos_sync) skips those whole subtrees instead of walking them.
+
+    F4 (v1.4.84): also prunes paths_deny directories and skips denied files
+    (e.g. `.env` inside a repo) — returns (results, denied_counter) so the
+    caller can append the standard suffix.
     """
+    from collections import Counter
+    denied_counter: Counter[str] = Counter()
     results = []
     for dirpath, dirnames, _filenames in os.walk(base, topdown=True):
-        dirnames[:] = [
-            d for d in dirnames
-            if d not in _REPO_DISCOVERY_SKIP_DIRS and d != ".git"
-        ]
+        pruned = []
+        for d in dirnames:
+            if d in _REPO_DISCOVERY_SKIP_DIRS or d == ".git":
+                continue
+            dp = Path(dirpath) / d
+            if dp.is_symlink():
+                continue
+            deny_pat = is_denied_entry(security, dp, "read")
+            if deny_pat:
+                denied_counter[deny_pat] += 1
+                continue
+            pruned.append(d)
+        dirnames[:] = pruned
         for name in _filenames:
-            if name == filename:
-                results.append(str(Path(dirpath) / name))
-                if len(results) >= 50:
-                    return results
-    return results
+            if name != filename:
+                continue
+            f = Path(dirpath) / name
+            if f.is_symlink():
+                continue
+            deny_pat = is_denied_entry(security, f, "read")
+            if deny_pat:
+                denied_counter[deny_pat] += 1
+                continue
+            results.append(str(f))
+            if len(results) >= 50:
+                return results, denied_counter
+    return results, denied_counter
 
 
 async def project_find_impl(filename: str, security: SecurityValidator,
@@ -409,8 +437,9 @@ async def project_find_impl(filename: str, security: SecurityValidator,
     base = Path(security.resolve_and_validate(path or _default_project_root(security)))
     if not base.is_dir():
         return f"Directory not found: {base}"
-    results = await asyncio.to_thread(_find_files_sync, base, filename)
-    return "\n".join(results) if results else f"No files named '{filename}' found"
+    results, denied_counter = await asyncio.to_thread(_find_files_sync, base, filename, security)
+    base_out = "\n".join(results) if results else f"No files named '{filename}' found"
+    return base_out + format_deny_suffix(denied_counter)
 
 
 def register_personal_tools(mcp: FastMCP, config: AppConfig,

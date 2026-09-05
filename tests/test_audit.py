@@ -137,6 +137,18 @@ def test_nested_list_secret_is_redacted(audit_log):
     assert "REDACTED" in entry.args["batch"][1]
 
 
+def test_redact_key_token_not_substring(audit_log):
+    # F6: token exacto — "monkey_id" no se redacta, "apiKey" sí.
+    entry = audit_log.record(
+        "fs_write",
+        {"monkey_id": "42", "apiKey": "sk-abc", "db_password": "x"},
+        True, 1.0,
+    )
+    assert entry.args["monkey_id"] == "42"
+    assert entry.args["apiKey"] == "***"
+    assert entry.args["db_password"] == "***"
+
+
 # --- M-C4 (auditoría 2026-08-11): invalid UTF-8 byte no longer wipes history ---
 
 def test_load_invalid_utf8_byte_keeps_valid_lines(tmp_path):
@@ -252,4 +264,31 @@ def test_legacy_record_without_pid_loads_none(tmp_path):
 
     log = AuditLog.load(max_entries=100, persist_path=path)
     assert log._entries[0].pid is None
+
+
+def test_maybe_compact_truncates_to_max_entries(tmp_path, monkeypatch):
+    from src.audit import AuditLog as AL
+
+    monkeypatch.setattr(AL, "_COMPACT_BYTES", 1024)
+    path = tmp_path / "audit.json"
+    log = AuditLog(max_entries=10, persist_path=path)
+    for i in range(30):
+        log.record(f"tool_{i}", {"i": i}, True, 1.0)
+    log._maybe_compact()
+    lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) == 10
+    assert '"tool_29"' in lines[-1]
+
+
+def test_maybe_compact_noop_below_threshold(tmp_path, monkeypatch):
+    from src.audit import AuditLog as AL
+
+    monkeypatch.setattr(AL, "_COMPACT_BYTES", 10**9)
+    path = tmp_path / "audit_small.json"
+    log = AuditLog(max_entries=10, persist_path=path)
+    for i in range(5):
+        log.record("t", {}, True, 1.0)
+    before = path.read_text(encoding="utf-8")
+    log._maybe_compact()
+    assert path.read_text(encoding="utf-8") == before
 

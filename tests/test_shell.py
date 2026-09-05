@@ -15,6 +15,7 @@ from src.layers.layer2_shell import (
     ShellManager,
     SpawnManager,
     _check_spawn_permission,
+    _clamp_timeout,
     _escape_workdir,
     _truncate,
     _validate_command_paths,
@@ -778,3 +779,22 @@ async def test_sh_exec_shell_path_detached_child_returns_early(temp_home):
     assert "timed out" not in result.lower()
     assert "Exit code:" in result
     assert elapsed < 4, f"expected early return after parent exit, took {elapsed:.1f}s"
+
+
+def test_clamp_timeout_respects_max(sec):
+    sec.config.shell.max_timeout_seconds = 300
+    assert _clamp_timeout(99999, sec) == 300
+    assert _clamp_timeout(0, sec) == 1
+    assert _clamp_timeout(-5, sec) == 1
+    assert _clamp_timeout(30, sec) == 30
+
+
+def test_session_count_counts_live_sessions(sec, manager):
+    from src.layers.layer2_shell import ShellSession
+
+    assert manager.get_session_count() == 0
+    manager._sessions["fake"] = ShellSession("fake", 9999, manager.shell_info)
+    try:
+        assert manager.get_session_count() == 1
+    finally:
+        manager._sessions.pop("fake", None)

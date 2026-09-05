@@ -500,3 +500,55 @@ def test_validate_command_enforces_rate_limit(strict_security):
     strict_security.validate_command("echo hi")
     with pytest.raises(CommandNotAllowedError):
         strict_security.validate_command("echo hi")
+
+
+# --- P0.1: is_denied_fast para walks recursivos ---
+
+def test_is_denied_fast_env(temp_home):
+    from src.config import SecurityConfig as SC
+    cfg = AppConfig(
+        security=SC(
+            paths_allow=[str(temp_home / "Repos")],
+            paths_deny=["**/.env*", "**/.ssh/**"],
+        ),
+        data_dir=str(temp_home / ".personal-mcp" / "data"),
+        config_path=str(temp_home / ".personal-mcp" / "config.json"),
+    )
+    sec = SecurityValidator(cfg)
+    assert sec.is_denied_fast(str(temp_home / "Repos" / ".env")) == "**/.env*"
+    assert sec.is_denied_fast(str(temp_home / "Repos" / ".ssh" / "id_rsa")) == "**/.ssh/**"
+    assert sec.is_denied_fast(str(temp_home / "Repos" / "app.py")) is None
+
+
+def test_is_denied_fast_exception_read_vs_delete(temp_home):
+    from src.config import SecurityConfig as SC
+    cfg = AppConfig(
+        security=SC(
+            paths_allow=[str(temp_home / "Repos")],
+            paths_deny=["**/bin/**"],
+            paths_deny_exceptions=["**/bin/**"],
+        ),
+        data_dir=str(temp_home / ".personal-mcp" / "data"),
+        config_path=str(temp_home / ".personal-mcp" / "config.json"),
+    )
+    sec = SecurityValidator(cfg)
+    dll = str(temp_home / "Repos" / "proj" / "bin" / "a.dll")
+    assert sec.is_denied_fast(dll, "read") is None
+    assert sec.is_denied_fast(dll, "delete") == "**/bin/**"
+
+
+def test_is_denied_fast_no_grant_consumed(temp_home):
+    from src.config import SecurityConfig as SC
+    cfg = AppConfig(
+        security=SC(
+            paths_allow=[str(temp_home / "Repos")],
+            paths_deny=["**/.env*"],
+        ),
+        data_dir=str(temp_home / ".personal-mcp" / "data"),
+        config_path=str(temp_home / ".personal-mcp" / "config.json"),
+    )
+    sec = SecurityValidator(cfg)
+    sec.perm_manager = PermissionManager(cfg)
+    # is_denied_fast jamás toca perm_manager (no consume grants SINGLE)
+    assert sec.is_denied_fast(str(temp_home / "Repos" / ".env")) == "**/.env*"
+    assert sec.is_denied_fast(str(temp_home / "Repos" / "ok.txt")) is None

@@ -40,10 +40,19 @@ _SECRET_PATTERNS = [
 
 _compile(_SECRET_PATTERNS)
 
+# Tope del escaneo de contenido en fs_read/fs_read_media (O1, v1.4.85):
+# el mismo trade-off costo/cobertura que audit.py/log.py ya aceptan con su cap
+# de 100k, pero más generoso para contenido leído por el usuario. Un archivo
+# >1MB se escanea solo en sus primeros 1MB — un secreto más allá de esa ventana
+# se pierde, pero escanear 10MB completos cuesta ~850ms de CPU por llamada.
+SCAN_MAX_CHARS = 1_048_576
 
-def scan_text(content: str, filepath: str | None = None) -> list[SecretFinding]:
+
+def scan_text(content: str, filepath: str | None = None, max_chars: int | None = None) -> list[SecretFinding]:
     if not content:
         return []
+    if max_chars and len(content) > max_chars:
+        content = content[:max_chars]
     findings = []
     seen = set()
     for i, line in enumerate(content.splitlines(), 1):

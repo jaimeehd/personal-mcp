@@ -29,17 +29,17 @@ echo ""
 # Step 1: Check Python
 echo -e "${YELLOW}[1/6] Checking Python...${NC}"
 if ! command -v python3 &> /dev/null; then
-    echo -e "${RED}  ERROR: python3 not found. Install Python 3.10+${NC}"
+    echo -e "${RED}  ERROR: python3 not found. Install Python 3.11+${NC}"
     exit 1
 fi
 PY_VERSION=$(python3 --version)
 echo -e "${GREEN}  OK: $PY_VERSION${NC}"
 
-# Check Python version >= 3.10
+# Check Python version >= 3.11 (requires-python in pyproject.toml)
 PY_MAJOR=$(python3 -c "import sys; print(sys.version_info.major)")
 PY_MINOR=$(python3 -c "import sys; print(sys.version_info.minor)")
-if [ "$PY_MAJOR" -lt 3 ] || [ "$PY_MAJOR" -eq 3 -a "$PY_MINOR" -lt 10 ]; then
-    echo -e "${RED}  ERROR: Python 3.10+ required, found $PY_MAJOR.$PY_MINOR${NC}"
+if [ "$PY_MAJOR" -lt 3 ] || [ "$PY_MAJOR" -eq 3 -a "$PY_MINOR" -lt 11 ]; then
+    echo -e "${RED}  ERROR: Python 3.11+ required, found $PY_MAJOR.$PY_MINOR${NC}"
     exit 1
 fi
 
@@ -207,11 +207,11 @@ echo -e "Data:         $MCP_DIR/data"
 echo -e "Claude Config: $CLAUDE_CONFIG"
 echo ""
 echo -e "${CYAN}Available tools:${NC}"
-echo -e "  Layer 1 - Filesystem:  fs_read, fs_write, fs_edit, fs_delete, fs_list, fs_tree, fs_search, fs_find, fs_info, fs_diff, fs_batch, fs_snapshot"
-echo -e "  Layer 2 - Shell:       sh_exec, sh_session_start, sh_session_list, sh_session_send, sh_session_read, sh_session_interrupt, sh_session_close, sh_script, sh_history"
-echo -e "  Layer 3 - SSH:         ssh_list_hosts, ssh_connect, ssh_exec, ssh_disconnect (if enabled)"
-echo -e "  Layer 4 - Personal:    journal_add, journal_list, journal_search, journal_stats, journal_export, note_quick, project_scan, project_find"
-echo -e "  Layer 5 - Health:      health_check, health_disk, health_processes, health_config, mcp_diag, mcp_audit_log, mcp_list_tools, mcp_benchmark"
-echo -e "  Layer 6 - Permissions: fs_approve, fs_deny, fs_request_allow, security_pending, security_revoke, security_stats"
+echo -e "  Layer 1 - Filesystem (27): fs_read, fs_read_multi, fs_read_media, fs_write, fs_write_batch, fs_edit, fs_edit_batch, fs_edit_advanced, fs_delete, fs_delete_batch, fs_delete_directory, fs_list, fs_list_with_sizes, fs_list_allowed, fs_tree, fs_search, fs_find, fs_info, fs_diff, fs_batch, fs_snapshot, fs_create_directory, fs_move, fs_find_duplicates, fs_disk_usage, fs_compress, fs_extract"
+echo -e "  Layer 2 - Shell (13):      sh_exec, sh_session_start, sh_session_list, sh_session_send, sh_session_read, sh_session_interrupt, sh_session_close, sh_script, sh_history, sh_spawn, sh_spawn_read, sh_spawn_kill, sh_spawn_list"
+echo -e "  Layer 3 - SSH (4):         ssh_list_hosts, ssh_connect, ssh_exec, ssh_disconnect (if enabled)"
+echo -e "  Layer 4 - Personal (9):    journal_add, journal_list, journal_search, journal_stats, journal_export, note_quick, project_scan, project_find, project_git_status"
+echo -e "  Layer 5 - Health (9):      health_check, health_disk, health_processes, health_config, mcp_diag, mcp_audit_log, mcp_list_tools, mcp_benchmark, mcp_log"
+echo -e "  Layer 6 - Permissions (6): fs_approve, fs_deny, fs_request_allow, security_pending, security_revoke, security_stats"
 echo ""
 echo -e "${YELLOW}Restart Claude Desktop to activate personal-mcp.${NC}"

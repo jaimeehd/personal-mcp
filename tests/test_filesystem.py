@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 import zipfile
@@ -91,6 +92,54 @@ async def test_edit_file(sample_file, sec):
     result = await fs_edit_impl(str(sample_file), "Hello", "Goodbye", sec)
     assert "Applied edit" in result
     assert sample_file.read_text().startswith("Goodbye")
+
+
+@pytest.mark.asyncio
+async def test_edit_does_not_write_scan_footer(temp_home, sec):
+    """O1: fs_edit sobre un archivo con secreto NO escribe el footer del scan."""
+    f = temp_home / "Repos" / "with_secret.txt"
+    f.write_text("token = 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345'\nkeep\n")
+    result = await fs_edit_impl(str(f), "keep", "changed", sec)
+    assert "Applied edit" in result
+    disk = f.read_text()
+    assert "Security Scan" not in disk
+    assert "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345" in disk
+    assert "changed" in disk
+
+
+@pytest.mark.asyncio
+async def test_read_scan_bounded_and_off_loop(temp_home, sec, monkeypatch):
+    """O1: fs_read escanea en thread y acotado a 1MB."""
+    import src.layers.layer1_filesystem as layer1
+    import src.secretscanner as ss
+
+    big = temp_home / "Repos" / "big.txt"
+    big.write_text("A" * (ss.SCAN_MAX_CHARS + 100))
+    called = {"n": 0}
+
+    real = ss.scan_text
+
+    def counting(*args, **kwargs):
+        called["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(layer1, "scan_text", counting)
+    out = await layer1.fs_read_impl(str(big), sec)
+    assert called["n"] >= 1, "scan debe ejecutarse (en thread)"
+    assert "secret scan limited" in out
+
+
+def test_scan_text_caps_at_max_chars():
+    """O1: scan_text(max_chars) escanea solo la ventana pedida."""
+    from src.secretscanner import scan_text
+
+    content = "A" * 1000 + "\nghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345\n" + "B" * 2000
+    full = scan_text(content)
+    capped = scan_text(content, max_chars=1100)
+    assert len(full) == 1 and len(capped) == 1
+    assert {f.secret_type for f in capped} == {f.secret_type for f in full}
+    # con max_chars por debajo del token, no se encuentra
+    assert scan_text("ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345", max_chars=5) == []
 
 
 @pytest.mark.asyncio
@@ -1637,6 +1686,107 @@ async def test_edit_batch_diff_timeout_does_not_block_batch(monkeypatch, temp_ho
     assert fast.read_text() == "goodbye fast"
 
 
+def _make_batch_single_grant_sec(temp_home, resources: list[str], operation: str = "write"):
+    """Same as _make_single_grant_sec, but approves ONE batch ticket covering
+    all `resources` at once -- mirrors PermissionManager.approve()'s per-target
+    loop over ticket.resources, which is what validate_tool_paths_batch()
+    actually consumes from.
+    """
+    from src.permissions import GrantLevel, PermissionManager
+
+    config = AppConfig(
+        security=SecurityConfig(
+            paths_allow=[str(temp_home / "Repos")],
+            paths_deny=["**/node_modules/**", "**/.git/**"],
+        ),
+        data_dir=str(temp_home / ".personal-mcp" / "data"),
+        config_path=str(temp_home / ".personal-mcp" / "config.json"),
+    )
+    validator = SecurityValidator(config)
+    validator.perm_manager = PermissionManager(config)
+    ticket = validator.perm_manager.request_batch(resources, operation, GrantLevel.SINGLE)
+    validator.perm_manager.approve(ticket.id, confirm_code=ticket.confirm_code)
+    return validator
+
+
+@pytest.mark.asyncio
+async def test_edit_batch_refunds_single_grant_on_content_mismatch(temp_home):
+    """Same bug class as fs_edit, now in the batch tool (2026-08-16):
+    validate_tool_paths_batch() consumes one SINGLE grant per path before
+    fs_edit_batch_impl's per-item loop checks old_string -- a stale
+    old_string on one path must not burn that path's grant, and must not
+    touch the grant of the path that succeeded.
+    """
+    import logging
+
+    from src.audit import AuditLog
+    from src.layers.layer1_filesystem import register_filesystem_tools
+    from src.server import AuditedFastMCP
+
+    good = temp_home / "Repos" / "eb_refund_good.txt"
+    bad = temp_home / "Repos" / "eb_refund_bad.txt"
+    good.write_text("hello good")
+    bad.write_text("hello bad")
+    sec = _make_batch_single_grant_sec(temp_home, [str(good), str(bad)])
+
+    app = AuditedFastMCP("test", audit_log=AuditLog(max_entries=10),
+                          logger=logging.getLogger("test-edit-batch-refund"))
+    register_filesystem_tools(app, sec)
+
+    result = await app.call_tool(
+        "fs_edit_batch",
+        {"edits": [
+            {"path": str(good), "old_string": "hello", "new_string": "goodbye"},
+            {"path": str(bad), "old_string": "wrong text", "new_string": "goodbye"},
+        ]},
+    )
+    text = app._result_text(result)
+    assert "1/2 files edited" in text
+    assert "old_string not found" in text
+    assert good.read_text() == "goodbye good"
+    assert bad.read_text() == "hello bad"
+
+    # good's grant is gone (consumed, edit succeeded, correctly not refunded);
+    # bad's grant was refunded -- retry with the correct old_string, same
+    # (never re-approved) batch ticket's grant applies it.
+    result = await app.call_tool(
+        "fs_edit_batch",
+        {"edits": [{"path": str(bad), "old_string": "hello", "new_string": "goodbye"}]},
+    )
+    text = app._result_text(result)
+    assert "1/1 files edited" in text
+    assert bad.read_text() == "goodbye bad"
+
+
+@pytest.mark.asyncio
+async def test_edit_batch_does_not_fabricate_grant_when_session_authorized(temp_home, sec):
+    """Safety-net, batch version: sec's blanket session grant authorizes the
+    batch, not a SINGLE one -- a failed item must not create a phantom
+    single-use grant for it.
+    """
+    import logging
+
+    from src.audit import AuditLog
+    from src.layers.layer1_filesystem import register_filesystem_tools
+    from src.server import AuditedFastMCP
+
+    f = temp_home / "Repos" / "eb_no_fabricate.txt"
+    f.write_text("content")
+
+    app = AuditedFastMCP("test", audit_log=AuditLog(max_entries=10),
+                          logger=logging.getLogger("test-edit-batch-no-fabricate"))
+    register_filesystem_tools(app, sec)
+
+    result = await app.call_tool(
+        "fs_edit_batch",
+        {"edits": [{"path": str(f), "old_string": "not present", "new_string": "x"}]},
+    )
+    text = app._result_text(result)
+    assert "old_string not found" in text
+    resolved = sec.perm_manager._resolve(str(f))
+    assert resolved not in sec.perm_manager._single_grants
+
+
 @pytest.mark.asyncio
 async def test_write_refunds_single_grant_on_content_too_large(temp_home):
     """Same bug class: fs_write_impl's max_size_mb check is its only
@@ -1706,4 +1856,415 @@ async def test_edit_advanced_dry_run_refunds_single_grant(temp_home):
     assert f.read_text() == "changed"
 
 
+# --- P0.1: walks recursivos omiten paths_deny por archivo ---
 
+def _deny_sec(temp_home):
+    config = AppConfig(
+        security=SecurityConfig(
+            paths_allow=[str(temp_home / "Repos")],
+            paths_deny=["**/.env*", "**/.ssh/**", "**/node_modules/**"],
+        ),
+        data_dir=str(temp_home / ".personal-mcp" / "data"),
+        config_path=str(temp_home / ".personal-mcp" / "config.json"),
+    )
+    v = SecurityValidator(config)
+    v.perm_manager = PermissionManager(config)
+    v.perm_manager.grant_direct(str(temp_home), "*", GrantLevel.SESSION)
+    return v
+
+
+def _deny_repo(temp_home):
+    proj = temp_home / "Repos" / "proj"
+    (proj / ".ssh").mkdir(parents=True, exist_ok=True)
+    (proj / "node_modules" / "dep").mkdir(parents=True, exist_ok=True)
+    (proj / "app.py").write_text("hello SECRET_MARKER\n")
+    (proj / ".env").write_text("SECRET=abc123 SECRET_MARKER\n")
+    (proj / ".ssh" / "id_rsa").write_text("private SECRET_MARKER\n")
+    (proj / "node_modules" / "dep" / "index.js").write_text("x SECRET_MARKER\n")
+    return proj
+
+
+@pytest.mark.asyncio
+async def test_search_skips_denied_no_leak(temp_home):
+    sec = _deny_sec(temp_home)
+    proj = _deny_repo(temp_home)
+    out = await fs_search_impl(str(proj), "SECRET_MARKER", sec)
+    assert "abc123" not in out
+    assert "private" not in out
+    assert "app.py" in out
+    assert "skipped" in out and ".env" in out
+
+
+@pytest.mark.asyncio
+async def test_find_skips_denied(temp_home):
+    sec = _deny_sec(temp_home)
+    proj = _deny_repo(temp_home)
+    out = await fs_find_impl(str(proj), sec)
+    # el sufijo "skipped ... **/.env*" menciona el patrón: excluirlo del chequeo
+    body = out.split("[skipped")[0]
+    assert ".env" not in body
+    assert "id_rsa" not in body
+    assert "app.py" in body
+    assert "skipped" in out
+
+
+@pytest.mark.asyncio
+async def test_list_tree_snapshot_skip_denied(temp_home):
+    sec = _deny_sec(temp_home)
+    proj = _deny_repo(temp_home)
+    lst = await fs_list_impl(str(proj), sec, recursive=True)
+    assert "abc123" not in lst and "skipped" in lst
+    assert lst.split("[skipped")[0].count(".env") == 0
+    tree = await fs_tree_impl(str(proj), sec)
+    assert "abc123" not in tree and "skipped" in tree
+    assert tree.split("[skipped")[0].count("id_rsa") == 0
+    snap = await fs_snapshot_impl(str(proj), sec)
+    assert "Snapshot saved" in snap and "skipped" in snap
+
+
+@pytest.mark.asyncio
+async def test_compress_skips_denied(temp_home):
+    sec = _deny_sec(temp_home)
+    proj = _deny_repo(temp_home)
+    out_zip = str(temp_home / "Repos" / "out.zip")
+    res = await fs_compress_impl([str(proj)], out_zip, sec)
+    assert "Created" in res and "skipped" in res
+    with zipfile.ZipFile(out_zip) as zf:
+        names = zf.namelist()
+    assert not any(n.endswith(".env") or ".ssh" in n for n in names)
+    assert any("app.py" in n for n in names)
+
+
+@pytest.mark.asyncio
+async def test_batch_skips_denied(temp_home):
+    sec = _deny_sec(temp_home)
+    proj = _deny_repo(temp_home)
+    out = await fs_batch_impl(str(proj), "copy", str(temp_home / "Repos" / "dst"), sec, dry_run=True)
+    body = out.split("[skipped")[0]
+    assert ".env" not in body
+    assert "app.py" in body
+
+
+# --- P0.2: límites zip-bomb ---
+
+@pytest.mark.asyncio
+async def test_extract_rejects_too_many_files(temp_home, sec, monkeypatch):
+    import zipfile as zf_mod
+
+    import src.layers.layer1_filesystem as layer1
+
+    monkeypatch.setattr(sec.config.security, "max_extract_files", 3)
+    zpath = temp_home / "Repos" / "many.zip"
+    with zf_mod.ZipFile(zpath, "w") as zf:
+        for i in range(5):
+            zf.writestr(f"f{i}.txt", "x")
+    outdir = temp_home / "Repos" / "ex_many"
+    res = await layer1.fs_extract_impl(str(zpath), str(outdir), sec)
+    assert "max 3" in res and "5 files" in res
+
+
+@pytest.mark.asyncio
+async def test_extract_rejects_suspicious_ratio(temp_home, sec, monkeypatch):
+    import zipfile as zf_mod
+
+    import src.layers.layer1_filesystem as layer1
+
+    monkeypatch.setattr(sec.config.security, "max_extract_ratio", 10.0)
+    zpath = temp_home / "Repos" / "bomb.zip"
+    with zf_mod.ZipFile(zpath, "w", compression=zf_mod.ZIP_DEFLATED) as zf:
+        zf.writestr("zeros.bin", "0" * 100000)
+    outdir = temp_home / "Repos" / "ex_bomb"
+    res = await layer1.fs_extract_impl(str(zpath), str(outdir), sec)
+    assert "suspicious" in res or "ratio" in res
+
+
+@pytest.mark.asyncio
+async def test_extract_rejects_huge_uncompressed(temp_home, sec, monkeypatch):
+    import zipfile as zf_mod
+
+    import src.layers.layer1_filesystem as layer1
+
+    monkeypatch.setattr(sec.config.security, "max_extract_bytes", 100)
+    zpath = temp_home / "Repos" / "big.zip"
+    with zf_mod.ZipFile(zpath, "w", compression=zf_mod.ZIP_STORED) as zf:
+        zf.writestr("a.txt", "x" * 200)
+    outdir = temp_home / "Repos" / "ex_big"
+    res = await layer1.fs_extract_impl(str(zpath), str(outdir), sec)
+    assert "max 100" in res
+
+
+# --- P2: cotas filesystem ---
+
+@pytest.mark.asyncio
+async def test_read_media_too_large(temp_home, sec, monkeypatch):
+    import src.layers.layer1_filesystem as layer1
+
+    monkeypatch.setattr(sec.config.security, "max_media_bytes", 10)
+    p = temp_home / "Repos" / "img.png"
+    p.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 100)
+    res = await layer1.fs_read_media_impl(str(p), sec)
+    assert "too large" in res and "max 10" in res
+
+
+@pytest.mark.asyncio
+async def test_read_multi_file_count_limit(temp_home, sec, monkeypatch):
+    import src.layers.layer1_filesystem as layer1
+
+    monkeypatch.setattr(sec.config.security, "rate_limit_files_per_operation", 2)
+    paths = [str(temp_home / "Repos" / f"m{i}.txt") for i in range(3)]
+    for i, pp in enumerate(paths):
+        (temp_home / "Repos" / f"m{i}.txt").write_text("hi")
+    res = await layer1.fs_read_multi_impl(paths, sec)
+    assert "Exceeds max files" in res
+
+
+@pytest.mark.asyncio
+async def test_delete_directory_no_prewalk_without_ticket(temp_home):
+    """P2: sin grant delete no hay walk costoso (preview sin conteo + ticket)."""
+    import logging
+
+    import src.layers.layer1_filesystem as layer1
+    from src.audit import AuditLog
+    from src.server import AuditedFastMCP
+
+    d = temp_home / "Repos" / "bigdir"
+    (d / "sub").mkdir(parents=True)
+    (d / "sub" / "f.txt").write_text("x")
+    walked = {"n": 0}
+    real = layer1._count_dir_contents_sync
+
+    def counting(rpath):
+        walked["n"] += 1
+        return real(rpath)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(layer1, "_count_dir_contents_sync", counting)
+    try:
+        sec2 = _deny_sec(temp_home)
+        app = AuditedFastMCP("test", audit_log=AuditLog(max_entries=10),
+                             logger=logging.getLogger("test-del-dir"))
+        layer1.register_filesystem_tools(app, sec2)
+        res = await app.call_tool("fs_delete_directory", {"path": str(d)})
+        text = app._result_text(res)
+        assert "approve first to preview" in text
+        assert walked["n"] == 0
+    finally:
+        monkeypatch.undo()
+
+
+# --- v1.4.84: F1/F3 (fs_find dirs + fs_list_with_sizes deny) ---
+
+@pytest.mark.asyncio
+async def test_find_lists_directories(sample_dir, sec):
+    """F1: fs_find vuelve a listar directorios (rglob original lo hacía)."""
+    out = await fs_find_impl(str(sample_dir), sec, name="src")
+    assert "src" in out
+
+
+@pytest.mark.asyncio
+async def test_list_with_sizes_skips_denied(temp_home):
+    """F3: fs_list_with_sizes no revela .env/id_rsa denied."""
+    sec = _deny_sec(temp_home)
+    proj = _deny_repo(temp_home)
+    out = await fs_list_with_sizes_impl(str(proj), sec)
+    body = out.split("[skipped")[0]
+    assert ".env" not in body
+    assert "app.py" in body
+    assert "skipped" in out
+
+
+@pytest.mark.asyncio
+async def test_find_skips_denied_dir_counts_one():
+    """F2: un dir denied (patrón que matchea el dir en sí) cuenta 1 y se poda."""
+    from tempfile import TemporaryDirectory
+
+    import src.layers.layer1_filesystem as layer1
+
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "proj" / "node_modules" / "dep").mkdir(parents=True)
+        (root / "proj" / "node_modules" / "dep" / "a.js").write_text("x")
+        (root / "proj" / "node_modules" / "dep" / "b.js").write_text("y")
+        cfg = AppConfig(
+            security=SecurityConfig(
+                paths_allow=[str(root)],
+                # sin "/**" final: matchea el DIR node_modules, no solo su contenido
+                paths_deny=["**/node_modules"],
+            ),
+            data_dir=str(root / ".personal-mcp" / "data"),
+            config_path=str(root / "cfg.json"),
+        )
+        sec = SecurityValidator(cfg)
+        snapshot, _, denied = await asyncio.to_thread(
+            layer1._fs_snapshot_sync, root / "proj", sec)
+        total = sum(denied.values())
+        assert total == 1, f"dir denied debe contar 1, no {denied}"
+        assert "node_modules" not in snapshot
+
+
+# --- M2 (v1.4.85): poda de dirs denied por core en walks ---
+
+def _m2_sec(root):
+    return SecurityValidator(AppConfig(
+        security=SecurityConfig(
+            paths_allow=[str(root)],
+            paths_deny=["**/node_modules/**"],
+        ),
+        data_dir=str(root / ".personal-mcp" / "data"),
+        config_path=str(root / "cfg.json"),
+    ))
+
+
+def _m2_repo(root):
+    proj = root / "proj"
+    (proj / "node_modules" / "dep").mkdir(parents=True)
+    for i in range(5):
+        (proj / "node_modules" / "dep" / f"m{i}.js").write_text("x" * 100)
+    (proj / "app.py").write_text("print('hello')\n")
+    return proj
+
+
+def test_is_denied_fast_dir_core_matches_node_modules(temp_home):
+    """M2: **/node_modules/** poda el dir node_modules en sí vía core-match."""
+    sec = _m2_sec(temp_home)
+    nd = temp_home / "proj" / "node_modules"
+    (nd / "dep").mkdir(parents=True)
+    assert sec.is_denied_fast_dir(nd) == "**/node_modules/**"
+    assert sec.is_denied_fast_dir(temp_home / "proj" / "app.py") is None
+    assert sec.is_denied_fast_dir(temp_home / "proj") is None
+
+
+def test_is_denied_fast_dir_respects_exception(temp_home):
+    """M2: bin con excepción de solo-lectura configurada NO se poda."""
+    sec = SecurityValidator(AppConfig(
+        security=SecurityConfig(
+            paths_allow=[str(temp_home)],
+            paths_deny=["**/bin/**"],
+            paths_deny_exceptions=["**/bin/**"],
+        ),
+        data_dir=str(temp_home / ".personal-mcp" / "data"),
+        config_path=str(temp_home / "cfg.json"),
+    ))
+    bin_dir = temp_home / "proj" / "bin"
+    assert sec.is_denied_fast_dir(bin_dir) is None
+
+
+@pytest.mark.asyncio
+async def test_search_prunes_denied_dir_not_contents(temp_home):
+    """M2: fs_search no desciende a node_modules (cuenta 1 dir, no N files)."""
+    from tempfile import TemporaryDirectory
+
+    import src.layers.layer1_filesystem as layer1
+
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        proj = _m2_repo(root)
+        sec = _m2_sec(root)
+        out = await layer1.fs_search_impl(str(proj), "hello", sec)
+        assert "app.py" in out
+        suffix = out.split("[skipped", 1)[-1] if "[skipped" in out else ""
+        assert "×1]" in suffix, f"node_modules debe contar 1 dir podado, no 5 files: {out}"
+
+
+@pytest.mark.asyncio
+async def test_compress_prunes_denied_dir(temp_home):
+    """M2: fs_compress no mete archivos de node_modules y poda el dir."""
+    from tempfile import TemporaryDirectory
+
+    import src.layers.layer1_filesystem as layer1
+
+    with TemporaryDirectory() as td:
+        root = Path(td)
+        proj = _m2_repo(root)
+        sec = _m2_sec(root)
+        out_zip = root / "out.zip"
+        res = await layer1.fs_compress_impl([str(proj)], str(out_zip), sec)
+        assert "×1]" in res, f"debe podar node_modules como 1 dir: {res}"
+        with zipfile.ZipFile(out_zip) as zf:
+            names = zf.namelist()
+        assert not any("node_modules" in n for n in names)
+        assert any("app.py" in n for n in names)
+
+
+
+
+
+# --- O2 (v1.4.86): escritura con error de permisos = string limpio + refund ---
+
+def _set_readonly(p: Path):
+    import stat as stat_mod
+    os.chmod(p, stat_mod.S_IREAD)
+
+
+def _clear_readonly(p: Path):
+    import stat as stat_mod
+    os.chmod(p, stat_mod.S_IWRITE)
+
+
+@pytest.mark.asyncio
+async def test_write_readonly_returns_clean_error(temp_home, sec):
+    f = temp_home / "Repos" / "ro.txt"
+    f.write_text("content")
+    _set_readonly(f)
+    try:
+        result = await fs_write_impl(str(f), "new", sec)
+        if not result.startswith("Error:"):
+            pytest.skip("el OS permitio escribir pese al readonly (root)")
+        assert "cannot write" in result
+        assert f.read_text() == "content"
+    finally:
+        _clear_readonly(f)
+
+
+@pytest.mark.asyncio
+async def test_edit_readonly_returns_clean_error(temp_home, sec):
+    f = temp_home / "Repos" / "ro_edit.txt"
+    f.write_text("alpha beta\n")
+    _set_readonly(f)
+    try:
+        result = await fs_edit_impl(str(f), "beta", "gamma", sec)
+        if not result.startswith("Error:"):
+            pytest.skip("OS permitio escribir pese al readonly")
+        assert "cannot write" in result
+        assert "Applied edit" not in result
+        assert f.read_text() == "alpha beta\n"
+    finally:
+        _clear_readonly(f)
+
+
+@pytest.mark.asyncio
+async def test_edit_single_grant_refunded_on_write_failure(temp_home):
+    import logging
+
+    from src.audit import AuditLog
+    from src.layers.layer1_filesystem import register_filesystem_tools
+    from src.server import AuditedFastMCP
+
+    f = temp_home / "Repos" / "ro_grant.txt"
+    f.write_text("hello world\n")
+    _set_readonly(f)
+    try:
+        sec = _make_single_grant_sec(temp_home, str(f))
+        app = AuditedFastMCP("test", audit_log=AuditLog(max_entries=10),
+                             logger=logging.getLogger("test-ro-grant"))
+        register_filesystem_tools(app, sec)
+        res = await app.call_tool(
+            "fs_edit", {"path": str(f), "old_string": "world", "new_string": "there"})
+        text = app._result_text(res)
+        if not text.startswith("Error:"):
+            pytest.skip("OS permitio escribir pese al readonly")
+        assert "cannot write" in text
+        # el grant single se reembolso: sigue disponible para reintentar
+        assert sec.has_single_grant(str(f), "write") is not None
+    finally:
+        _clear_readonly(f)
+
+
+@pytest.mark.asyncio
+async def test_write_invalid_encoding_returns_clean_error(temp_home, sec):
+    f = temp_home / "Repos" / "enc.txt"
+    result = await fs_write_impl(str(f), "café", sec, encoding="ascii")
+    assert "cannot encode" in result
+    result2 = await fs_write_impl(str(f), "x", sec, encoding="nope-enc")
+    assert "cannot encode" in result2
+    assert not f.exists()

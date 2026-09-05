@@ -1,3 +1,77 @@
+## [1.4.86] — 2026-09-04
+
+### Fixed — edición de archivos con error de permisos: string limpio en vez de excepción cruda + grant reembolsado (O2)
+
+- **Contexto**: cuando el OS rechazaba la escritura (archivo con atributo read-only en Windows, ACL, archivo bloqueado), `fs_write_impl`/`fs_edit_impl`/`fs_edit_advanced_impl`/`fs_edit_batch_impl` lanzaban `PermissionError`/`OSError`. `AuditedFastMCP.call_tool` lo re-lanzaba → el agente recibía un **error JSON-RPC** con traceback (no un mensaje accionable) y el **grant `single` ya consumido por el wrapper NO se reembolsaba** (el refund solo corría si la impl devolvía `"Error:"`, no si lanzaba) — reintentar exigía un ticket + popup nuevo.
+- **Además**: `fs_edit_impl`/`fs_edit_advanced_impl` **descartaban el return de `fs_write_impl`** — tras un write fallido seguían computando el diff y reportando `"Applied edit"` falso.
+- **Fix**:
+  - Nuevos helpers `_write_text_sync()`/`_ensure_parent_dir_sync()` (`layer1_filesystem.py`): convierten `PermissionError`/`OSError` en `Error: cannot write <path>: ...`; en Windows, si el archivo es read-only, sugieren `attrib -r "<path>"`.
+  - `fs_write_impl`: además captura `UnicodeEncodeError`/`LookupError` de `content.encode(encoding)` (encoding inválido → error limpio).
+  - `fs_edit_impl`/`fs_edit_advanced_impl`: propagan el `Error:` de la escritura en vez de reportar éxito falso.
+  - `fs_edit_batch_impl`: usa `_write_text_sync` y **reembolsa el grant single del path** cuando la escritura falla (archivo intacto = provably untouched, misma lógica que los otros dos branches).
+  - `_write_batch_sync` (fs_write_batch): usa `_write_text_sync` para el hint de read-only.
+  - Sin cambios en los wrappers: el refund existente sobre `"Error:"` ahora cubre estos casos automáticamente (no se introdujo refund-on-exception — respeta la decisión de diseño de v1.4.82 sobre fallos ambiguos).
+- **Tests nuevos (4)**: write sobre archivo read-only → `Error: cannot write` + archivo intacto; edit sobre read-only → error sin "Applied edit"; edit con grant single sobre read-only → **grant reembolsado** (reintento sin nuevo ticket); encoding inválido → `Error: cannot encode` y nada escrito. Suite completa: 577 passed, 1 skipped.
+
+## [1.4.85] — 2026-09-04
+
+### Changed — mejora de consumo (M1/M2/O1): cache de `mcp_diag`, poda de dirs denied y scan de secretos fuera del loop
+
+- **M1 — cache de probes en `mcp_diag`** (`layer5_health.py`): las 4 llamadas a `node/npm/git/ssh --version` (hasta 5s c/u) se cachean 60s (`_DIAG_CACHE_TTL`/`_diag_versions_cache`). `timestamp` y demás campos se recalculan por llamada. Segunda llamada a `mcp_diag` ≈ 0ms extra.
+- **M2 — poda de directorios denied por "core" en walks** (`security.py` + `layer1_filesystem.py`): `**/node_modules/**` nunca matcheaba el dir `node_modules` en sí (fnmatch sin `**` recursivo), así que `fs_search`/`fs_compress`/`fs_find_duplicates`/`fs_disk_usage` descendían a `node_modules`/`.venv`/`.git` completos filtrando archivo por archivo. Nuevo `SecurityValidator.is_denied_fast_dir()` matchea el dir por el core del patrón (sin `**/` prefijo ni `/**` sufijo), y el nuevo generador `_walk_files_prune_denied()` poda esos dirs del `os.walk` antes de descender, contando **1 por dir podado** (antes N por archivo). La excepción de solo-lectura se respeta: un `bin`/`obj` con `paths_deny_exceptions` (ej. MiProyecto) NO se poda y conserva la lectura de `.dll/.exe/.pdb`.
+- **Cambio de comportamiento aceptado**: el sufijo `[skipped N denied file(s)...]` pasa de `patrón×N` a `patrón×1` cuando el dir entero se poda — semánticamente equivalente (todo lo de dentro estaba denied), ahorro real de I/O.
+- **O1 — `fs_read`/`fs_read_media` dejan de bloquear el event loop**: `scan_text()` es síncrono y pesa ~850ms en un archivo de 4MB — corría en el loop, congelando TODAS las tools durante el scan. Ahora corre en `asyncio.to_thread` y acotado a los primeros 1MB (`SCAN_MAX_CHARS` en `secretscanner.py`, mismo trade-off costo/cobertura que audit/log con su cap de 100k). Si el archivo es mayor, se anexa `[secret scan limited to the first 1MB...]`.
+- **Fixed — corrupción por footer de scan en `fs_edit`/`fs_edit_advanced`/`fs_diff`**: `fs_read_impl` anexaba `--- Security Scan ---` al contenido y `fs_edit`/`fs_edit_advanced` lo escribían de vuelta al archivo (un archivo con un secreto terminaba con el footer insertado en el disco). Nuevo parámetro `include_scan=False` para las lecturas internas de edición/diff — leen el contenido crudo sin footer ni nota.
+- **Tests nuevos (5)**: `is_denied_fast_dir` core-match, `is_denied_fast_dir` respeta excepción, search no desciende (×1), compress poda el dir, mcp_diag cachea versiones, fs_edit no escribe footer, scan acotado y off-loop. Suite completa: 573 passed, 1 skipped.
+
+### Config (fuera del repo, espejo sincronizado)
+- `~/.personal-mcp/config.json`: `log.max_bytes` 10→5 MB (rotación más frecuente) y `audit_max_entries` 10000→5000 (huella de audit a la mitad). `config.json` (espejo) refrescado con `sync-config.ps1`.
+
+## [1.4.84] — 2026-09-04
+
+### Fixed — regresiones P0.1 + huecos de deny + hardening (reevaluación post-1.4.83)
+
+- **F1 — `fs_find` vuelve a listar directorios**: `_walk_files_no_symlinks()` ganó `include_dirs`; `fs_find` lo usa. La migración a `_walk_files_no_symlinks` de P0.1 solo matcheaba archivos (el `rglob` original listaba dirs y files) — `fs_find(name="src")` devolvía nada. Restaurado, con filtro deny por entrada (un dir denied se omite y cuenta en el sufijo).
+- **F2 — `_fs_snapshot_sync` a un solo walk**: la doble pasada (files + dirs) costaba 2× I/O en árboles grandes e inflaba el contador deny (dir denied = 1 + cada archivo deny dentro = N). Un solo `os.walk`: poda dirs denied, snapshot de dirs (size 0) y files.
+- **F3 — `fs_list_with_sizes` filtra `paths_deny`**: scandir revelaba nombre+tamaño de `.env`/`id_rsa`/`.ssh` dentro de una carpeta permitida — el único walk de Layer 1 que quedaba sin el filtro. Ahora omite denied + sufijo `[skipped ...]`.
+- **F4 — Layer 4 `project_find` filtra `paths_deny`**: `_find_files_sync` podaba `_REPO_DISCOVERY_SKIP_DIRS`/`.git` pero no `paths_deny` → `project_find(".env")` devolvía el path del `.env` dentro de repos. Ahora filtra por archivo + poda dirs denied + sufijo. Helpers `format_deny_suffix()`/`is_denied_entry()` movidos a `src/security.py` (Layer 1 y 4 los comparten, sin duplicación).
+- **F5 — `fs_extract` cuenta bytes reales escritos**: el abort de zip-bomb sumaba el tamaño *declarado* en el header; ahora cuenta los bytes efectivamente escritos por chunk. (zipfile acota las lecturas al tamaño declarado, así que el desfase es teórico — defensa en profundidad barata.)
+- **F6 — redacción por token, no substring**: `monkey_id`/`author` ya no se redactan en `log.py` ni `audit.py` (el substring "key"/"auth" producía falsos positivos); `apiKey`/`db_password` sí. Tokenización por separadores + camel humps.
+- **F7 — scripts de verificación al día**: `verify.py` usa `paths_allow[0]` (sin rutas hardcodeadas) y salta la sección journal si `journal.enabled=false`; `validate_security.py` refleja el modelo actual (read auto-permitido, write pide ticket, aprobación solo vía popup — no automatizable, deny por patrón para el hard-lock) y pasa en esta máquina.
+- **F8 — instaladores**: `install.sh`/`install.ps1` exigen Python 3.11+ (coherente con `requires-python`); banner de `install.sh` sincronizado con el código (27/13/4/9/9/6 = 68 tools, 64 activas).
+- **F9 — cotas superiores en dependencias**: `fastmcp<4`, `pydantic<3`, `psutil<7`, `pytest<10`, `pytest-asyncio<1` — el servidor depende de internals de FastMCP 3.4.x; un 4.0 rompería silenciosamente.
+- **Tests nuevos**: 6 (fs_find dirs, list_with_sizes deny, snapshot poda dir denied=1, project_find deny, redacción token log, redacción token audit). Suite completa: 565 passed, 1 skipped.
+
+## [1.4.83] — 2026-09-04
+
+### Fixed — `paths_deny` enforcement in recursive walks (P0.1) & Zip-bomb protections (P0.2)
+- **P0.1 `paths_deny` in walks**: `SecurityValidator.is_denied_fast()` evaluates `paths_deny` per entry during recursive walks (`fs_search`, `fs_find`, `fs_list`, `fs_tree`, `fs_snapshot`, `fs_batch`, `fs_compress`, `fs_disk_usage`, `fs_find_duplicates`). Previously `fs_search` validated only the root path, allowing files like `.env` to be searched/read. Omitted entries append `[skipped N denied file(s) by paths_deny: pattern×M]` without leaking paths. `fs_find` now avoids symlink traversal via `_walk_files_no_symlinks`.
+- **P0.2 `fs_extract` zip-bomb limits**: Enforces `max_extract_files` (5000), `max_extract_bytes` (500 MB), and `max_extract_ratio` (100x) pre-write and mid-write.
+
+### Performance & Resource Optimization — P1 & P2
+- **P1.1 `audit.json` compaction**: `AuditLog._maybe_compact()` prunes `audit.json` when exceeding 5 MB, keeping the latest `max_entries` lines and preventing startup slowdowns.
+- **P1.2 `mcp_log` tail reading**: Reads up to `mcp_log_max_bytes` (2 MB) from the end of `server.log` using binary `seek`, bounded by `mcp_log_max_lines` (1000). Handles empty `level` without `IndexError`.
+- **P1.3 `health_processes` cache**: 15s cache for `health_processes` output (`_process_cache`) to avoid repeated PowerShell subprocess spawns.
+- **P1.4 Smoke test isolation**: `test_smoke_runtime.py` uses an isolated `HOME`/`USERPROFILE` environment, keeping test runs from polluting real user `server.log` or `audit.json`.
+- **P2 DoS limits**: Added configurable limits in `SecurityConfig` (`max_media_bytes`, `max_read_multi_bytes`), `ShellConfig` (`max_timeout_seconds`, `max_sessions`, `max_spawns`), and `LogConfig`. `fs_info` uses chunked SHA256 hashing. `fs_delete_directory` defers directory contents counting until delete permission is granted.
+
+### Security & Hygiene — P3
+- **P3.1 Word-boundary matching**: `is_script_readonly` checks prefixes against word boundaries rather than raw string prefixes (prevents `typeperf` matching `type`).
+- **P3.2 Log sanitization**: `scrub_sensitive_data` matches sensitive key substrings (parity with `audit.py`).
+- **P3.3 CI & Docs**: Updated `AGENTS.md`, `README.md`, and `CONFIG-GUIA.md`. Expanded GitHub Actions matrix with `macos-latest` runner and pinned `ruff`.
+
+## [1.4.82] — 2026-08-16
+
+### Fixed — `fs_edit_batch`: mismo bug de grants `single` gastados sin tocar el archivo (v1.4.76), extendido a la variante batch
+
+- **Contexto**: `fs_edit_batch` (v1.4.78) se agregó después del fix de v1.4.76 para `fs_edit`/`fs_edit_advanced`/`fs_write`, y reintrodujo la misma clase de bug — confirmado revisando el código actual, no por asunción de que "es análogo".
+- **Causa raíz**: `validate_tool_paths_batch(paths, "write")` consume un grant `single` independiente por cada path resuelto (mismo mecanismo que un grant de recurso único — verificado en `approve()`: `for target in ticket.resources: ops[operation] = 1`, sin distinción entre ticket batch e individual). El wrapper consume todos de una vez, antes de que `fs_edit_batch_impl` valide, path por path, `is_file`/`old_string`. Un `old_string` desactualizado en el path 3 de 5 gasta el grant de ese path sin tocar el archivo, mientras los otros 4 sí se aplican.
+- **Fix**: `fs_edit_batch` (wrapper) hace el peek con `has_single_grant(p, "write")` para cada path *antes* de `validate_tool_paths_batch`, arma un mapa `{path: grant_key}` y lo pasa a `fs_edit_batch_impl`. El impl reembolsa inline, en las dos ramas de fallo donde es un hecho que el archivo no se tocó (`not is_file`, `old_string not in content`) — no en la rama genérica `except Exception`.
+- **Por qué NO se reembolsa en `except Exception`**: esa rama puede dispararse *después* de que `write_text()` ya se ejecutó con éxito (ej. si `_diff_or_timeout_note()` u otro paso posterior lanza) — no hay forma de saber desde ahí si el archivo cambió o no. Reembolsar sin esa certeza arriesgaría fabricar un grant sobre un archivo que sí se modificó. Se prefiere el trade-off conservador: en un fallo ambiguo (infrecuente), el grant se pierde.
+- **Verificado antes de codificar** (no se asumió): que la modificación reciente de `security.py` en el mismo commit de `fs_edit_batch` (preview acotado del mensaje, hint de `level='session'`) no toca `check_granted`/`request_batch`, y que `permissions.py` no cambió desde v1.4.76 — `has_single_grant`/`refund_single` siguen intactos.
+- **Tests nuevos**: 2 en `test_filesystem.py` vía `register_filesystem_tools`+`AuditedFastMCP` — batch de 2 paths (uno correcto, uno con `old_string` desactualizado) confirma que solo el que falla se reembolsa y el que tuvo éxito no genera un reembolso extra; batch autorizado por sesión confirma que no se fabrica un grant `single` fantasma. Nuevo helper `_make_batch_single_grant_sec` (análogo a `_make_single_grant_sec` de v1.4.76, pero vía `request_batch`).
+- **Verificado**: suite completa `pytest -q` → 536 passed, 1 skipped (subió de 534; el warning es el mismo `ResourceWarning` preexistente y no relacionado en `test_shell_resolver.py`).
+
 ## [1.4.81] — 2026-08-16
 
 ### Changed — `fs_disk_usage` (Layer 1): límites de tamaño opt-in `min_size`/`max_size` + archivos vacíos siempre excluidos

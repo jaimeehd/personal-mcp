@@ -32,7 +32,15 @@ try {
     $pyVersion = & $Python --version
     Write-Host "  OK: $pyVersion" -ForegroundColor Green
 } catch {
-    Write-Host "  ERROR: Python not found. Please install Python 3.10+" -ForegroundColor Red
+    Write-Host "  ERROR: Python not found. Please install Python 3.11+" -ForegroundColor Red
+    exit 1
+}
+
+# requires-python >= 3.11 (pyproject.toml)
+$pyMajor = & $Python -c "import sys; print(sys.version_info.major)"
+$pyMinor = & $Python -c "import sys; print(sys.version_info.minor)"
+if ([int]$pyMajor -lt 3 -or ([int]$pyMajor -eq 3 -and [int]$pyMinor -lt 11)) {
+    Write-Host "  ERROR: Python 3.11+ required, found $pyMajor.$pyMinor" -ForegroundColor Red
     exit 1
 }
 

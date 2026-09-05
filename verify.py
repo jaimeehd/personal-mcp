@@ -1,7 +1,12 @@
-import asyncio, json, sys
+import asyncio
+import json
+import sys
 from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).parent))
+from src.config import AppConfig
 from src.server import create_app
+
 
 def extract_text(result):
     if isinstance(result, tuple) and len(result) > 0:
@@ -15,6 +20,7 @@ def extract_text(result):
 async def verify():
     app = create_app()
     tm = app._tool_manager
+    config = AppConfig.load()
     tool_names = list(tm._tools.keys())
     print("=== personal-mcp Live Health Check ===")
     print(f"Tools registered: {len(tool_names)}")
@@ -63,19 +69,24 @@ async def verify():
     r = extract_text(await app.call_tool("sh_exec", {"command": "echo hello_mcp"}))
     print(f"   Output: {r[:100]}")
 
-    # fs_list
+    # fs_list on first allowed path (no hardcoded user path, v1.4.84)
     print()
-    print("4. fs_list on C:\\Users\\usuario\\Repos")
-    r = extract_text(await app.call_tool("fs_list", {"path": "C:\\Users\\usuario\\Repos", "max_results": 5}))
+    allow = config.security.paths_allow
+    probe = allow[0] if allow else config.data_dir
+    print(f"4. fs_list on {probe}")
+    r = extract_text(await app.call_tool("fs_list", {"path": probe, "max_results": 5}))
     print(f"   {r[:300]}")
 
-    # journal
+    # journal (Layer 4 is conditional on config.journal.enabled)
     print()
     print("5. journal_add + journal_list")
-    r = extract_text(await app.call_tool("journal_add", {"content": "personal-mcp installed", "tags": "setup,test"}))
-    print(f"   Add: {r}")
-    r = extract_text(await app.call_tool("journal_list", {"limit": 5}))
-    print(f"   List: {r[:200]}")
+    if getattr(config.journal, "enabled", False):
+        r = extract_text(await app.call_tool("journal_add", {"content": "personal-mcp installed", "tags": "setup,test"}))
+        print(f"   Add: {r}")
+        r = extract_text(await app.call_tool("journal_list", {"limit": 5}))
+        print(f"   List: {r[:200]}")
+    else:
+        print("   SKIPPED: journal.enabled=false (Layer 4 no registrado)")
 
     # mcp_audit_log
     print()

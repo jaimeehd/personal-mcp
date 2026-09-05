@@ -196,3 +196,24 @@ async def test_project_git_status_skips_node_modules(temp_home, security):
     _init_repo(nested)
     result = await project_git_status_impl(security)
     assert "some_pkg" not in result
+
+
+@pytest.mark.asyncio
+async def test_project_find_skips_denied(temp_home, security):
+    """F4: project_find no revela archivos dentro de paths_deny (ej. .env)."""
+    from src.layers.layer4_personal import project_find_impl
+
+    # config de test solo niega **/node_modules/** y **/.git/**; ampliar deny
+    # local con .env* para ejercitar el filtro.
+    security.config.security.paths_deny.append("**/.env*")
+    repo = temp_home / "Repos" / "find_proj"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "app.py").write_text("x")
+    (repo / ".env").write_text("SECRET=abc")
+    out = await project_find_impl(".env", security, path=str(repo))
+    body = out.split("[skipped")[0]
+    assert "find_proj" not in body  # sin path de .env revelado
+    assert "No files named" in body
+    assert "skipped" in out
+    ok = await project_find_impl("app.py", security, path=str(repo))
+    assert "app.py" in ok

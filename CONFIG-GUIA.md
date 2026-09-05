@@ -282,6 +282,8 @@ aplica los defaults automáticamente — no hay que migrar nada.
 | `shell.max_spawns` | 20 | Máximo de procesos `sh_spawn` simultáneos |
 | `log.mcp_log_max_lines` | 1000 | Tope de líneas devueltas por `mcp_log` (defensa contra vuelco accidental) |
 | `log.mcp_log_max_bytes` | 2 MB | Ventana de cola leída del log (no el archivo completo) |
+| `log.max_bytes` | 5 MB en este equipo (default: 10 MB) | Cuándo rota `server.log` (se renombra a `server.log.1` y empieza de nuevo). Bajar = archivo más liviano, más rotaciones |
+| `log.backup_count` | 3 | Cuántos `server.log.N` se conservan antes de descartar |
 
 ---
 
@@ -355,7 +357,7 @@ Ver la sección "Si quiero activar SSH" abajo.
 
 | Campo | Significado | Valor actual |
 |---|---|---|
-| audit_max_entries | Cuántas operaciones recientes quedan registradas (como caja negra de avión) | 10,000 |
+| audit_max_entries | Cuántas operaciones recientes quedan registradas (como caja negra de avión) | **5,000** en este equipo (default del código: 10,000). Bajar reduce la huella de `audit.json` y el tiempo de arranque |
 | data_dir | Carpeta donde el asistente guarda diario, historial y snapshots | Windows: `C:\Users\TuUsuario\.personal-mcp\data`<br>Linux/macOS: `~/.personal-mcp/data` |
 | config_path | Campo técnico interno, normalmente vacío. No necesitas tocarlo. | (vacío) |
 

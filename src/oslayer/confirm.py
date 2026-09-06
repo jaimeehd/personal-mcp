@@ -68,10 +68,25 @@ def _show_windows(resource: str, operation: str, code: str, batch: bool, files: 
         title = "personal-mcp - Confirmar permiso"
 
     def _show() -> None:
-        ctypes.windll.user32.MessageBoxW(
-            0, message, title,
-            MB_ICONINFORMATION | MB_TOPMOST,
-        )
+        # 2026-09-05: diagnostico de bug esporadico reportado por el usuario
+        # ("pide ticket/popup y no reacciona" -- sin ninguna ventana visible en
+        # ningun lugar del escritorio). Una excepcion no capturada dentro de un
+        # hilo daemon se imprime al stderr del proceso via el hook por defecto
+        # de threading, NO al logger del proyecto -- invisible via mcp_log/
+        # server.log. Import de logger diferido (no a nivel de modulo) para
+        # evitar el ciclo confirm.py -> src.log -> src.oslayer.system ->
+        # src.oslayer.__init__ -> confirm.py detectado al correr los tests.
+        try:
+            ctypes.windll.user32.MessageBoxW(
+                0, message, title,
+                MB_ICONINFORMATION | MB_TOPMOST,
+            )
+        except Exception:
+            from src.log import get_logger
+            get_logger("oslayer.confirm").exception(
+                "MessageBoxW failed to display confirmation popup (resource=%s op=%s)",
+                resource, operation,
+            )
 
     threading.Thread(target=_show, daemon=True).start()
 

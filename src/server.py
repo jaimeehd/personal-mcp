@@ -170,17 +170,20 @@ class AuditedFastMCP(FastMCP):
         # Un new_string con pinta de secreto hace que SOLO esa edición parezca
         # colgarse (bug esporádico reportado). Mover ambos a thread, igual que
         # fs_read ya hace con scan_text, para no bloquear otras tools.
+        # En máquina con poca RAM el thread tarda más por GC/paging, así que
+        # 5s en vez de 2s — si agota, se loguea sin redactar pero la edición
+        # nunca se bloquea.
         try:
             sanitized_args = await asyncio.wait_for(
                 asyncio.to_thread(scrub_sensitive_data, arguments),
-                timeout=2.0,
+                timeout=5.0,
             )
         except TimeoutError:
             # Timeout = valor original sin redactar en log, pero con sufijo;
             # nunca bloquea la edición. El audit log hará su propio intento.
             sanitized_args = arguments
             self._audit_logger.warning(
-                "SLOW_SANITIZE %s sanitize timed out after 2s — logging without redaction for this call",
+                "SLOW_SANITIZE %s sanitize timed out after 5s — logging without redaction for this call",
                 name,
             )
         log_args = {k: v for k, v in sanitized_args.items() if k != "content"}
@@ -197,7 +200,7 @@ class AuditedFastMCP(FastMCP):
                 try:
                     await asyncio.wait_for(
                         asyncio.to_thread(self._audit_log.record, name, arguments, False, elapsed, "permission_required"),
-                        timeout=2.0,
+                        timeout=5.0,
                     )
                 except TimeoutError:
                     self._audit_logger.warning("SLOW_AUDIT %s audit sanitize timed out", name)
@@ -207,7 +210,7 @@ class AuditedFastMCP(FastMCP):
                 try:
                     await asyncio.wait_for(
                         asyncio.to_thread(self._audit_log.record, name, arguments, False, elapsed, failure_text),
-                        timeout=2.0,
+                        timeout=5.0,
                     )
                 except TimeoutError:
                     self._audit_logger.warning("SLOW_AUDIT %s audit sanitize timed out", name)
@@ -217,7 +220,7 @@ class AuditedFastMCP(FastMCP):
                 try:
                     await asyncio.wait_for(
                         asyncio.to_thread(self._audit_log.record, name, arguments, False, elapsed, failure_text),
-                        timeout=2.0,
+                        timeout=5.0,
                     )
                 except TimeoutError:
                     self._audit_logger.warning("SLOW_AUDIT %s audit sanitize timed out", name)
@@ -226,7 +229,7 @@ class AuditedFastMCP(FastMCP):
                 try:
                     await asyncio.wait_for(
                         asyncio.to_thread(self._audit_log.record, name, arguments, True, elapsed),
-                        timeout=2.0,
+                        timeout=5.0,
                     )
                 except TimeoutError:
                     self._audit_logger.warning("SLOW_AUDIT %s audit sanitize timed out", name)
@@ -237,7 +240,7 @@ class AuditedFastMCP(FastMCP):
             try:
                 await asyncio.wait_for(
                     asyncio.to_thread(self._audit_log.record, name, arguments, False, elapsed, str(e)),
-                    timeout=2.0,
+                    timeout=5.0,
                 )
             except TimeoutError:
                 self._audit_logger.warning("SLOW_AUDIT %s audit sanitize timed out", name)

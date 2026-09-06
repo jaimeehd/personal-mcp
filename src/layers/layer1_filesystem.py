@@ -332,7 +332,13 @@ _SEARCH_MAX_FILE_MB = 10
 # server -- the exact bug class already fixed for fs_search's regex in 1.4.7,
 # never applied to the diff computation itself in fs_edit/fs_edit_advanced/
 # fs_diff. Run off-thread with a timeout, same pattern as fs_search.
-_DIFF_TIMEOUT_SECONDS = 10.0
+# 2026-09-06: en máquina con poca RAM el GC/paging hace que 10s se quede
+# corto — el diff se aborta aunque la edición sí se guardó, y el usuario
+# lo ve como fallo esporádico. Subir a 20s y además saltar diff para
+# archivos muy grandes (>500k chars) donde el diff no aporta y solo
+# consume RAM (aprox 3-4× tamaño en pico).
+_DIFF_TIMEOUT_SECONDS = 20.0
+_DIFF_SKIP_CHARS = 500_000
 
 
 def _unified_diff_sync(content_from: str, content_to: str,
@@ -351,13 +357,19 @@ async def _diff_or_timeout_note(content_from: str, content_to: str,
     response can't show a preview, never that the underlying operation failed
     or was skipped.
     """
+    # En máquina limitada: si el archivo es muy grande, ni intentar el diff
+    # — el pico de RAM (splitlines + SequenceMatcher) es ~3-4× tamaño y
+    # además tarda. La edición ya está guardada; el diff es solo preview.
+    if len(content_from) + len(content_to) > _DIFF_SKIP_CHARS:
+        return (f"[diff skipped — file too large ({len(content_from):,} chars) for preview. "
+                f"The operation itself completed successfully; diff preview omitted to save memory.]")
     try:
         return await asyncio.wait_for(
             asyncio.to_thread(_unified_diff_sync, content_from, content_to, fromfile, tofile),
             timeout=_DIFF_TIMEOUT_SECONDS,
         )
     except TimeoutError:
-        return (f"[diff timed out after {_DIFF_TIMEOUT_SECONDS}s -- this file's content made "
+        return (f"[diff timed out after {_DIFF_TIMEOUT_SECONDS:g}s -- this file's content made "
                 f"this specific diff expensive to compute. The operation itself still "
                 f"completed successfully; only this diff preview is unavailable.]")
 

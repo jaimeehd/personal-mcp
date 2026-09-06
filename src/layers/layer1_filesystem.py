@@ -150,7 +150,11 @@ async def fs_edit_impl(path: str, old_string: str, new_string: str, security: Se
     # vuelta al archivo (corrupción). include_scan=False = lectura cruda.
     content = await fs_read_impl(path, security, include_scan=False)
     if old_string not in content:
-        return f"Error: old_string not found in {path}"
+        return f"Error: old_string not found in {path} (tip: if you used fs_read with head/tail, the string may be outside that window — read the full file)"
+    # 2026-09-06: old_string duplicado (ej. "### Fixed" aparece 55 veces en
+    # CHANGELOG.md) — replace(...,1) solo cambia la primera. Antes era
+    # silencioso y parecía "no se aplicó" si querías otra ocurrencia.
+    occurrences = content.count(old_string)
     new_content = content.replace(old_string, new_string, 1)
     # O2 (v1.4.86): fs_write_impl ahora devuelve 'Error: ...' en vez de lanzar
     # (archivo read-only/ACL/bloqueado) — propagar ese error en lugar de
@@ -159,6 +163,8 @@ async def fs_edit_impl(path: str, old_string: str, new_string: str, security: Se
     if write_result.startswith("Error:"):
         return write_result
     diff = await _diff_or_timeout_note(content, new_content)
+    if occurrences > 1:
+        return f"Applied edit. Note: old_string appears {occurrences} times — only the first was replaced. Use more surrounding context to target a specific occurrence.\nDiff:\n{diff}"
     return f"Applied edit. Diff:\n{diff}"
 
 
@@ -996,10 +1002,11 @@ async def fs_edit_batch_impl(edits: list[dict], security: SecurityValidator,
             content = await asyncio.to_thread(rpath.read_text, encoding="utf-8")
             if old_s not in content:
                 logger.warning("fs_edit_batch FAIL path=%s error=old_string_not_found", p)
-                results.append(f"Error: old_string not found in {p}")
+                results.append(f"Error: old_string not found in {p} (tip: head/tail view may have hidden it)")
                 if grant_keys.get(p):
                     security.refund_single(p, grant_keys[p])
                 continue
+            occurrences = content.count(old_s)
             new_content = content.replace(old_s, new_s, 1)
             # O2 (v1.4.86): escritura como string de error (no excepción);
             # si falló la escritura, el archivo quedó intacto → reembolsar.
@@ -1012,7 +1019,10 @@ async def fs_edit_batch_impl(edits: list[dict], security: SecurityValidator,
                 continue
             diff = await _diff_or_timeout_note(content, new_content)
             edited += 1
-            results.append(f"Edited {rpath}:\n{diff}")
+            if occurrences > 1:
+                results.append(f"Edited {rpath} (note: old_string appeared {occurrences} times — only first replaced):\n{diff}")
+            else:
+                results.append(f"Edited {rpath}:\n{diff}")
         except Exception as ex:
             logger.warning("fs_edit_batch FAIL path=%s error=%s", p, ex)
             results.append(f"Error editing {p}: {ex}")
@@ -1676,11 +1686,16 @@ async def fs_edit_advanced_impl(path: str, edits: list[dict[str, str]],
         new_text = edit.get("newText", "")
         if not old_text:
             return f"Error: edit[{i}] missing 'oldText'"
+        # warn if oldText appears multiple times — same duplicate issue as fs_edit
+        occ = new_content.count(old_text)
         idx = new_content.find(old_text)
         if idx == -1:
-            return f"Error: edit[{i}] 'oldText' not found in {path}"
+            return f"Error: edit[{i}] 'oldText' not found in {path} (tip: head/tail view may have hidden it)"
         new_content = new_content[:idx] + new_text + new_content[idx + len(old_text):]
-        match_info.append(f"  Edit {i}: matched at position {idx}")
+        if occ > 1:
+            match_info.append(f"  Edit {i}: matched at position {idx} (note: appeared {occ} times — only first replaced)")
+        else:
+            match_info.append(f"  Edit {i}: matched at position {idx}")
     if dry_run:
         diff = await _diff_or_timeout_note(content, new_content)
         return (f"Dry run - would apply {len(edits)} edit(s):\n"

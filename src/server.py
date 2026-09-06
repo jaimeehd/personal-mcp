@@ -3,6 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import asyncio
 import json
 import os
 import time
@@ -163,7 +164,25 @@ class AuditedFastMCP(FastMCP):
 
     async def call_tool(self, name: str, arguments: dict):
         from src.log import scrub_sensitive_data
-        sanitized_args = scrub_sensitive_data(arguments)
+
+        # 2026-09-06: scrub + audit scan es sync y hace regex (scan_text) que
+        # puede costar ~850ms en 1MB (O1 v1.4.85) y bloquear el event loop.
+        # Un new_string con pinta de secreto hace que SOLO esa edición parezca
+        # colgarse (bug esporádico reportado). Mover ambos a thread, igual que
+        # fs_read ya hace con scan_text, para no bloquear otras tools.
+        try:
+            sanitized_args = await asyncio.wait_for(
+                asyncio.to_thread(scrub_sensitive_data, arguments),
+                timeout=2.0,
+            )
+        except TimeoutError:
+            # Timeout = valor original sin redactar en log, pero con sufijo;
+            # nunca bloquea la edición. El audit log hará su propio intento.
+            sanitized_args = arguments
+            self._audit_logger.warning(
+                "SLOW_SANITIZE %s sanitize timed out after 2s — logging without redaction for this call",
+                name,
+            )
         log_args = {k: v for k, v in sanitized_args.items() if k != "content"}
 
         self._audit_logger.info("CALL %s %s", name, json.dumps(log_args))
@@ -175,23 +194,53 @@ class AuditedFastMCP(FastMCP):
                 self._audit_logger.warning("SLOW %s %.0fms%s", name, elapsed, memory_pressure_hint())
             elif self._is_permission_blocked(name, result):
                 self._audit_logger.warning("BLOCKED %s %.0fms ticket required", name, elapsed)
-                self._audit_log.record(name, arguments, False, elapsed, "permission_required")
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(self._audit_log.record, name, arguments, False, elapsed, "permission_required"),
+                        timeout=2.0,
+                    )
+                except TimeoutError:
+                    self._audit_logger.warning("SLOW_AUDIT %s audit sanitize timed out", name)
             elif self._is_access_denied(result):
                 failure_text = self._result_text(result)
                 self._audit_logger.warning("DENIED %s %.0fms %s", name, elapsed, failure_text)
-                self._audit_log.record(name, arguments, False, elapsed, failure_text)
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(self._audit_log.record, name, arguments, False, elapsed, failure_text),
+                        timeout=2.0,
+                    )
+                except TimeoutError:
+                    self._audit_logger.warning("SLOW_AUDIT %s audit sanitize timed out", name)
             elif self._is_semantic_failure(name, result):
                 failure_text = self._result_text(result)
                 self._audit_logger.warning("FAILED %s %.0fms %s", name, elapsed, failure_text)
-                self._audit_log.record(name, arguments, False, elapsed, failure_text)
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(self._audit_log.record, name, arguments, False, elapsed, failure_text),
+                        timeout=2.0,
+                    )
+                except TimeoutError:
+                    self._audit_logger.warning("SLOW_AUDIT %s audit sanitize timed out", name)
             else:
                 self._audit_logger.info("OK   %s %.0fms", name, elapsed)
-                self._audit_log.record(name, arguments, True, elapsed)
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(self._audit_log.record, name, arguments, True, elapsed),
+                        timeout=2.0,
+                    )
+                except TimeoutError:
+                    self._audit_logger.warning("SLOW_AUDIT %s audit sanitize timed out", name)
             return result
         except Exception as e:
             elapsed = (time.time() - start) * 1000
             self._audit_logger.error("FAIL %s %.0fms %s", name, elapsed, str(e))
-            self._audit_log.record(name, arguments, False, elapsed, str(e))
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(self._audit_log.record, name, arguments, False, elapsed, str(e)),
+                    timeout=2.0,
+                )
+            except TimeoutError:
+                self._audit_logger.warning("SLOW_AUDIT %s audit sanitize timed out", name)
             raise
 
 

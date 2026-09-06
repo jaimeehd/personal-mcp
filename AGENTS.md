@@ -30,7 +30,7 @@
 ## Arranque rápido
 ```powershell
 # ejecutar desde la raíz del repo (la carpeta que contiene .venv/)
-.\.venv\Scripts\python -m pytest tests/ -v       # ~577 tests, verificado 2026-09-04 (0 fallidos). 1 skipped (test no-Windows, esperado en este SO).
+.\.venv\Scripts\python -m pytest tests/ -v       # 577 tests, verificado 2026-09-06 (0 fallidos). 1 skipped (test no-Windows, esperado en este SO).
 .\.venv\Scripts\python -m src.server              # modo stdio para Claude Desktop
 .\install.ps1                                     # registrar con Claude Desktop (crea el venv automáticamente)
 .\sync-config.ps1                                 # refrescar el espejo de solo lectura config.json desde ~/.personal-mcp/config.json

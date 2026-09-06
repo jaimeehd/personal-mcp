@@ -14,7 +14,7 @@ Servidor MCP personalizado para orquestación de estaciones de trabajo Windows/L
   Capa 6: Permissions     — 6 tools (aprobar, denegar, pre-autorizar, listar pendientes, revocar, estadísticas)
 ```
 
-68 tools en total, 64 activas (las 4 de SSH deshabilitadas por defecto).
+68 tools en total, 64 activas (las 4 de SSH deshabilitadas por defecto). Verificado `v1.4.87` `577 passed`.
 
 ## Tools
 

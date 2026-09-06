@@ -1,3 +1,13 @@
+## [1.4.87] — 2026-09-06
+
+### Fixed — edición esporádica en CHANGELOG y archivos similares + timeouts en máquina limitada
+
+- **Contexto (reportado en sesión, no hipotético):** edición fallaba esporádicamente sobre archivos de cierto tamaño/estructura. Confirmado con `CHANGELOG.md` (199.631 bytes, 1150 líneas, 82 versiones `## [1.4.x]` con estructura repetida `### Fixed`×55). `fs_edit` con `replace(...,1)` solo cambia la primera ocurrencia — con `old_string` duplicado parecía "no se aplicó" si se quería otra. Además `fs_edit` leía `head` truncado y el `old_string` quedaba fuera de ventana → `not found` con grant ya consumido pre-v1.4.76. Y en máquina con poca RAM el GC/paging hacía que `_DIFF_TIMEOUT 10s` y `scrub+audit 2s` se quedaran cortos: diff abortaba como `timed out` aunque la edición sí se guardó.
+- **Fix duplicado (`layer1_filesystem.py:150-166,1002-1022,1686-1693`):** `fs_edit`/`fs_edit_batch`/`fs_edit_advanced` ahora cuentan `content.count(old_string)`. Si `>1`, responden `Applied edit. Note: appears N times — only first replaced. Use more surrounding context...`. Error `not found` ahora sugiere `tip: if you used head/tail, string may be outside window`.
+- **Fix low-memory (`layer1_filesystem.py:335-362`, `server.py:168-225`):** `_DIFF_TIMEOUT 10s → 20s` y skip si `>500k chars` (`[diff skipped — file too large for preview]`), evita pico RAM 3-4×. `scrub+audit` en `AuditedFastMCP.call_tool` ya estaba movido a `asyncio.to_thread` (fix sanitización `b99b30b`); timeout `2s → 5s` para no quedarse corto en máquina lenta. La edición nunca se bloquea: en timeout se loguea `SLOW_SANITIZE`/`SLOW_AUDIT` pero el archivo queda guardado crudo y el registro puede quedar sin redactar ese call.
+- **Fix popup diag (`oslayer/confirm.py:70-90`, `a5b2f42`):** `MessageBoxW` envuelto en `try/except` + `logger.exception` — hilo daemon silencioso antes invisible vía `mcp_log`/`server.log`.
+- **Verificado:** `pytest 577 passed, 1 skipped` + repro `CHANGELOG.md` único `7ms` OK, duplicado `55` avisa, `fs_read head=20` no contiene `1.4.80` (stale).
+
 ## [1.4.86] — 2026-09-04
 
 ### Fixed — edición de archivos con error de permisos: string limpio en vez de excepción cruda + grant reembolsado (O2)

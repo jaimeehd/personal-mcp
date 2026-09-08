@@ -512,8 +512,13 @@ async def test_sh_spawn_chained_interpreter_segment_is_gated(temp_home):
     security.perm_manager = perm_manager
 
     # Grant the first segment's executable (echo) -- the interpreter in the
-    # second segment must STILL be gated, keyed on the venv python.
-    perm_manager.grant_direct("spawn:echo", "execute", GrantLevel.SESSION)
+    # second segment must STILL be gated, keyed on the venv python. Resolve the
+    # echo path exactly like _check_spawn_permission does so the test holds on
+    # POSIX too: on macOS/Linux `echo` is a real binary (/bin/echo) that
+    # shutil.which() resolves; on Windows it is a cmd builtin, so the bare
+    # "echo" token is kept (which("echo") is None there).
+    echo_exe = shutil.which("echo") or "echo"
+    perm_manager.grant_direct(f"spawn:{echo_exe}", "execute", GrantLevel.SESSION)
 
     result = _check_spawn_permission(
         'echo hi; python -c "import socket; print(1)"', security
@@ -540,7 +545,8 @@ async def test_sh_spawn_chained_all_segments_granted_passes(temp_home):
     perm_manager = PermissionManager(config)
     security.perm_manager = perm_manager
 
-    perm_manager.grant_direct("spawn:echo", "execute", GrantLevel.SESSION)
+    echo_exe = shutil.which("echo") or "echo"
+    perm_manager.grant_direct(f"spawn:{echo_exe}", "execute", GrantLevel.SESSION)
     perm_manager.grant_direct(f"spawn:{sys.executable}", "execute", GrantLevel.SESSION)
 
     result = _check_spawn_permission(

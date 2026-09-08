@@ -130,11 +130,18 @@ def available_shells():
 
 
 @pytest.fixture
-def skip_on_linux():
-    """Decorator to skip test on Linux."""
+def skip_on_non_windows():
+    """Decorator to skip test on any non-Windows platform.
+
+    Windows-only tests (PATHEXT, powershell/cmd semantics, process trees) used
+    to be gated with a fixture called skip_on_linux, which only skipped Linux
+    and leaked onto macOS runners (24 failures, TypeError NoneType subscriptable,
+    2026-09-08, CI run 15) once the matrix grew past Linux+Windows. The real
+    contract is "run only on Windows".
+    """
     import sys
-    if sys.platform.startswith("linux"):
-        pytest.skip("Test not applicable on Linux")
+    if sys.platform != "win32":
+        pytest.skip("Test not applicable on non-Windows")
 
 
 @pytest.fixture

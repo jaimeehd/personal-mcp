@@ -15,7 +15,7 @@ from src.shell_resolver import (
 )
 
 
-@pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.usefixtures("skip_on_non_windows")
 def test_resolve_powershell_default():
     info = resolve_shell("powershell")
     assert info.name == "powershell"
@@ -37,7 +37,7 @@ def test_resolve_pwsh():
     assert "Set-Location" in info.workdir_prefix
 
 
-@pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.usefixtures("skip_on_non_windows")
 def test_resolve_cmd():
     info = resolve_shell("cmd")
     assert info.name == "cmd"
@@ -51,13 +51,13 @@ def test_resolve_unknown():
         resolve_shell("nonexistent_shell")
 
 
-@pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.usefixtures("skip_on_non_windows")
 def test_resolve_with_shell_map():
     info = resolve_shell("powershell", shell_map={"powershell": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"})
     assert info.executable.lower().endswith("powershell.exe")
 
 
-@pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.usefixtures("skip_on_non_windows")
 def test_find_executable_powershell():
     path = _find_executable("powershell")
     assert path is not None
@@ -149,7 +149,7 @@ def test_operators_single_quotes_ignored():
 # never showed this bug -- only the shell-fallback/session/script/spawn
 # paths that actually invoke powershell.exe -Command do.
 
-@pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.usefixtures("skip_on_non_windows")
 def test_shell_subprocess_env_fixes_missing_pathext(monkeypatch):
     monkeypatch.delenv("PATHEXT", raising=False)
     env = shell_subprocess_env()
@@ -157,7 +157,7 @@ def test_shell_subprocess_env_fixes_missing_pathext(monkeypatch):
     assert ".EXE" in env["PATHEXT"].upper()
 
 
-@pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.usefixtures("skip_on_non_windows")
 def test_shell_subprocess_env_fixes_broken_pathext(monkeypatch):
     # The exact broken value observed live on this machine.
     monkeypatch.setenv("PATHEXT", ".CPL")
@@ -166,7 +166,7 @@ def test_shell_subprocess_env_fixes_broken_pathext(monkeypatch):
     assert ".EXE" in env["PATHEXT"].upper()
 
 
-@pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.usefixtures("skip_on_non_windows")
 def test_shell_subprocess_env_leaves_valid_pathext_untouched(monkeypatch):
     monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CUSTOM")
     env = shell_subprocess_env()
@@ -183,7 +183,7 @@ def test_shell_subprocess_env_none_on_non_windows(monkeypatch):
 # pager (git's default less) can stall a command waiting for input that will
 # never come. Default to cat unless the user set an explicit value. ---
 
-@pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.usefixtures("skip_on_non_windows")
 def test_shell_subprocess_env_sets_pager_defaults(monkeypatch):
     monkeypatch.delenv("PATHEXT", raising=False)
     monkeypatch.delenv("PAGER", raising=False)
@@ -195,7 +195,7 @@ def test_shell_subprocess_env_sets_pager_defaults(monkeypatch):
     assert env["LESS"] == "-FRX"
 
 
-@pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.usefixtures("skip_on_non_windows")
 def test_shell_subprocess_env_respects_explicit_pager(monkeypatch):
     monkeypatch.delenv("PATHEXT", raising=False)
     monkeypatch.setenv("GIT_PAGER", "less")

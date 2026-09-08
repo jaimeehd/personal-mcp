@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed — 24 tests Windows-only fallaban en el matrix macOS (CI run 15, 2026-09-08)
+
+- **Causa raíz**: los tests gateados con la fixture `skip_on_linux` solo saltaban en Linux. Cuando el matrix de CI creció de Linux+Windows a incluir macOS, los 24 tests Windows-only (PATHEXT de `shell_subprocess_env()`, semántica `powershell`/`cmd`, `kill_process_tree`) corrieron en macOS y explotaron con `TypeError: 'NoneType' object is not subscriptable` — `shell_subprocess_env()` devuelve `None` en no-Windows por diseño, y los tests lo subscriptaban. (El primer síntoma en CI, `Event loop is closed`, era la annotation ruidosa del mismo job.)
+- **Fix**: la fixture se renombró a `skip_on_non_windows` (skip si `sys.platform != "win32"`) — el contrato real es "corre solo en Windows", no "salta solo en Linux". 24 call sites actualizados (`tests/test_shell.py` ×15, `tests/test_shell_resolver.py` ×9) + definición en `tests/conftest.py` con docstring que documenta el incidente. Cero referencias restantes a `skip_on_linux`.
+
 ### Changed — Estandarización de parámetros de edición
 
 - **Contrato canónico `old_str`/`new_str`**: `fs_edit`, `fs_edit_batch` y `fs_edit_advanced` usan `old_str`/`new_str` (forma corta). Referencias históricas a `old_string`/`new_string`/`oldText`/`newText` en entradas previas de este CHANGELOG son narrativa, no contrato — no se reescriben por trazabilidad. `README.md` y `tests/test_log.py` alineados al estándar; guardrail en CI (`lint`) bloquea regresiones fuera de `CHANGELOG.md`.

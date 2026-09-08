@@ -72,7 +72,7 @@ async def test_sh_exec_custom_command(sec, manager):
     assert "test" in result
 
 
-@pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.usefixtures("skip_on_non_windows")
 @pytest.mark.asyncio
 async def test_sh_session_create_and_list(sec, manager):
     result = await sh_session_start_impl(manager)
@@ -83,7 +83,7 @@ async def test_sh_session_create_and_list(sec, manager):
     assert data["session_id"][:8] in listing
 
 
-@pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.usefixtures("skip_on_non_windows")
 @pytest.mark.asyncio
 async def test_sh_session_send(sec, manager):
     result = await sh_session_start_impl(manager)
@@ -93,7 +93,7 @@ async def test_sh_session_send(sec, manager):
     await sh_session_close_impl(sid, manager)
 
 
-@pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.usefixtures("skip_on_non_windows")
 @pytest.mark.asyncio
 async def test_sh_session_close(sec, manager):
     result = await sh_session_start_impl(manager)
@@ -103,7 +103,7 @@ async def test_sh_session_close(sec, manager):
     assert "closed" in close_result
 
 
-@pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.usefixtures("skip_on_non_windows")
 @pytest.mark.asyncio
 async def test_sh_session_expired(sec):
     manager = ShellManager(sec, default_timeout=0)
@@ -137,7 +137,7 @@ async def test_drain_stale_output_clears_queue():
     assert session._output_buffer.empty()
 
 
-@pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.usefixtures("skip_on_non_windows")
 @pytest.mark.asyncio
 async def test_session_execute_does_not_leak_stale_output_into_next_command(sec, manager):
     session = await manager.create_session()
@@ -204,7 +204,7 @@ async def test_sh_exec_truncated(sec, manager):
 
 # --- Mejora 2: Shell detection ---
 
-@ pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.usefixtures("skip_on_non_windows")
 @pytest.mark.asyncio
 async def test_sh_exec_cmd_shell(sec, manager):
     cmd_shell = resolve_shell("cmd")
@@ -212,7 +212,7 @@ async def test_sh_exec_cmd_shell(sec, manager):
     assert "hello_cmd" in result
 
 
-@ pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.usefixtures("skip_on_non_windows")
 @pytest.mark.asyncio
 async def test_sh_session_cmd_rejected(sec):
     cmd_shell = resolve_shell("cmd")
@@ -222,7 +222,7 @@ async def test_sh_session_cmd_rejected(sec):
     assert "error" in data
 
 
-@pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.usefixtures("skip_on_non_windows")
 @pytest.mark.asyncio
 async def test_sh_exec_cmd_basic(sec, manager):
     cmd_shell = resolve_shell("cmd")
@@ -308,7 +308,7 @@ async def test_sh_exec_fallback_shell_reports_real_exit_code(sec, manager):
 
 # --- Mejora 4: Kill recursivo ---
 
-@pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.usefixtures("skip_on_non_windows")
 @pytest.mark.asyncio
 async def test_kill_process_tree(sec):
     proc = await asyncio.create_subprocess_exec(
@@ -325,7 +325,7 @@ async def test_kill_process_tree(sec):
 
 # --- Shell switching — parámetro shell en tools ---
 
-@pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.usefixtures("skip_on_non_windows")
 @pytest.mark.asyncio
 async def test_sh_script_with_cmd_shell(sec, manager):
     cmd_shell = resolve_shell("cmd")
@@ -333,7 +333,7 @@ async def test_sh_script_with_cmd_shell(sec, manager):
     assert "hello_script_cmd" in result
 
 
-@pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.usefixtures("skip_on_non_windows")
 @pytest.mark.asyncio
 async def test_manager_resolve_shell(sec):
     mgr = ShellManager(sec, default_timeout=300)
@@ -354,7 +354,7 @@ def test_resolve_shell_invalid_name():
         resolve_shell("nonexistent_shell")
 
 
-@pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.usefixtures("skip_on_non_windows")
 @pytest.mark.asyncio
 async def test_sh_session_start_with_shell_param(sec):
     si = resolve_shell("cmd")
@@ -406,7 +406,7 @@ async def test_sh_spawn_read_not_found(spawn_manager):
     assert "not found" in result.lower()
 
 
-@pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.usefixtures("skip_on_non_windows")
 @pytest.mark.asyncio
 async def test_sh_spawn_kill(sec, manager, spawn_manager):
     result = await sh_spawn_impl("Start-Sleep -Seconds 30", sec, manager, spawn_manager)
@@ -744,7 +744,7 @@ _DETACHED_CHILD = (
 )
 
 
-@pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.usefixtures("skip_on_non_windows")
 @pytest.mark.asyncio
 async def test_sh_exec_native_path_detached_child_returns_early(temp_home):
     """Ruta A (argv nativo): python lanza un nieto desacoplado con
@@ -763,7 +763,7 @@ async def test_sh_exec_native_path_detached_child_returns_early(temp_home):
     assert elapsed < 4, f"expected early return after parent exit, took {elapsed:.1f}s"
 
 
-@pytest.mark.usefixtures("skip_on_linux")
+@pytest.mark.usefixtures("skip_on_non_windows")
 @pytest.mark.asyncio
 async def test_sh_exec_shell_path_detached_child_returns_early(temp_home):
     """Ruta B (shell): el ';' fuerza el fallback a powershell; el nieto

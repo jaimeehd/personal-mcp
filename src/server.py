@@ -167,7 +167,7 @@ class AuditedFastMCP(FastMCP):
 
         # 2026-09-06: scrub + audit scan es sync y hace regex (scan_text) que
         # puede costar ~850ms en 1MB (O1 v1.4.85) y bloquear el event loop.
-        # Un new_string con pinta de secreto hace que SOLO esa edición parezca
+        # Un new_str con pinta de secreto hace que SOLO esa edición parezca
         # colgarse (bug esporádico reportado). Mover ambos a thread, igual que
         # fs_read ya hace con scan_text, para no bloquear otras tools.
         # En máquina con poca RAM el thread tarda más por GC/paging, así que

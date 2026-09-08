@@ -73,6 +73,13 @@ jobs:
         run: |
           ruff check src/ tests/
 
+      - name: Check param naming standard (old_str/new_str)
+        run: |
+          if git grep -nE "old_string|new_string|oldText|newText" -- src/ tests/ README.md; then
+            echo "FAIL: usa old_str/new_str (contrato canonico). CHANGELOG.md historico esta excluido."
+            exit 1
+          fi
+
   security-audit:
     runs-on: ubuntu-latest
     steps:

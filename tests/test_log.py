@@ -122,9 +122,9 @@ def test_scrub_redacts_by_key_name():
 
 
 def test_scrub_redacts_secret_in_unremarkable_key():
-    result = scrub_sensitive_data({"path": "C:\\.env", "new_string": "AKIAABCDEFGHIJKLMNOP"})
-    assert result["new_string"] != "AKIAABCDEFGHIJKLMNOP"
-    assert "REDACTED" in result["new_string"]
+    result = scrub_sensitive_data({"path": "C:\\.env", "new_str": "AKIAABCDEFGHIJKLMNOP"})
+    assert result["new_str"] != "AKIAABCDEFGHIJKLMNOP"
+    assert "REDACTED" in result["new_str"]
     assert result["path"] == "C:\\.env"
 
 

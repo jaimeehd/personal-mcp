@@ -25,7 +25,7 @@ Servidor MCP personalizado para orquestación de estaciones de trabajo Windows/L
 | `fs_write` | Escribir contenido en archivo |
 | `fs_write_batch` | Escribir varios archivos en una sola llamada, con un solo ticket/código de confirmación para la lista completa. Misma ruta repetida con contenido idéntico dedup sin error; con contenido distinto, el batch completo se rechaza antes de tocar el disco. Resumen `N/M files written` con resultados y fallos por archivo |
 | `fs_edit` | Reemplazar texto en archivo con vista previa de diff |
-| `fs_edit_batch` | Editar `old_string`→`new_string` en varios archivos en una sola llamada, con un solo ticket/código de confirmación para la lista completa. Misma ruta repetida con `(old_string, new_string)` idéntico dedup sin error; con un par distinto, el batch completo se rechaza antes de tocar el disco (instrucción ambigua). Resumen `N/M files edited` con resultados y fallos por archivo; archivo inexistente reporta "does not exist", no el engañoso "old_string not found" |
+| `fs_edit_batch` | Editar `old_str`→`new_str` en varios archivos en una sola llamada, con un solo ticket/código de confirmación para la lista completa. Misma ruta repetida con `(old_str, new_str)` idéntico dedup sin error; con un par distinto, el batch completo se rechaza antes de tocar el disco (instrucción ambigua). Resumen `N/M files edited` con resultados y fallos por archivo; archivo inexistente reporta "does not exist", no el engañoso "old_str not found" |
 | `fs_delete` | Eliminar un solo archivo (sin directorios/recursión — usar `fs_delete_directory` para borrar una carpeta completa). Los tickets `delete` son siempre de un solo uso — no se permiten grants de sesión ni permanentes, por diseño |
 | `fs_delete_batch` | Eliminar múltiples archivos listados explícitamente bajo un solo ticket/código de confirmación, en vez de un popup por archivo. Tampoco borra directorios — usar `fs_delete_directory`. Misma regla de solo-uso-único que `fs_delete` |
 | `fs_list` | Listar directorio con filtros |
@@ -170,8 +170,8 @@ El conteo aparece **antes** de que confirmes — igual que el diálogo de Window
 ```
 fs_edit(
     path="C:\\Users\\usuario\\Repos\\MiProyecto\\README.md",
-    old_string="version 1.0",
-    new_string="version 1.1"
+    old_str="version 1.0",
+    new_str="version 1.1"
 )
 ```
 Reemplazo de texto con vista previa de diff. Sin grant activo, devuelve un ticket de escritura (ver "Flujo de aprobación" abajo) en vez de ejecutar.
@@ -198,8 +198,8 @@ Trío rápido de inspección: listar entradas, buscar contenido (grep con regex,
 fs_edit_advanced(
     path="C:\\Users\\usuario\\Repos\\MiProyecto\\config.yaml",
     edits=[
-        {"old_string": "debug: false", "new_string": "debug: true"},
-        {"old_string": "port: 8080", "new_string": "port: 9090"}
+        {"old_str": "debug: false", "new_str": "debug: true"},
+        {"old_str": "port: 8080", "new_str": "port: 9090"}
     ],
     dry_run=True
 )

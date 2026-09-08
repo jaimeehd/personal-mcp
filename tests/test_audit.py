@@ -119,10 +119,10 @@ def test_load_skips_entry_missing_required_key(tmp_path):
 def test_nested_dict_secret_is_redacted(audit_log):
     entry = audit_log.record(
         "fs_edit_advanced",
-        {"edits": [{"oldText": "a", "newText": "AKIAABCDEFGHIJKLMNOP"}]},
+        {"edits": [{"old_str": "a", "new_str": "AKIAABCDEFGHIJKLMNOP"}]},
         True, 1.0,
     )
-    new_text = entry.args["edits"][0]["newText"]
+    new_text = entry.args["edits"][0]["new_str"]
     assert new_text != "AKIAABCDEFGHIJKLMNOP"
     assert "REDACTED" in new_text
 

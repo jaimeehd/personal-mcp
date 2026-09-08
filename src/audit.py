@@ -56,7 +56,7 @@ class AuditEntry:
 
         Recursion (M-C3, auditoría 2026-08-11): nested dicts/lists are walked
         too, matching log.py::scrub_sensitive_data(). Before this, an argument
-        like {"edits": [{"newText": "API_KEY=sk-..."}]} was persisted verbatim
+        like {"edits": [{"new_str": "API_KEY=sk-..."}]} was persisted verbatim
         because only top-level string values were scanned.
         """
         return AuditEntry._redact(args)

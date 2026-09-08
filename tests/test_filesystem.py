@@ -160,7 +160,7 @@ async def test_edit_diff_timeout(monkeypatch, sample_file, sec):
         time_module.sleep(0.3)
         return "some diff"
 
-    monkeypatch.setattr(layer1, "_unified_diff_sync", slow_diff)
+    monkeypatch.setattr(layer1, "_git_diff_sync", slow_diff)
     result = await fs_edit_impl(str(sample_file), "Hello", "Goodbye", sec)
     assert "Applied edit" in result
     assert "timed out" in result
@@ -438,7 +438,7 @@ async def test_read_media_image(temp_home, sec):
 async def test_edit_advanced_single(sample_file, sec):
     result = await fs_edit_advanced_impl(
         str(sample_file),
-        [{"oldText": "Hello, World!", "newText": "Bonjour, World!"}],
+        [{"old_str": "Hello, World!", "new_str": "Bonjour, World!"}],
         sec,
     )
     assert "Applied" in result
@@ -450,8 +450,8 @@ async def test_edit_advanced_multiple(sample_file, sec):
     result = await fs_edit_advanced_impl(
         str(sample_file),
         [
-            {"oldText": "Hello", "newText": "Bonjour"},
-            {"oldText": "test", "newText": "essai"},
+            {"old_str": "Hello", "new_str": "Bonjour"},
+            {"old_str": "test", "new_str": "essai"},
         ],
         sec,
     )
@@ -466,7 +466,7 @@ async def test_edit_advanced_dry_run(sample_file, sec):
     original = sample_file.read_text()
     result = await fs_edit_advanced_impl(
         str(sample_file),
-        [{"oldText": "Hello", "newText": "Bonjour"}],
+        [{"old_str": "Hello", "new_str": "Bonjour"}],
         sec,
         dry_run=True,
     )
@@ -1312,12 +1312,12 @@ async def test_compress_does_not_follow_symlinked_dir(temp_home, sec):
 
 @pytest.mark.asyncio
 async def test_edit_advanced_rejects_fuzzy_non_exact_match(sample_file, sec):
-    # oldText differs only by trailing whitespace; the old fuzzy fallback would
+    # old_str differs only by trailing whitespace; the old fuzzy fallback would
     # have matched it and corrupted the file. Strict mode must reject and leave
     # the file untouched.
     original = sample_file.read_text()
     result = await fs_edit_advanced_impl(
-        str(sample_file), [{"oldText": "Hello, World!  ", "newText": "INJECTED"}], sec
+        str(sample_file), [{"old_str": "Hello, World!  ", "new_str": "INJECTED"}], sec
     )
     assert "not found" in result
     assert sample_file.read_text() == original
@@ -1336,10 +1336,10 @@ async def test_edit_nonexistent_file_returns_error(temp_home, sec):
 async def test_edit_advanced_nonexistent_file_returns_error(temp_home, sec):
     """Same fix as test_edit_nonexistent_file_returns_error, applied to the
     advanced variant: without the is_file check, this used to report a
-    misleading "'oldText' not found" instead of the real problem."""
+    misleading "'old_str' not found" instead of the real problem."""
     missing = temp_home / "Repos" / "does_not_exist_advanced.txt"
     result = await fs_edit_advanced_impl(
-        str(missing), [{"oldText": "old", "newText": "new"}], sec
+        str(missing), [{"old_str": "old", "new_str": "new"}], sec
     )
     assert "not a file or does not exist" in result
 
@@ -1393,8 +1393,8 @@ async def test_batch_copy_outside_target_rejected(temp_home, sec):
 
 
 # --- refund_single (2026-08-15): fs_edit's/fs_edit_advanced's wrapper consumes
-# a SINGLE grant before checking whether the edit is even possible (old_string
-# present, oldText present, edits non-empty). A mismatch there must not cost
+# a SINGLE grant before checking whether the edit is even possible (old_str
+# present, old_str present, edits non-empty). A mismatch there must not cost
 # the caller a second ticket/popup for a retry against the same file. ---
 
 def _make_single_grant_sec(temp_home, resource: str, operation: str = "write"):
@@ -1437,20 +1437,20 @@ async def test_edit_refunds_single_grant_on_content_mismatch(temp_home):
                           logger=logging.getLogger("test-edit-refund"))
     register_filesystem_tools(app, sec)
 
-    # Wrong old_string: must fail without writing, and must not spend the
+    # Wrong old_str: must fail without writing, and must not spend the
     # single grant we just approved.
     result = await app.call_tool(
-        "fs_edit", {"path": str(f), "old_string": "wrong text", "new_string": "irrelevant"}
+        "fs_edit", {"path": str(f), "old_str": "wrong text", "new_str": "irrelevant"}
     )
     text = app._result_text(result)
-    assert "old_string not found" in text
+    assert "old_str not found" in text
     assert f.read_text() == "original content"
 
-    # Correct old_string, same (never re-approved) ticket's grant. If the
+    # Correct old_str, same (never re-approved) ticket's grant. If the
     # refund did not happen this comes back permission_required instead of
     # actually applying the edit.
     result = await app.call_tool(
-        "fs_edit", {"path": str(f), "old_string": "original", "new_string": "updated"}
+        "fs_edit", {"path": str(f), "old_str": "original", "new_str": "updated"}
     )
     text = app._result_text(result)
     assert "Applied edit" in text
@@ -1475,10 +1475,10 @@ async def test_edit_does_not_fabricate_grant_when_session_authorized(sample_file
     register_filesystem_tools(app, sec)
 
     result = await app.call_tool(
-        "fs_edit", {"path": str(sample_file), "old_string": "definitely not present", "new_string": "x"}
+        "fs_edit", {"path": str(sample_file), "old_str": "definitely not present", "new_str": "x"}
     )
     text = app._result_text(result)
-    assert "old_string not found" in text
+    assert "old_str not found" in text
     resolved = sec.perm_manager._resolve(str(sample_file))
     assert resolved not in sec.perm_manager._single_grants
 
@@ -1507,7 +1507,7 @@ async def test_edit_advanced_refunds_single_grant_on_empty_edits(temp_home):
 
     result = await app.call_tool(
         "fs_edit_advanced",
-        {"path": str(f), "edits": [{"oldText": "content", "newText": "changed"}]},
+        {"path": str(f), "edits": [{"old_str": "content", "new_str": "changed"}]},
     )
     text = app._result_text(result)
     assert "Applied 1 edit" in text
@@ -1524,8 +1524,8 @@ async def test_edit_batch_basic(temp_home, sec):
     b.write_text("hello beta")
     result = await fs_edit_batch_impl(
         [
-            {"path": str(a), "old_string": "hello", "new_string": "goodbye"},
-            {"path": str(b), "old_string": "hello", "new_string": "goodbye"},
+            {"path": str(a), "old_str": "hello", "new_str": "goodbye"},
+            {"path": str(b), "old_str": "hello", "new_str": "goodbye"},
         ],
         sec,
     )
@@ -1534,27 +1534,41 @@ async def test_edit_batch_basic(temp_home, sec):
     assert b.read_text() == "goodbye beta"
 
 
-@pytest.mark.asyncio
 async def test_edit_batch_nonexistent_file_reports_clear_error(temp_home, sec):
     """Same M-F1 reasoning as fs_edit_impl: a nonexistent file must report
-    'does not exist', not the misleading 'old_string not found'."""
+    'does not exist', not the misleading 'old_str not found'."""
     missing = temp_home / "Repos" / "eb_missing.txt"
     result = await fs_edit_batch_impl(
-        [{"path": str(missing), "old_string": "x", "new_string": "y"}], sec
+        [{"path": str(missing), "old_str": "x", "new_str": "y"}], sec
     )
     assert "0/1 files edited" in result
     assert "not a file or does not exist" in result
 
 
 @pytest.mark.asyncio
-async def test_edit_batch_old_string_not_found(temp_home, sec):
+async def test_edit_batch_missing_old_str_does_not_corrupt(temp_home, sec):
+    """Guard anti-corrupción: old_str vacío NO debe insertar new_str al
+    inicio del archivo (replace("", x, 1) inserta al inicio)."""
+    f = temp_home / "Repos" / "eb_no_old_str.txt"
+    original = "intact beta"
+    f.write_text(original)
+    result = await fs_edit_batch_impl(
+        [{"path": str(f), "new_str": "INJECTED"}], sec
+    )
+    assert "0/1 files edited" in result
+    assert "missing 'old_str'" in result
+    assert f.read_text() == original
+
+
+@pytest.mark.asyncio
+async def test_edit_batch_old_str_not_found(temp_home, sec):
     a = temp_home / "Repos" / "eb_mismatch.txt"
     a.write_text("actual content")
     result = await fs_edit_batch_impl(
-        [{"path": str(a), "old_string": "wrong text", "new_string": "y"}], sec
+        [{"path": str(a), "old_str": "wrong text", "new_str": "y"}], sec
     )
     assert "0/1 files edited" in result
-    assert "old_string not found" in result
+    assert "old_str not found" in result
     assert a.read_text() == "actual content"
 
 
@@ -1579,8 +1593,8 @@ async def test_edit_batch_logs_individual_failures(temp_home, sec):
 
     result = await fs_edit_batch_impl(
         [
-            {"path": str(ok), "old_string": "keep", "new_string": "changed"},
-            {"path": str(outside), "old_string": "x", "new_string": "y"},
+            {"path": str(ok), "old_str": "keep", "new_str": "changed"},
+            {"path": str(outside), "old_str": "x", "new_str": "y"},
         ],
         sec,
     )
@@ -1593,7 +1607,7 @@ async def test_edit_batch_logs_individual_failures(temp_home, sec):
 
 @pytest.mark.asyncio
 async def test_edit_batch_dedup_identical_edit_no_error(temp_home, sec):
-    """Same path repeated with an IDENTICAL (old_string, new_string) pair
+    """Same path repeated with an IDENTICAL (old_str, new_str) pair
     dedupes silently -- same reasoning as fs_delete_batch/fs_write_batch."""
     import logging
 
@@ -1608,7 +1622,7 @@ async def test_edit_batch_dedup_identical_edit_no_error(temp_home, sec):
                           logger=logging.getLogger("test-edit-batch-dedup"))
     register_filesystem_tools(app, sec)
 
-    edit = {"path": str(a), "old_string": "hello", "new_string": "goodbye"}
+    edit = {"path": str(a), "old_str": "hello", "new_str": "goodbye"}
     result = await app.call_tool("fs_edit_batch", {"edits": [edit, edit]})
     text = app._result_text(result)
 
@@ -1619,7 +1633,7 @@ async def test_edit_batch_dedup_identical_edit_no_error(temp_home, sec):
 @pytest.mark.asyncio
 async def test_edit_batch_conflicting_edits_rejected(temp_home, sec):
     """Same design gap as fs_write_batch: same path with a DIFFERENT
-    (old_string, new_string) pair is an ambiguous instruction, not a
+    (old_str, new_str) pair is an ambiguous instruction, not a
     duplicate -- the whole batch is rejected before touching the filesystem.
     """
     import logging
@@ -1638,8 +1652,8 @@ async def test_edit_batch_conflicting_edits_rejected(temp_home, sec):
     result = await app.call_tool(
         "fs_edit_batch",
         {"edits": [
-            {"path": str(a), "old_string": "original", "new_string": "version A"},
-            {"path": str(a), "old_string": "original", "new_string": "version B"},
+            {"path": str(a), "old_str": "original", "new_str": "version A"},
+            {"path": str(a), "old_str": "original", "new_str": "version B"},
         ]},
     )
     text = app._result_text(result)
@@ -1665,7 +1679,7 @@ async def test_edit_batch_diff_timeout_does_not_block_batch(monkeypatch, temp_ho
         time_module.sleep(0.3)
         return "some diff"
 
-    monkeypatch.setattr(layer1, "_unified_diff_sync", slow_diff)
+    monkeypatch.setattr(layer1, "_git_diff_sync", slow_diff)
 
     slow = temp_home / "Repos" / "eb_slow_diff.txt"
     fast = temp_home / "Repos" / "eb_fast.txt"
@@ -1674,8 +1688,8 @@ async def test_edit_batch_diff_timeout_does_not_block_batch(monkeypatch, temp_ho
 
     result = await fs_edit_batch_impl(
         [
-            {"path": str(slow), "old_string": "hello", "new_string": "goodbye"},
-            {"path": str(fast), "old_string": "hello", "new_string": "goodbye"},
+            {"path": str(slow), "old_str": "hello", "new_str": "goodbye"},
+            {"path": str(fast), "old_str": "hello", "new_str": "goodbye"},
         ],
         sec,
     )
@@ -1713,8 +1727,8 @@ def _make_batch_single_grant_sec(temp_home, resources: list[str], operation: str
 async def test_edit_batch_refunds_single_grant_on_content_mismatch(temp_home):
     """Same bug class as fs_edit, now in the batch tool (2026-08-16):
     validate_tool_paths_batch() consumes one SINGLE grant per path before
-    fs_edit_batch_impl's per-item loop checks old_string -- a stale
-    old_string on one path must not burn that path's grant, and must not
+    fs_edit_batch_impl's per-item loop checks old_str -- a stale
+    old_str on one path must not burn that path's grant, and must not
     touch the grant of the path that succeeded.
     """
     import logging
@@ -1736,22 +1750,22 @@ async def test_edit_batch_refunds_single_grant_on_content_mismatch(temp_home):
     result = await app.call_tool(
         "fs_edit_batch",
         {"edits": [
-            {"path": str(good), "old_string": "hello", "new_string": "goodbye"},
-            {"path": str(bad), "old_string": "wrong text", "new_string": "goodbye"},
+            {"path": str(good), "old_str": "hello", "new_str": "goodbye"},
+            {"path": str(bad), "old_str": "wrong text", "new_str": "goodbye"},
         ]},
     )
     text = app._result_text(result)
     assert "1/2 files edited" in text
-    assert "old_string not found" in text
+    assert "old_str not found" in text
     assert good.read_text() == "goodbye good"
     assert bad.read_text() == "hello bad"
 
     # good's grant is gone (consumed, edit succeeded, correctly not refunded);
-    # bad's grant was refunded -- retry with the correct old_string, same
+    # bad's grant was refunded -- retry with the correct old_str, same
     # (never re-approved) batch ticket's grant applies it.
     result = await app.call_tool(
         "fs_edit_batch",
-        {"edits": [{"path": str(bad), "old_string": "hello", "new_string": "goodbye"}]},
+        {"edits": [{"path": str(bad), "old_str": "hello", "new_str": "goodbye"}]},
     )
     text = app._result_text(result)
     assert "1/1 files edited" in text
@@ -1779,10 +1793,10 @@ async def test_edit_batch_does_not_fabricate_grant_when_session_authorized(temp_
 
     result = await app.call_tool(
         "fs_edit_batch",
-        {"edits": [{"path": str(f), "old_string": "not present", "new_string": "x"}]},
+        {"edits": [{"path": str(f), "old_str": "not present", "new_str": "x"}]},
     )
     text = app._result_text(result)
-    assert "old_string not found" in text
+    assert "old_str not found" in text
     resolved = sec.perm_manager._resolve(str(f))
     assert resolved not in sec.perm_manager._single_grants
 
@@ -1840,7 +1854,7 @@ async def test_edit_advanced_dry_run_refunds_single_grant(temp_home):
 
     result = await app.call_tool(
         "fs_edit_advanced",
-        {"path": str(f), "edits": [{"oldText": "content", "newText": "changed"}], "dry_run": True},
+        {"path": str(f), "edits": [{"old_str": "content", "new_str": "changed"}], "dry_run": True},
     )
     text = app._result_text(result)
     assert "Dry run" in text
@@ -1849,7 +1863,7 @@ async def test_edit_advanced_dry_run_refunds_single_grant(temp_home):
     # Same (never re-approved) ticket's grant applies the real edit.
     result = await app.call_tool(
         "fs_edit_advanced",
-        {"path": str(f), "edits": [{"oldText": "content", "newText": "changed"}]},
+        {"path": str(f), "edits": [{"old_str": "content", "new_str": "changed"}]},
     )
     text = app._result_text(result)
     assert "Applied 1 edit" in text
@@ -2249,7 +2263,7 @@ async def test_edit_single_grant_refunded_on_write_failure(temp_home):
                              logger=logging.getLogger("test-ro-grant"))
         register_filesystem_tools(app, sec)
         res = await app.call_tool(
-            "fs_edit", {"path": str(f), "old_string": "world", "new_string": "there"})
+            "fs_edit", {"path": str(f), "old_str": "world", "new_str": "there"})
         text = app._result_text(res)
         if not text.startswith("Error:"):
             pytest.skip("OS permitio escribir pese al readonly")

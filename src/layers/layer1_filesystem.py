@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import concurrent.futures
 import difflib
 import fnmatch
 import hashlib
@@ -8,6 +9,8 @@ import mimetypes
 import os
 import re
 import shutil
+import subprocess
+import tempfile
 import time
 import zipfile
 from datetime import UTC, datetime
@@ -138,10 +141,10 @@ async def fs_write_impl(path: str, content: str, security: SecurityValidator, en
     return f"Written {len(content)} chars ({size_bytes:,} bytes) to {rpath}"
 
 
-async def fs_edit_impl(path: str, old_string: str, new_string: str, security: SecurityValidator) -> str:
+async def fs_edit_impl(path: str, old_str: str, new_str: str, security: SecurityValidator) -> str:
     rpath = security.resolve_and_validate(path)
     # M-F1 (auditoría 2026-08-11): editing a nonexistent file used to fall through
-    # to a misleading "old_string not found" (fs_read_impl returns an error string
+    # to a misleading "old_str not found" (fs_read_impl returns an error string
     # rather than raising). Report the real problem instead.
     if not await asyncio.to_thread(rpath.is_file):
         return f"Error: not a file or does not exist: {rpath}"
@@ -149,13 +152,13 @@ async def fs_edit_impl(path: str, old_string: str, new_string: str, security: Se
     # anexaba "--- Security Scan ---" al contenido y fs_edit lo escribía de
     # vuelta al archivo (corrupción). include_scan=False = lectura cruda.
     content = await fs_read_impl(path, security, include_scan=False)
-    if old_string not in content:
-        return f"Error: old_string not found in {path} (tip: if you used fs_read with head/tail, the string may be outside that window — read the full file)"
-    # 2026-09-06: old_string duplicado (ej. "### Fixed" aparece 55 veces en
+    if old_str not in content:
+        return f"Error: old_str not found in {path} (tip: if you used fs_read with head/tail, the string may be outside that window — read the full file)"
+    # 2026-09-06: old_str duplicado (ej. "### Fixed" aparece 55 veces en
     # CHANGELOG.md) — replace(...,1) solo cambia la primera. Antes era
     # silencioso y parecía "no se aplicó" si querías otra ocurrencia.
-    occurrences = content.count(old_string)
-    new_content = content.replace(old_string, new_string, 1)
+    occurrences = content.count(old_str)
+    new_content = content.replace(old_str, new_str, 1)
     # O2 (v1.4.86): fs_write_impl ahora devuelve 'Error: ...' en vez de lanzar
     # (archivo read-only/ACL/bloqueado) — propagar ese error en lugar de
     # reportar "Applied edit" falso (antes se descartaba el return).
@@ -164,7 +167,7 @@ async def fs_edit_impl(path: str, old_string: str, new_string: str, security: Se
         return write_result
     diff = await _diff_or_timeout_note(content, new_content)
     if occurrences > 1:
-        return f"Applied edit. Note: old_string appears {occurrences} times — only the first was replaced. Use more surrounding context to target a specific occurrence.\nDiff:\n{diff}"
+        return f"Applied edit. Note: old_str appears {occurrences} times — only the first was replaced. Use more surrounding context to target a specific occurrence.\nDiff:\n{diff}"
     return f"Applied edit. Diff:\n{diff}"
 
 
@@ -340,6 +343,23 @@ _SEARCH_MAX_FILE_MB = 10
 _DIFF_TIMEOUT_SECONDS = 20.0
 _DIFF_SKIP_CHARS = 500_000
 
+# 2026-09-06: asyncio.wait_for() around asyncio.to_thread() bounds how long the
+# CALLER waits, but never kills the underlying thread -- a genuinely pathological
+# SequenceMatcher case (see comment above) keeps running forever in the
+# background. asyncio.to_thread() always uses the process-wide DEFAULT executor,
+# shared by every other to_thread call in this module (mkdir, read_text,
+# write_text, etc.) -- so each leaked diff thread permanently steals one worker
+# slot from that shared pool. Enough leaked diffs (confirmed live 2026-09-06:
+# repeated edits to a large, repetitive file like AGENTS.md) exhaust the pool,
+# and THEN unrelated calls (a plain mkdir, even a dry_run that never touches
+# disk) queue behind them with no error, no timeout, no log line -- indistinguishable
+# from the server being completely unresponsive. Isolating the diff computation
+# in its own small dedicated executor means a leaked thread only ever costs one
+# of ITS OWN slots, never the shared pool every other tool call depends on.
+_diff_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="diff-worker"
+)
+
 
 def _unified_diff_sync(content_from: str, content_to: str,
                         fromfile: str = "before", tofile: str = "after") -> str:
@@ -348,6 +368,55 @@ def _unified_diff_sync(content_from: str, content_to: str,
         content_to.splitlines(keepends=True),
         fromfile=fromfile, tofile=tofile,
     ))
+
+
+# 2026-09-06: replaces difflib.SequenceMatcher as the primary diff engine (see
+# comment above _DIFF_TIMEOUT_SECONDS for the pathological case that motivated
+# this). git's own diff engine (xdiff, Myers-based) is what this project
+# already trusts for large, repetitive text -- project_git_status/CHANGELOG.md
+# itself (200KB, 82 versions, dozens of near-identical sections) is exactly
+# the profile that hung difflib. No new dependency: git is already assumed
+# present (config.py allow_prefix, layer4_personal.py's _git_project_info).
+# _unified_diff_sync above is kept as the fallback for the rare case git is
+# missing, fails, or times out -- never a hard failure just because git isn't
+# on PATH on some machine.
+def _git_diff_sync(content_from: str, content_to: str,
+                    fromfile: str = "before", tofile: str = "after") -> str:
+    if shutil.which("git") is None:
+        return _unified_diff_sync(content_from, content_to, fromfile, tofile)
+    tmp_dir = tempfile.mkdtemp(prefix="personal-mcp-diff-")
+    try:
+        path_a = Path(tmp_dir) / "before"
+        path_b = Path(tmp_dir) / "after"
+        try:
+            path_a.write_text(content_from, encoding="utf-8", newline="")
+            path_b.write_text(content_to, encoding="utf-8", newline="")
+        except OSError:
+            return _unified_diff_sync(content_from, content_to, fromfile, tofile)
+        try:
+            # stdin=DEVNULL is NOT optional: inheriting this server's stdin (the
+            # JSON-RPC pipe to the MCP client on a stdio server) is what actually
+            # caused an earlier multi-minute-hang incident blamed on something
+            # else entirely (see _git_project_info in layer4_personal.py).
+            result = subprocess.run(
+                ["git", "diff", "--no-index", "--no-color", "--",
+                 str(path_a), str(path_b)],
+                capture_output=True, text=True, timeout=_DIFF_TIMEOUT_SECONDS,
+                stdin=subprocess.DEVNULL,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return _unified_diff_sync(content_from, content_to, fromfile, tofile)
+        # `git diff --no-index` exits 0 (no differences) or 1 (differences
+        # found) on a NORMAL run -- both are success. 2+ means a real error
+        # (bad args, git itself broken), not "no diff computed here".
+        if result.returncode not in (0, 1):
+            return _unified_diff_sync(content_from, content_to, fromfile, tofile)
+        # stdout is a str with capture_output=True+text=True, but guard anyway:
+        # a None here crashed live edits at 2026-09-07 02:46 ('NoneType' object
+        # has no attribute 'replace') right after the file was already written.
+        return (result.stdout or "").replace(str(path_a), fromfile).replace(str(path_b), tofile)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 async def _diff_or_timeout_note(content_from: str, content_to: str,
@@ -363,15 +432,18 @@ async def _diff_or_timeout_note(content_from: str, content_to: str,
     if len(content_from) + len(content_to) > _DIFF_SKIP_CHARS:
         return (f"[diff skipped — file too large ({len(content_from):,} chars) for preview. "
                 f"The operation itself completed successfully; diff preview omitted to save memory.]")
+    loop = asyncio.get_running_loop()
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(_unified_diff_sync, content_from, content_to, fromfile, tofile),
+            loop.run_in_executor(_diff_executor, _git_diff_sync, content_from, content_to, fromfile, tofile),
             timeout=_DIFF_TIMEOUT_SECONDS,
         )
     except TimeoutError:
         return (f"[diff timed out after {_DIFF_TIMEOUT_SECONDS:g}s -- this file's content made "
                 f"this specific diff expensive to compute. The operation itself still "
-                f"completed successfully; only this diff preview is unavailable.]")
+                f"completed successfully; only this diff preview is unavailable. This diff runs "
+                f"in an isolated worker pool, so a slow or hung diff cannot block other "
+                f"filesystem operations.]")
 
 
 def _walk_files_no_symlinks(root: Path, include_dirs: bool = False):
@@ -940,15 +1012,15 @@ async def fs_write_batch_impl(writes: list[dict], security: SecurityValidator) -
 
 def _dedupe_edits(edits: list[dict]) -> tuple[list[dict], list[str]]:
     """Same reasoning as _dedupe_writes: a repeated path with an IDENTICAL
-    (old_string, new_string) pair dedupes silently; a repeated path with a
+    (old_str, new_str) pair dedupes silently; a repeated path with a
     DIFFERENT pair is an ambiguous instruction, rejected up front rather than
     silently applying one and discarding the other.
     """
-    seen: dict[str, tuple[str, str]] = {}
+    seen: dict[str, tuple] = {}
     conflicts: set[str] = set()
     for e in edits:
         path = e.get("path", "")
-        pair = (e.get("old_string", ""), e.get("new_string", ""))
+        pair = (e.get("old_str", ""), e.get("new_str", ""))
         if path in seen and seen[path] != pair:
             conflicts.add(path)
         seen.setdefault(path, pair)
@@ -977,7 +1049,7 @@ async def fs_edit_batch_impl(edits: list[dict], security: SecurityValidator,
 
     Same M-F1 reasoning as fs_edit_impl: check the file exists before reading,
     so a nonexistent file reports "does not exist" instead of the misleading
-    "old_string not found". Same per-item failure logging as fs_delete_batch/
+    "old_str not found". Same per-item failure logging as fs_delete_batch/
     fs_write_batch (2026-08-07): a batch's partial failures need to be
     diagnosable from server.log after the fact, not only from the return
     string of a single chat turn. Same "don't re-pass the operation"
@@ -990,7 +1062,7 @@ async def fs_edit_batch_impl(edits: list[dict], security: SecurityValidator,
     for a path whose access came from a session/permanent grant, meaning
     nothing was consumed for it and there is nothing to refund. Only refunded
     on the two failure branches below where the file is provably untouched
-    (not found, old_string absent). The bare `except Exception` branch is
+    (not found, old_str absent). The bare `except Exception` branch is
     deliberately NOT refunded: write_text() may have already succeeded before
     _diff_or_timeout_note() or something else downstream raised, so we cannot
     tell from here whether the file was actually modified -- refunding on an
@@ -1001,8 +1073,8 @@ async def fs_edit_batch_impl(edits: list[dict], security: SecurityValidator,
     edited = 0
     for e in edits:
         p = e.get("path", "")
-        old_s = e.get("old_string", "")
-        new_s = e.get("new_string", "")
+        old_s = e.get("old_str", "")
+        new_s = e.get("new_str", "")
         try:
             rpath = security.resolve_and_validate(p)
             if not await asyncio.to_thread(rpath.is_file):
@@ -1012,9 +1084,18 @@ async def fs_edit_batch_impl(edits: list[dict], security: SecurityValidator,
                     security.refund_single(p, grant_keys[p])
                 continue
             content = await asyncio.to_thread(rpath.read_text, encoding="utf-8")
+            if not old_s:
+                # A la derecha de un old_s vacío, content.replace("", new_s, 1)
+                # INSERTARÍA new_s al inicio del archivo (corrupción silenciosa).
+                # Igual que fs_edit_advanced_impl: rechazar en vez de escribir.
+                logger.warning("fs_edit_batch FAIL path=%s error=missing_old_str", p)
+                results.append(f"Error: missing 'old_str' for {p}")
+                if grant_keys.get(p):
+                    security.refund_single(p, grant_keys[p])
+                continue
             if old_s not in content:
-                logger.warning("fs_edit_batch FAIL path=%s error=old_string_not_found", p)
-                results.append(f"Error: old_string not found in {p} (tip: head/tail view may have hidden it)")
+                logger.warning("fs_edit_batch FAIL path=%s error=old_str_not_found", p)
+                results.append(f"Error: old_str not found in {p} (tip: head/tail view may have hidden it)")
                 if grant_keys.get(p):
                     security.refund_single(p, grant_keys[p])
                 continue
@@ -1032,7 +1113,7 @@ async def fs_edit_batch_impl(edits: list[dict], security: SecurityValidator,
             diff = await _diff_or_timeout_note(content, new_content)
             edited += 1
             if occurrences > 1:
-                results.append(f"Edited {rpath} (note: old_string appeared {occurrences} times — only first replaced):\n{diff}")
+                results.append(f"Edited {rpath} (note: old_str appeared {occurrences} times — only first replaced):\n{diff}")
             else:
                 results.append(f"Edited {rpath}:\n{diff}")
         except Exception as ex:
@@ -1683,8 +1764,8 @@ async def fs_edit_advanced_impl(path: str, edits: list[dict[str, str]],
     rpath = security.resolve_and_validate(path)
     # Same fix as fs_edit_impl's M-F1 (2026-08-11), applied here 2026-08-15:
     # editing a nonexistent file used to fall through to a misleading
-    # "'oldText' not found" -- fs_read_impl returns an error string rather
-    # than raising, and the loop below would try to match oldText against
+    # "'old_str' not found" -- fs_read_impl returns an error string rather
+    # than raising, and the loop below would try to match old_str against
     # that error string as if it were real file content. Report the real
     # problem instead.
     if not await asyncio.to_thread(rpath.is_file):
@@ -1694,15 +1775,15 @@ async def fs_edit_advanced_impl(path: str, edits: list[dict[str, str]],
     new_content = content
     match_info = []
     for i, edit in enumerate(edits):
-        old_text = edit.get("oldText", "")
-        new_text = edit.get("newText", "")
+        old_text = edit.get("old_str", "")
+        new_text = edit.get("new_str", "")
         if not old_text:
-            return f"Error: edit[{i}] missing 'oldText'"
-        # warn if oldText appears multiple times — same duplicate issue as fs_edit
+            return f"Error: edit[{i}] missing 'old_str'"
+        # warn if old_str appears multiple times — same duplicate issue as fs_edit
         occ = new_content.count(old_text)
         idx = new_content.find(old_text)
         if idx == -1:
-            return f"Error: edit[{i}] 'oldText' not found in {path} (tip: head/tail view may have hidden it)"
+            return f"Error: edit[{i}] 'old_str' not found in {path} (tip: head/tail view may have hidden it)"
         new_content = new_content[:idx] + new_text + new_content[idx + len(old_text):]
         if occ > 1:
             match_info.append(f"  Edit {i}: matched at position {idx} (note: appeared {occ} times — only first replaced)")
@@ -1747,10 +1828,20 @@ def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None
         return result
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False, destructiveHint=True))
-    async def fs_edit(path: str, old_string: str, new_string: str) -> str:
+    async def fs_edit(path: str, old_str: str, new_str: str) -> str:
+        """Reemplaza la primera ocurrencia de `old_str` por `new_str` en el
+        archivo `path`, mostrando una vista previa del diff.
+
+        Parámetros canónicos (contrato estándar de edición):
+        - `old_str`: texto a buscar (primera ocurrencia si aparece repetido).
+        - `new_str`: texto de reemplazo.
+
+        Sin un grant activo, devuelve un ticket de escritura (ver flujo de
+        aprobación) en vez de escribir.
+        """
         # M-Fxx (2026-08-15): validate_tool_path() consumes a SINGLE grant (if
         # that's what authorizes this call) before fs_edit_impl gets a chance
-        # to check whether old_string is even present in the current file.
+        # to check whether old_str is even present in the current file.
         # A mismatch there means the grant was spent on an attempt that never
         # touched the filesystem -- refund it so a corrected retry doesn't
         # need a brand new ticket/popup. grant_key is None (no-op refund) when
@@ -1760,7 +1851,7 @@ def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None
         err = security.validate_tool_path(path, "write")
         if err:
             return err
-        result = await fs_edit_impl(path, old_string, new_string, security)
+        result = await fs_edit_impl(path, old_str, new_str, security)
         if grant_key and result.startswith("Error:"):
             security.refund_single(path, grant_key)
         return result
@@ -1927,6 +2018,19 @@ def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False, destructiveHint=True))
     async def fs_edit_batch(edits: list[dict]) -> str:
+        """Edita varios archivos en una sola llamada, con un solo ticket y
+        código de confirmación para la lista completa.
+
+        Cada entrada de `edits` usa las claves canónicas:
+        - `path`: ruta del archivo a editar.
+        - `old_str`: texto a buscar (primera ocurrencia si aparece repetido).
+        - `new_str`: texto de reemplazo.
+
+        Una misma ruta repetida con el mismo par `(old_str, new_str)` dedup
+        sin error; con un par distinto, el batch completo se rechaza antes de
+        tocar el disco (instrucción ambigua). Resumen `N/M files edited` con
+        resultados y fallos por archivo.
+        """
         if not edits:
             return "Error: empty edits list"
         # Same reasoning as fs_write_batch: identical repeated edits dedupe
@@ -1934,14 +2038,14 @@ def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None
         deduped, conflicts = _dedupe_edits(edits)
         if conflicts:
             return (
-                "Error: conflicting old_string/new_string for the same path(s) "
+                "Error: conflicting old_str/new_str for the same path(s) "
                 "in this batch (each path can appear once, or repeated with an "
                 "identical edit): " + ", ".join(conflicts)
             )
         paths = [e.get("path", "") for e in deduped]
         # Peek before validate_tool_paths_batch() consumes anything (2026-08-16,
         # same reasoning as fs_edit/fs_edit_advanced/fs_write): a stale
-        # old_string on any single path in the batch must not cost that path's
+        # old_str on any single path in the batch must not cost that path's
         # grant if nothing was actually written for it.
         grant_keys = {p: security.has_single_grant(p, "write") for p in paths}
         err = security.validate_tool_paths_batch(paths, "write")
@@ -2100,9 +2204,20 @@ def register_filesystem_tools(mcp: FastMCP, security: SecurityValidator) -> None
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, idempotentHint=False, destructiveHint=True))
     async def fs_edit_advanced(path: str, edits: list[dict[str, str]],
                                 dry_run: bool = False) -> str:
+        """Aplica una lista ordenada de ediciones sobre un único archivo
+        `path`, con vista previa de diff o dry-run.
+
+        Cada entrada de `edits` usa las claves canónicas:
+        - `old_str`: texto a buscar (primera ocurrencia si aparece repetido).
+        - `new_str`: texto de reemplazo.
+
+        Las ediciones se aplican en orden; una entrada sin `old_str` o con un
+        `old_str` inexistente se rechaza sin tocar el archivo. `dry_run=true`
+        muestra la vista previa sin escribir nada y sin consumir el grant.
+        """
         # Same reasoning as fs_edit (see comment there): validate_tool_path()
         # consumes a SINGLE grant, if that's what authorizes this call, before
-        # any oldText match is checked. Both early-return failure paths below
+        # any old_str match is checked. Both early-return failure paths below
         # (empty edits, and every "Error:" return from the impl) happen after
         # that consumption without ever touching the filesystem.
         grant_key = security.has_single_grant(path, "write")

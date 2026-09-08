@@ -483,7 +483,7 @@ class PermissionManager:
 
         For tools where the wrapper validates (and consumes) permission
         before the impl can check whether the operation is actually possible
-        (e.g. fs_edit's old_string not present in the current file content),
+        (e.g. fs_edit's old_str not present in the current file content),
         a failure there means the grant was spent on an attempt that never
         touched the filesystem. Call only with the exact operation_key
         returned by a prior has_single_grant() call for the same resource --

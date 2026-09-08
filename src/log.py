@@ -45,7 +45,7 @@ def scrub_sensitive_data(data: Any) -> Any:
     una funcion DISTINTA que alimenta un destino DISTINTO (server.log, via
     AuditedFastMCP.call_tool en server.py; audit.py alimenta audit.json).
     Arreglar solo audit.py dejo este gemelo con la misma debilidad: un
-    secreto en un argumento sin nombre sospechoso (ej. fs_edit(new_string=
+    secreto en un argumento sin nombre sospechoso (ej. fs_edit(new_str=
     "API_KEY=...")) se seguia persistiendo en texto plano en server.log.
     Ahora tambien escanea el VALOR de cada string con scan_text() (no solo
     la clave), con el mismo tope de tamano y la misma redaccion de valor

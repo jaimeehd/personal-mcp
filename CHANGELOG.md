@@ -1,3 +1,12 @@
+## [Unreleased]
+
+### Changed — Estandarización de parámetros de edición
+
+- **Contrato canónico `old_str`/`new_str`**: `fs_edit`, `fs_edit_batch` y `fs_edit_advanced` usan `old_str`/`new_str` (forma corta). Referencias históricas a `old_string`/`new_string`/`oldText`/`newText` en entradas previas de este CHANGELOG son narrativa, no contrato — no se reescriben por trazabilidad. `README.md` y `tests/test_log.py` alineados al estándar; guardrail en CI (`lint`) bloquea regresiones fuera de `CHANGELOG.md`.
+- **Contrato documentado en los docstrings**: como el schema MCP no restringe las claves de los dicts de `edits`, `fs_edit`, `fs_edit_batch` y `fs_edit_advanced` ahora declaran explícitamente las claves canónicas (`path`, `old_str`, `new_str`) en su descripción — el único canal que el cliente puede leer para ese tipo de parámetros. Sin aceptar grafías legacy: una clave equivocada falla limpio, no se adivina.
+- **Guard anti-corrupción en `fs_edit_batch_impl`**: un `old_str` vacío se rechaza antes de escribir — `content.replace("", new_str, 1)` insertaría `new_str` al inicio del archivo (corrupción silenciosa). Mismo criterio que el guard ya existente en `fs_edit_advanced_impl`.
+- **Test descartado/actualizado**: `test_edit_batch_diff_timeout_does_not_block_batch` ahora parchea `_git_diff_sync` (antes `_unified_diff_sync`, código muerto desde el engine de git diff → fallo intermitente por timing).
+
 ## [1.4.87] — 2026-09-06
 
 ### Fixed — edición esporádica en CHANGELOG y archivos similares + timeouts en máquina limitada

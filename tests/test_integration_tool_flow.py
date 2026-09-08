@@ -98,11 +98,11 @@ def _make_fs_write(security):
 
 
 def _make_fs_edit(security):
-    async def fs_edit(path: str, old_string: str, new_string: str) -> str:
+    async def fs_edit(path: str, old_str: str, new_str: str) -> str:
         err = security.validate_tool_path(path, "write")
         if err:
             return err
-        return await fs_edit_impl(path, old_string, new_string, security)
+        return await fs_edit_impl(path, old_str, new_str, security)
     return fs_edit
 
 

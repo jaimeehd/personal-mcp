@@ -64,6 +64,69 @@ def test_approve_permanent(perm, temp_home):
     assert rsrc in perm.config.security.paths_allow
 
 
+def _spawn_perm(temp_home, paths_deny):
+    config = AppConfig(
+        security=SecurityConfig(
+            paths_allow=[str(temp_home / "Repos")],
+            paths_deny=paths_deny,
+        ),
+        data_dir=str(temp_home / ".personal-mcp" / "data"),
+        config_path=str(temp_home / ".personal-mcp" / "config.json"),
+    )
+    return PermissionManager(config)
+
+
+def test_spawn_grant_not_swallowed_by_paths_deny(temp_home):
+    """Regresion CI 2026-09-08: con el deny default `**/bin/**`, un grant de
+    sh_spawn sobre `spawn:/usr/bin/echo` se denegaba en el lookup porque el key
+    `spawn:` (identidad de ejecutable, no path) se escaneaba contra paths_deny.
+    En Linux/macOS un sh_spawn de cualquier binario /bin o /usr/bin quedaba
+    imposible de aprobar. La identidad no es un archivo: paths_deny no aplica."""
+    pm = _spawn_perm(temp_home, ["**/node_modules/**", "**/.git/**", "**/bin/**"])
+    pm.grant_direct("spawn:/usr/bin/echo", "execute", GrantLevel.SESSION)
+    assert pm.check_granted("spawn:/usr/bin/echo", "execute") is True
+    assert pm.check_granted("spawn:/bin/ls", "execute") is False
+
+
+def test_spawn_grant_key_not_resolved_against_cwd(temp_home, monkeypatch):
+    """_resolve() sobre un key `spawn:` NO debe prepender el CWD (en POSIX
+    `Path('spawn:/usr/bin/echo').resolve()` quedaria `<cwd>/spawn:/usr/bin/echo`).
+    El key es opaco: grant y check deben coincidir byte-a-byte, sin importar el
+    directorio de trabajo."""
+    pm = _spawn_perm(temp_home, ["**/node_modules/**", "**/.git/**"])
+    monkeypatch.chdir(str(temp_home))
+    pm.grant_direct("spawn:/usr/bin/echo", "execute", GrantLevel.SESSION)
+    assert pm._resolve("spawn:/usr/bin/echo") == "spawn:/usr/bin/echo"
+    assert pm.check_granted("spawn:/usr/bin/echo", "execute") is True
+    assert pm.check_granted("spawn:echo", "execute") is False
+
+
+def test_spawn_single_grant_consumed_once(temp_home):
+    pm = _spawn_perm(temp_home, ["**/node_modules/**", "**/.git/**"])
+    pm.grant_direct("spawn:/usr/bin/echo", "execute", GrantLevel.SINGLE)
+    assert pm.check_granted("spawn:/usr/bin/echo", "execute") is True
+    assert pm.check_granted("spawn:/usr/bin/echo", "execute") is False
+
+
+def test_spawn_grant_via_approve_flow(temp_home):
+    """Flujo real: request + approve del popup con facto key `spawn:/usr/bin/echo`
+    deja un grant consumible a pesar de que el binario vive bajo `**/bin/**`."""
+    pm = _spawn_perm(temp_home, ["**/node_modules/**", "**/.git/**", "**/bin/**"])
+    ticket = pm.request("spawn:/usr/bin/echo", "execute", GrantLevel.SESSION)
+    ok, _msg = pm.approve(ticket.id, confirm_code=ticket.confirm_code)
+    assert ok is True
+    assert pm.check_granted("spawn:/usr/bin/echo", "execute") is True
+
+
+def test_paths_deny_still_wins_for_real_files(temp_home):
+    """El fix de spawn NO afloja paths_deny para archivos reales: un grant de
+    lectura sobre una ruta bajo un patron deny sigue denegado."""
+    pm = _spawn_perm(temp_home, ["**/node_modules/**", "**/.git/**", "**/bin/**"])
+    denied = str(temp_home / "Repos" / ".git" / "config")
+    pm.grant_direct(denied, "read", GrantLevel.SESSION)
+    assert pm.check_granted(denied, "read") is False
+
+
 def test_deny(perm):
     ticket = perm.request("C:\\Windows\\system.ini", "read")
     ok, _msg = perm.deny(ticket.id)

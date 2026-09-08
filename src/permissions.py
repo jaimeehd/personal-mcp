@@ -390,6 +390,17 @@ class PermissionManager:
         return True, f"Denied access to {ticket.resource}"
 
     def _resolve(self, resource: str) -> str:
+        # `spawn:` keys are executable identity (e.g. `spawn:/usr/bin/echo`), not
+        # file paths: Path.resolve() would prepend the CWD on POSIX (and mangle
+        # the colon into a fake path on Windows), corrupting the key that
+        # approve()/grant_direct() store. Return them untouched so grant and
+        # check agree byte-for-byte. No real file can collide: Windows forbids
+        # `:` in filenames, and on POSIX any *path* resource reaching here is an
+        # absolute filesystem path, which never starts with the literal `spawn:`
+        # prefix. The only producer of `spawn:` keys is _check_spawn_permission
+        # in layer2_shell.py.
+        if resource.startswith("spawn:"):
+            return resource
         return str(Path(resource).resolve())
 
     def grant_direct(self, resource: str, operation: str = "read",
@@ -412,6 +423,8 @@ class PermissionManager:
 
     def check_granted(self, resource: str, operation: str, consume: bool = True) -> bool:
         resolved = self._resolve(resource)
+        if resolved.startswith("spawn:"):
+            return self._check_identity_granted(resolved, operation, consume)
         # A deny pattern always wins, even over an existing session/permanent grant
         # or a resource that happens to live under data_dir/paths_allow.
         resolved_norm = resolved.replace("\\", "/")
@@ -430,28 +443,58 @@ class PermissionManager:
                 break
             current = current.parent
         # Single grant: consumed on first use
-        if resolved in self._single_grants:
-            try:
-                ops = self._single_grants[resolved]
-                if operation in ops or (operation not in ("delete", "execute") and "*" in ops):
-                    if not consume:
-                        return True
-                    actual_op = operation if operation in ops else "*"
-                    remaining = ops[actual_op] - 1
-                    if remaining <= 0:
-                        del ops[actual_op]
-                        if not ops:
-                            del self._single_grants[resolved]
-                    else:
-                        ops[actual_op] = remaining
-                    return True
-            except Exception:
-                return False
+        if self._consume_single(resolved, operation, consume):
+            return True
         try:
             Path(resolved).relative_to(Path(self.config.data_dir).resolve())
             return True
         except ValueError:
             pass
+        return False
+
+    def _check_identity_granted(self, key: str, operation: str, consume: bool = True) -> bool:
+        """Grant lookup for non-filesystem identity keys (spawn resources).
+
+        sh_spawn's own 'execute' gate keys grants as `spawn:<executable>` (see
+        _check_spawn_permission in layer2_shell.py). Those keys are executable
+        identity, not file paths:
+          * paths_deny must NOT apply to them: with the default `**/bin/**`
+            pattern, every granted binary under /bin or /usr/bin on
+            Linux/macOS (`spawn:/usr/bin/echo`) would be denied on lookup and
+            the grant made permanently useless -- the deny scan is correct for
+            FILE reads, wrong for executable identity (regression observed on
+            CI, 2026-09-08).
+          * the recursive parent walk is skipped: identity keys carry no
+            hierarchy, so only an exact-key grant may cover one.
+        Session and single grants match exactly like they do for paths below.
+        """
+        if key in self._session_grants:
+            ops = self._session_grants[key]
+            if operation in ops or (operation not in ("delete", "execute") and "*" in ops):
+                return True
+        return self._consume_single(key, operation, consume)
+
+    def _consume_single(self, resolved: str, operation: str, consume: bool) -> bool:
+        """Match + (optionally) consume a SINGLE grant. Shared by the
+        path-based check_granted() and the identity-key _check_identity_granted()."""
+        if resolved not in self._single_grants:
+            return False
+        try:
+            ops = self._single_grants[resolved]
+            if operation in ops or (operation not in ("delete", "execute") and "*" in ops):
+                if not consume:
+                    return True
+                actual_op = operation if operation in ops else "*"
+                remaining = ops[actual_op] - 1
+                if remaining <= 0:
+                    del ops[actual_op]
+                    if not ops:
+                        del self._single_grants[resolved]
+                else:
+                    ops[actual_op] = remaining
+                return True
+        except Exception:
+            return False
         return False
 
     def has_single_grant(self, resource: str, operation: str) -> str | None:
